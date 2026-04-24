@@ -49,6 +49,37 @@ func TestEvaluateAllowsMatchingRule(t *testing.T) {
 	}
 }
 
+func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedPaths: []string{"/api/*"},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"example.com",
+		80,
+		http.MethodGet,
+		"/api/v1/users",
+	)
+	if !decision.Allowed {
+		t.Fatalf("decision.Allowed = false, want true")
+	}
+}
+
 func TestEvaluateDeniesWhenNoPolicyMatches(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name: "allow-web",
@@ -83,6 +114,28 @@ func TestEvaluateDeniesWhenNoPolicyMatches(t *testing.T) {
 	}
 	if decision.TLSMode != "" {
 		t.Fatalf("decision.TLSMode = %q, want empty", decision.TLSMode)
+	}
+}
+
+func TestEvaluateDeniesUnknownIdentity(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(nil, "example.com", 80, http.MethodGet, "/")
+	if decision.Allowed {
+		t.Fatalf("decision.Allowed = true, want false")
 	}
 }
 
@@ -127,6 +180,37 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 	}
 	if decision.Policy != "deny-first" {
 		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "deny-first")
+	}
+}
+
+func TestEvaluateDeniesPortMismatch(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"example.com",
+		80,
+		http.MethodGet,
+		"/",
+	)
+	if decision.Allowed {
+		t.Fatalf("decision.Allowed = true, want false")
+	}
+	if decision.Policy != "allow-web" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "allow-web")
 	}
 }
 
@@ -229,5 +313,33 @@ func TestEvaluateMatchesFQDNGlob(t *testing.T) {
 	}
 	if decision.TLSMode != "passthrough" {
 		t.Fatalf("decision.TLSMode = %q, want %q", decision.TLSMode, "passthrough")
+	}
+}
+
+func TestEvaluateMatchesFQDNCaseInsensitively(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "*.example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"API.EXAMPLE.COM",
+		443,
+		http.MethodGet,
+		"/",
+	)
+	if !decision.Allowed {
+		t.Fatalf("decision.Allowed = false, want true")
 	}
 }

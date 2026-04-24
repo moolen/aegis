@@ -94,12 +94,13 @@ func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 }
 
 func compileRule(cfg config.EgressRuleConfig) (Rule, error) {
-	if _, err := path.Match(cfg.FQDN, ""); err != nil {
+	normalizedFQDN := strings.ToLower(cfg.FQDN)
+	if _, err := path.Match(normalizedFQDN, ""); err != nil {
 		return Rule{}, fmt.Errorf("compile fqdn pattern %q: %w", cfg.FQDN, err)
 	}
 
 	rule := Rule{
-		fqdnPattern: cfg.FQDN,
+		fqdnPattern: normalizedFQDN,
 		ports:       make(map[int]struct{}, len(cfg.Ports)),
 		tlsMode:     cfg.TLS.Mode,
 	}
@@ -129,9 +130,6 @@ func compileHTTPRule(cfg config.HTTPRuleConfig) (*HTTPRule, error) {
 	}
 
 	for _, pattern := range cfg.AllowedPaths {
-		if _, err := path.Match(pattern, ""); err != nil {
-			return nil, fmt.Errorf("compile path pattern %q: %w", pattern, err)
-		}
 		httpRule.allowedPaths = append(httpRule.allowedPaths, pattern)
 	}
 
@@ -158,7 +156,7 @@ func (r Rule) matches(fqdn string, port int, method string, reqPath string) bool
 		return false
 	}
 
-	matched, err := path.Match(r.fqdnPattern, fqdn)
+	matched, err := path.Match(r.fqdnPattern, strings.ToLower(fqdn))
 	if err != nil || !matched {
 		return false
 	}
@@ -179,8 +177,7 @@ func (r HTTPRule) matches(method string, reqPath string) bool {
 
 	if len(r.allowedPaths) > 0 {
 		for _, pattern := range r.allowedPaths {
-			matched, err := path.Match(pattern, reqPath)
-			if err == nil && matched {
+			if matchGlob(pattern, reqPath) {
 				return true
 			}
 		}
@@ -189,6 +186,37 @@ func (r HTTPRule) matches(method string, reqPath string) bool {
 	}
 
 	return true
+}
+
+func matchGlob(pattern string, value string) bool {
+	patternIndex := 0
+	valueIndex := 0
+	starIndex := -1
+	matchIndex := 0
+
+	for valueIndex < len(value) {
+		switch {
+		case patternIndex < len(pattern) && pattern[patternIndex] == value[valueIndex]:
+			patternIndex++
+			valueIndex++
+		case patternIndex < len(pattern) && pattern[patternIndex] == '*':
+			starIndex = patternIndex
+			matchIndex = valueIndex
+			patternIndex++
+		case starIndex != -1:
+			patternIndex = starIndex + 1
+			matchIndex++
+			valueIndex = matchIndex
+		default:
+			return false
+		}
+	}
+
+	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+		patternIndex++
+	}
+
+	return patternIndex == len(pattern)
 }
 
 func cloneStringMap(src map[string]string) map[string]string {
