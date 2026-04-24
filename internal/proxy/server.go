@@ -86,12 +86,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if s.deps.PolicyEngine != nil {
 		reqIdentity := s.resolveRequestIdentity(r)
-		reqPath := r.URL.Path
-		if reqPath == "" {
-			reqPath = "/"
-		}
-
-		decision := s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, reqPath)
+		decision := s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
 		if decision == nil || !decision.Allowed {
 			s.writeError(w, http.StatusForbidden, "request denied by policy", "policy")
 			return
@@ -230,6 +225,19 @@ func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
 	}
 
 	return resolvedIdentity
+}
+
+func requestPolicyPath(r *http.Request) string {
+	if r.URL == nil {
+		return "/"
+	}
+
+	reqPath := r.URL.EscapedPath()
+	if reqPath == "" {
+		return "/"
+	}
+
+	return reqPath
 }
 
 func (s *Server) resolveAddr(ctx context.Context, host string, port int) (string, error) {

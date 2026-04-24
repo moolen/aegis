@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -240,6 +241,163 @@ func TestProxyDeniesHTTPRequestsWithoutHittingUpstream(t *testing.T) {
 	}
 }
 
+func TestProxyEvaluatesPolicyAgainstEscapedPath(t *testing.T) {
+	var seenPolicyPath string
+	var upstreamRequestURI string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				seenPolicyPath = reqPath
+				if reqPath == "/api%2Fsecret" {
+					return &policy.Decision{Allowed: true}
+				}
+				return &policy.Decision{}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/api%%2Fsecret", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if seenPolicyPath != "/api%2Fsecret" {
+		t.Fatalf("policy path = %q, want %q", seenPolicyPath, "/api%2Fsecret")
+	}
+	if upstreamRequestURI != "/api%2Fsecret" {
+		t.Fatalf("upstream request URI = %q, want %q", upstreamRequestURI, "/api%2Fsecret")
+	}
+}
+
+func TestProxyRemoteAddrFeedsIdentityResolver(t *testing.T) {
+	var resolvedIP net.IP
+	var policyIdentity *identity.Identity
+
+	server := NewServer(Dependencies{
+		IdentityResolver: &spyIdentityResolver{
+			resolve: func(ip net.IP) (*identity.Identity, error) {
+				resolvedIP = append(net.IP(nil), ip...)
+				return &identity.Identity{Labels: map[string]string{"app": "web"}}, nil
+			},
+		},
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				policyIdentity = id
+				return &policy.Decision{}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.RemoteAddr = "203.0.113.9:4567"
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusForbidden)
+	}
+	if resolvedIP == nil || !resolvedIP.Equal(net.ParseIP("203.0.113.9")) {
+		t.Fatalf("resolved IP = %v, want %v", resolvedIP, net.ParseIP("203.0.113.9"))
+	}
+	if policyIdentity == nil || policyIdentity.Labels["app"] != "web" {
+		t.Fatalf("policy identity = %#v, want app=web", policyIdentity)
+	}
+}
+
+func TestProxyFallsBackToUnknownIdentity(t *testing.T) {
+	tests := []struct {
+		name           string
+		remoteAddr     string
+		resolver       *spyIdentityResolver
+		wantCalls      int
+		wantUnknownApp bool
+	}{
+		{
+			name:           "malformed remote addr",
+			remoteAddr:     "malformed",
+			resolver:       &spyIdentityResolver{},
+			wantCalls:      0,
+			wantUnknownApp: true,
+		},
+		{
+			name:       "resolver error",
+			remoteAddr: "203.0.113.10:4567",
+			resolver: &spyIdentityResolver{
+				resolve: func(net.IP) (*identity.Identity, error) {
+					return nil, errors.New("boom")
+				},
+			},
+			wantCalls:      1,
+			wantUnknownApp: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var policyIdentity *identity.Identity
+
+			server := NewServer(Dependencies{
+				IdentityResolver: tc.resolver,
+				PolicyEngine: &policyEngineStub{
+					evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+						policyIdentity = id
+						return &policy.Decision{}
+					},
+				},
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+			req.RemoteAddr = tc.remoteAddr
+
+			resp := httptest.NewRecorder()
+			server.Handler().ServeHTTP(resp, req)
+
+			if resp.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", resp.Code, http.StatusForbidden)
+			}
+			if tc.resolver.calls != tc.wantCalls {
+				t.Fatalf("resolver calls = %d, want %d", tc.resolver.calls, tc.wantCalls)
+			}
+			if policyIdentity == nil {
+				t.Fatal("policy identity = nil, want unknown identity")
+			}
+			if policyIdentity.Source != "unknown" || policyIdentity.Name != "unknown" {
+				t.Fatalf("policy identity = %#v, want unknown identity", policyIdentity)
+			}
+			if tc.wantUnknownApp && policyIdentity.Labels["app"] != "" {
+				t.Fatalf("policy identity labels = %#v, want missing app label", policyIdentity.Labels)
+			}
+		})
+	}
+}
+
 func TestProxyEstablishesConnectTunnel(t *testing.T) {
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -324,6 +482,109 @@ func TestProxyEstablishesConnectTunnel(t *testing.T) {
 	<-done
 }
 
+func TestProxyConnectIgnoresIdentityResolverAndPolicyEngine(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 4)
+		_, _ = io.ReadFull(conn, buf)
+		_, _ = conn.Write([]byte("pong"))
+	}()
+
+	identityResolver := &spyIdentityResolver{
+		resolve: func(net.IP) (*identity.Identity, error) {
+			t.Fatal("identity resolver should not be called for CONNECT")
+			return nil, nil
+		},
+	}
+	policyEngine := &policyEngineStub{
+		evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+			t.Fatal("policy engine should not be called for CONNECT")
+			return nil
+		},
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{
+				"tunnel.internal": {net.ParseIP("127.0.0.1")},
+			},
+		},
+		IdentityResolver: identityResolver,
+		PolicyEngine:     policyEngine,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	proxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	target := fmt.Sprintf("tunnel.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:"))
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		t.Fatalf("Fprintf() error = %v", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString() error = %v", err)
+	}
+	if !strings.Contains(statusLine, "200") {
+		t.Fatalf("unexpected status line %q", statusLine)
+	}
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("reading headers: %v", readErr)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	reply := make([]byte, 4)
+	if _, err := io.ReadFull(reader, reply); err != nil {
+		t.Fatalf("ReadFull() error = %v", err)
+	}
+	if string(reply) != "pong" {
+		t.Fatalf("reply = %q, want %q", string(reply), "pong")
+	}
+
+	if identityResolver.calls != 0 {
+		t.Fatalf("identity resolver calls = %d, want 0", identityResolver.calls)
+	}
+	if policyEngine.calls != 0 {
+		t.Fatalf("policy engine calls = %d, want 0", policyEngine.calls)
+	}
+
+	<-done
+}
+
 type staticResolver struct {
 	lookup map[string][]net.IP
 }
@@ -362,6 +623,32 @@ func (r staticIdentityResolver) Resolve(net.IP) (*identity.Identity, error) {
 		return nil, r.err
 	}
 	return r.identity, nil
+}
+
+type spyIdentityResolver struct {
+	calls   int
+	resolve func(net.IP) (*identity.Identity, error)
+}
+
+func (r *spyIdentityResolver) Resolve(ip net.IP) (*identity.Identity, error) {
+	r.calls++
+	if r.resolve == nil {
+		return nil, nil
+	}
+	return r.resolve(ip)
+}
+
+type policyEngineStub struct {
+	calls    int
+	evaluate func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision
+}
+
+func (p *policyEngineStub) Evaluate(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+	p.calls++
+	if p.evaluate == nil {
+		return &policy.Decision{}
+	}
+	return p.evaluate(id, fqdn, port, method, reqPath)
 }
 
 func mustPolicyEngine(t *testing.T, cfgs []config.PolicyConfig) *policy.Engine {
