@@ -17,10 +17,11 @@ const (
 )
 
 type Config struct {
-	Proxy    ProxyConfig    `yaml:"proxy"`
-	Metrics  MetricsConfig  `yaml:"metrics"`
-	DNS      DNSConfig      `yaml:"dns"`
-	Policies []PolicyConfig `yaml:"policies"`
+	Proxy     ProxyConfig     `yaml:"proxy"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	DNS       DNSConfig       `yaml:"dns"`
+	Policies  []PolicyConfig  `yaml:"policies"`
+	Discovery DiscoveryConfig `yaml:"discovery"`
 }
 
 type ProxyConfig struct {
@@ -35,6 +36,17 @@ type DNSConfig struct {
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 	Timeout  time.Duration `yaml:"timeout"`
 	Servers  []string      `yaml:"servers"`
+}
+
+type DiscoveryConfig struct {
+	Kubernetes []KubernetesDiscoveryConfig `yaml:"kubernetes"`
+}
+
+type KubernetesDiscoveryConfig struct {
+	Name         string         `yaml:"name"`
+	Kubeconfig   string         `yaml:"kubeconfig"`
+	Namespaces   []string       `yaml:"namespaces"`
+	ResyncPeriod *time.Duration `yaml:"resyncPeriod"`
 }
 
 type PolicyConfig struct {
@@ -150,6 +162,19 @@ func (c Config) Validate() error {
 					}
 				}
 			}
+		}
+	}
+	for i, discovery := range c.Discovery.Kubernetes {
+		if strings.TrimSpace(discovery.Name) == "" {
+			return fmt.Errorf("discovery.kubernetes[%d].name is required", i)
+		}
+		for j, namespace := range discovery.Namespaces {
+			if strings.TrimSpace(namespace) == "" {
+				return fmt.Errorf("discovery.kubernetes[%d].namespaces[%d] must not be empty", i, j)
+			}
+		}
+		if discovery.ResyncPeriod != nil && *discovery.ResyncPeriod <= 0 {
+			return fmt.Errorf("discovery.kubernetes[%d].resyncPeriod must be greater than zero", i)
 		}
 	}
 

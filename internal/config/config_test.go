@@ -186,3 +186,105 @@ policies:
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestLoadValidKubernetesDiscoveryConfig(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-example
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+discovery:
+  kubernetes:
+    - name: cluster-a
+      kubeconfig: /tmp/kubeconfig
+      namespaces: ["default", "prod"]
+      resyncPeriod: 30s
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Discovery.Kubernetes) != 1 {
+		t.Fatalf("kubernetes entries = %d, want 1", len(cfg.Discovery.Kubernetes))
+	}
+	entry := cfg.Discovery.Kubernetes[0]
+	if entry.Name != "cluster-a" {
+		t.Fatalf("entry name = %q, want %q", entry.Name, "cluster-a")
+	}
+	if entry.ResyncPeriod == nil {
+		t.Fatal("entry resyncPeriod is nil, want 30s")
+	}
+	if *entry.ResyncPeriod != 30*time.Second {
+		t.Fatalf("entry resyncPeriod = %s, want %s", *entry.ResyncPeriod, 30*time.Second)
+	}
+}
+
+func TestLoadRejectsKubernetesDiscoveryWithoutName(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-example
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+discovery:
+  kubernetes:
+    - kubeconfig: /tmp/kubeconfig
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsEmptyKubernetesNamespaceEntry(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-example
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+discovery:
+  kubernetes:
+    - name: cluster-a
+      namespaces: ["default", ""]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsNonPositiveKubernetesResyncPeriod(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-example
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+discovery:
+  kubernetes:
+    - name: cluster-a
+      resyncPeriod: 0s
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
