@@ -9,8 +9,14 @@ go test -tags e2e ./e2e/...
 ```
 
 The current suite exercises the real `aegis` binary as a subprocess and covers
-reload-sensitive runtime behavior that is awkward to prove in package-local
-tests.
+reload-sensitive runtime behavior plus the core HTTPS protocol matrix that is
+awkward to prove in package-local tests:
+
+- `CONNECT` passthrough allow and deny behavior
+- no-SNI and SNI-mismatch blocking
+- MITM certificate issuance and inner HTTP policy enforcement
+- client trust-store failure when the proxy CA is missing
+- upstream TLS validation failure on the MITM path
 
 The deployment-facing Kind/Helm smoke tests run with:
 

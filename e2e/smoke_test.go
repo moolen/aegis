@@ -133,9 +133,16 @@ type aegisProcess struct {
 func startAegis(t *testing.T, configPath string) *aegisProcess {
 	t.Helper()
 
+	return startAegisWithEnv(t, configPath, nil)
+}
+
+func startAegisWithEnv(t *testing.T, configPath string, extraEnv []string) *aegisProcess {
+	t.Helper()
+
 	binary, repoRoot := ensureBinaryBuilt(t)
 	cmd := exec.Command(binary, "-config", configPath)
 	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), extraEnv...)
 	var logBuf bytes.Buffer
 	cmd.Stdout = &logBuf
 	cmd.Stderr = &logBuf

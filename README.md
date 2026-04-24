@@ -115,13 +115,16 @@ Available commands:
 - `make fmt`
 - `make docker`
 
-`make e2e` runs the lightweight tagged cross-process smoke suite in `e2e/`.
-It exercises the built `aegis` binary as a subprocess, including `SIGHUP`
-reload behavior and MITM CA rotation metrics. The heavier cluster-aware suite
-from the original design doc is split out into `make e2e-kind`, which creates
-a Kind cluster, loads a locally built Aegis image, installs the shipped Helm
-chart, and verifies in-cluster proxy allow/deny behavior. `make e2e-kind`
-requires Docker, `kind`, `kubectl`, and `helm`.
+`make e2e` runs the lightweight tagged cross-process suite in `e2e/`.
+It exercises the built `aegis` binary as a subprocess across reload-sensitive
+runtime behavior and the main HTTPS protocol matrix: passthrough allow/deny,
+no-SNI and SNI-mismatch blocking, MITM certificate generation, MITM inner HTTP
+policy denial, client trust failure, and upstream TLS validation. The heavier
+cluster-aware suite from the original design doc is split out into
+`make e2e-kind`, which creates a Kind cluster, loads a locally built Aegis
+image, installs the shipped Helm chart, and verifies in-cluster proxy
+allow/deny behavior. `make e2e-kind` requires Docker, `kind`, `kubectl`, and
+`helm`.
 
 The local Go cache is not committed. If you need an isolated cache, use:
 
