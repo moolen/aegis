@@ -41,6 +41,10 @@ var newKubernetesPodSource = func(restCfg *rest.Config) (KubernetesPodSource, er
 	return coreV1PodSource{client: clientset.CoreV1()}, nil
 }
 
+var newKubernetesProvider = func(cfg KubernetesProviderConfig, logger *slog.Logger) (StartableResolver, error) {
+	return NewKubernetesProvider(cfg, logger)
+}
+
 func defaultKubernetesRuntimeProviderDeps() kubernetesRuntimeProviderDeps {
 	return kubernetesRuntimeProviderDeps{
 		loadRESTConfig:         loadRESTConfig,
@@ -88,7 +92,7 @@ func newKubernetesRuntimeProvider(cfg config.KubernetesDiscoveryConfig, logger *
 		resyncPeriod = *cfg.ResyncPeriod
 	}
 
-	provider, err := NewKubernetesProvider(KubernetesProviderConfig{
+	provider, err := newKubernetesProvider(KubernetesProviderConfig{
 		Name:         cfg.Name,
 		Source:       source,
 		Namespaces:   cfg.Namespaces,

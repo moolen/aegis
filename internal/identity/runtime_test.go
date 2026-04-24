@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,14 +20,17 @@ import (
 func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) {
 	originalLoadRESTConfig := loadRESTConfig
 	originalNewKubernetesPodSource := newKubernetesPodSource
+	originalNewKubernetesProvider := newKubernetesProvider
 	t.Cleanup(func() {
 		loadRESTConfig = originalLoadRESTConfig
 		newKubernetesPodSource = originalNewKubernetesPodSource
+		newKubernetesProvider = originalNewKubernetesProvider
 	})
 
 	restCfg := &rest.Config{Host: "https://cluster-a"}
 	var loadedPath string
 	var sourceConfig *rest.Config
+	var providerCfg KubernetesProviderConfig
 	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
 		loadedPath = kubeconfig
 		return restCfg, nil
@@ -36,6 +38,10 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	newKubernetesPodSource = func(cfg *rest.Config) (KubernetesPodSource, error) {
 		sourceConfig = cfg
 		return fakeRuntimePodSource{}, nil
+	}
+	newKubernetesProvider = func(cfg KubernetesProviderConfig, logger *slog.Logger) (StartableResolver, error) {
+		providerCfg = cfg
+		return &KubernetesProvider{}, nil
 	}
 
 	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
@@ -55,35 +61,51 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	if handle.Name != "cluster-a" || handle.Kind != "kubernetes" {
 		t.Fatalf("handle = %#v, want kubernetes/cluster-a", handle)
 	}
-
-	provider, ok := handle.Provider.(*KubernetesProvider)
-	if !ok {
-		t.Fatalf("handle.Provider type = %T, want *KubernetesProvider", handle.Provider)
+	if providerCfg.Name != "cluster-a" {
+		t.Fatalf("provider config name = %q, want cluster-a", providerCfg.Name)
 	}
-	if len(provider.informers) != 1 {
-		t.Fatalf("len(provider.informers) = %d, want 1", len(provider.informers))
+	if providerCfg.Source == nil {
+		t.Fatal("provider config source = nil, want pod source")
 	}
-	if got := informerDurationField(t, provider.informers[0], "defaultEventHandlerResyncPeriod"); got != time.Minute {
-		t.Fatalf("defaultEventHandlerResyncPeriod = %s, want %s", got, time.Minute)
+	if len(providerCfg.Namespaces) != 1 || providerCfg.Namespaces[0] != "default" {
+		t.Fatalf("provider config namespaces = %#v, want []string{\"default\"}", providerCfg.Namespaces)
+	}
+	if providerCfg.ResyncPeriod != time.Minute {
+		t.Fatalf("provider config resync = %s, want %s", providerCfg.ResyncPeriod, time.Minute)
 	}
 }
 
-func TestNewKubernetesRuntimeProviderUsesExplicitKubeconfig(t *testing.T) {
+func TestExportedNewKubernetesRuntimeProviderForwardsExplicitResyncPeriod(t *testing.T) {
+	originalLoadRESTConfig := loadRESTConfig
+	originalNewKubernetesPodSource := newKubernetesPodSource
+	originalNewKubernetesProvider := newKubernetesProvider
+	t.Cleanup(func() {
+		loadRESTConfig = originalLoadRESTConfig
+		newKubernetesPodSource = originalNewKubernetesPodSource
+		newKubernetesProvider = originalNewKubernetesProvider
+	})
+
+	explicitResync := 15 * time.Second
 	var loadedPath string
-	handle, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+	var providerCfg KubernetesProviderConfig
+	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
+		loadedPath = kubeconfig
+		return &rest.Config{}, nil
+	}
+	newKubernetesPodSource = func(*rest.Config) (KubernetesPodSource, error) {
+		return fakeRuntimePodSource{}, nil
+	}
+	newKubernetesProvider = func(cfg KubernetesProviderConfig, logger *slog.Logger) (StartableResolver, error) {
+		providerCfg = cfg
+		return &KubernetesProvider{}, nil
+	}
+
+	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
 		Name:         "cluster-a",
 		Kubeconfig:   "/tmp/a.kubeconfig",
 		Namespaces:   []string{"default"},
-		ResyncPeriod: func() *time.Duration { d := 15 * time.Second; return &d }(),
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
-		loadRESTConfig: func(kubeconfig string) (*rest.Config, error) {
-			loadedPath = kubeconfig
-			return &rest.Config{}, nil
-		},
-		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
-			return fakeRuntimePodSource{}, nil
-		},
-	})
+		ResyncPeriod: &explicitResync,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewKubernetesRuntimeProvider() error = %v", err)
 	}
@@ -92,6 +114,9 @@ func TestNewKubernetesRuntimeProviderUsesExplicitKubeconfig(t *testing.T) {
 	}
 	if handle.Name != "cluster-a" || handle.Kind != "kubernetes" {
 		t.Fatalf("handle = %#v, want kubernetes/cluster-a", handle)
+	}
+	if providerCfg.ResyncPeriod != explicitResync {
+		t.Fatalf("provider config resync = %s, want %s", providerCfg.ResyncPeriod, explicitResync)
 	}
 }
 
@@ -162,23 +187,4 @@ func (fakeRuntimeNamespaceClient) List(context.Context, metav1.ListOptions) (*co
 
 func (fakeRuntimeNamespaceClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
 	return watch.NewRaceFreeFake(), nil
-}
-
-func informerDurationField(t *testing.T, informer interface{}, field string) time.Duration {
-	t.Helper()
-
-	value := reflect.ValueOf(informer)
-	if value.Kind() != reflect.Pointer {
-		t.Fatalf("informer value kind = %s, want pointer", value.Kind())
-	}
-
-	fieldValue := value.Elem().FieldByName(field)
-	if !fieldValue.IsValid() {
-		t.Fatalf("informer field %q not found", field)
-	}
-	if fieldValue.Type() != reflect.TypeFor[time.Duration]() {
-		t.Fatalf("informer field %q type = %s, want time.Duration", field, fieldValue.Type())
-	}
-
-	return time.Duration(fieldValue.Int())
 }
