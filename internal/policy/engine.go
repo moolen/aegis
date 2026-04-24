@@ -2,7 +2,6 @@ package policy
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/moolen/aegis/internal/config"
@@ -95,8 +94,8 @@ func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 
 func compileRule(cfg config.EgressRuleConfig) (Rule, error) {
 	normalizedFQDN := strings.ToLower(cfg.FQDN)
-	if _, err := path.Match(normalizedFQDN, ""); err != nil {
-		return Rule{}, fmt.Errorf("compile fqdn pattern %q: %w", cfg.FQDN, err)
+	if err := validateFQDNPattern(normalizedFQDN); err != nil {
+		return Rule{}, err
 	}
 
 	rule := Rule{
@@ -159,8 +158,7 @@ func (r Rule) matches(fqdn string, port int, method string, reqPath string) bool
 		return false
 	}
 
-	matched, err := path.Match(r.fqdnPattern, strings.ToLower(fqdn))
-	if err != nil || !matched {
+	if !matchGlob(r.fqdnPattern, strings.ToLower(fqdn)) {
 		return false
 	}
 
@@ -192,8 +190,16 @@ func (r HTTPRule) matches(method string, reqPath string) bool {
 }
 
 func validatePathPattern(pattern string) error {
+	return validateStarOnlyGlob("path", pattern)
+}
+
+func validateFQDNPattern(pattern string) error {
+	return validateStarOnlyGlob("fqdn", pattern)
+}
+
+func validateStarOnlyGlob(kind string, pattern string) error {
 	if strings.ContainsAny(pattern, "[]?\\") {
-		return fmt.Errorf("unsupported path glob %q: only '*' wildcards are allowed", pattern)
+		return fmt.Errorf("unsupported %s glob %q: only '*' wildcards are allowed", kind, pattern)
 	}
 
 	return nil

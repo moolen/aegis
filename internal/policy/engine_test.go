@@ -55,6 +55,41 @@ func TestNewEngineRejectsUnsupportedPathMetacharacters(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsUnsupportedFQDNMetacharacters(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{name: "question mark", pattern: "api?.example.com"},
+		{name: "character class", pattern: "api[0-9].example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewEngine([]config.PolicyConfig{{
+				Name: "allow-web",
+				IdentitySelector: config.IdentitySelectorConfig{
+					MatchLabels: map[string]string{"app": "web"},
+				},
+				Egress: []config.EgressRuleConfig{{
+					FQDN:  tt.pattern,
+					Ports: []int{80},
+					TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				}},
+			}})
+			if err == nil {
+				t.Fatal("NewEngine() error = nil, want invalid fqdn pattern error")
+			}
+			if !strings.Contains(err.Error(), "unsupported fqdn glob") {
+				t.Fatalf("NewEngine() error = %q, want unsupported fqdn glob", err)
+			}
+			if !strings.Contains(err.Error(), "only '*'") {
+				t.Fatalf("NewEngine() error = %q, want '*' only contract", err)
+			}
+		})
+	}
+}
+
 func TestEvaluateAllowsMatchingRule(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name: "allow-web",
@@ -124,6 +159,37 @@ func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 	)
 	if !decision.Allowed {
 		t.Fatalf("decision.Allowed = false, want true")
+	}
+}
+
+func TestEvaluateAllowsFQDNStarMatchCaseInsensitive(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "*.example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"API.Example.COM",
+		443,
+		http.MethodGet,
+		"/",
+	)
+	if !decision.Allowed {
+		t.Fatalf("decision.Allowed = false, want true")
+	}
+	if decision.Rule != "*.example.com" {
+		t.Fatalf("decision.Rule = %q, want %q", decision.Rule, "*.example.com")
 	}
 }
 

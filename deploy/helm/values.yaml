@@ -19,6 +19,21 @@ config:
     cache_ttl: 30s
     timeout: 5s
     servers: []
+  policies:
+    - name: allow-example
+      identitySelector:
+        matchLabels: {}
+      egress:
+        - fqdn: "example.com"
+          ports: [80]
+          tls:
+            mode: mitm
+          http:
+            allowedMethods: ["GET"]
+            allowedPaths: ["/*"]
 
-# Bootstrap status: this chart deploys the generic HTTP/CONNECT proxy only.
-# Identity-aware discovery, policy enforcement, and TLS inspection land later.
+# Bootstrap status: this chart now renders a runnable default policy config.
+# Plain HTTP requests are policy-enforced, CONNECT remains a basic tunnel, and
+# real workload identity discovery/TLS inspection are not wired yet.
+# Until identity discovery lands, shipped defaults should keep
+# identitySelector.matchLabels empty.

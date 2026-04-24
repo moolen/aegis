@@ -110,3 +110,79 @@ policies:
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestLoadRejectsEmptyPolicyFQDN(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "   "
+        ports: [80]
+        tls:
+          mode: mitm
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsInvalidPolicyPort(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [70000]
+        tls:
+          mode: mitm
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsEmptyHTTPMethodEntry(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET", ""]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsEmptyHTTPPathEntry(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+        http:
+          allowedPaths: ["/api/*", " "]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
