@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
+
+	appmetrics "github.com/moolen/aegis/internal/metrics"
 )
 
 func TestKubernetesProviderResolvesCreatedPod(t *testing.T) {
@@ -207,6 +210,40 @@ func TestKubernetesProviderIgnoresPodsWithoutIP(t *testing.T) {
 	})
 
 	requireConsistentlyNoIdentity(t, provider, "10.0.0.60")
+}
+
+func TestKubernetesProviderUpdatesIdentityMapGauge(t *testing.T) {
+	source := newFakePodSource()
+	provider := startTestKubernetesProvider(t, source, "default")
+
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	provider.AttachMetrics(m)
+
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_map_entries", map[string]string{"provider": "cluster-a", "kind": "kubernetes"}); got != 0 {
+		t.Fatalf("initial map gauge = %v, want 0", got)
+	}
+
+	source.CreatePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "web",
+			Namespace: "default",
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.70",
+		},
+	})
+
+	requireEventuallyIdentity(t, provider, "10.0.0.70")
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_map_entries", map[string]string{"provider": "cluster-a", "kind": "kubernetes"}); got != 1 {
+		t.Fatalf("map gauge after add = %v, want 1", got)
+	}
+
+	source.DeletePod("default", "web")
+	requireEventuallyNoIdentity(t, provider, "10.0.0.70")
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_map_entries", map[string]string{"provider": "cluster-a", "kind": "kubernetes"}); got != 0 {
+		t.Fatalf("map gauge after delete = %v, want 0", got)
+	}
 }
 
 func TestKubernetesProviderStartCancelsRunContextOnStartupTimeout(t *testing.T) {

@@ -13,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
+
+	appmetrics "github.com/moolen/aegis/internal/metrics"
 )
 
 type KubernetesPodNamespaceClient interface {
@@ -35,6 +37,7 @@ type KubernetesProvider struct {
 	name      string
 	informers []cache.SharedIndexInformer
 	logger    *slog.Logger
+	metrics   *appmetrics.Metrics
 
 	mu           sync.RWMutex
 	byIP         map[string]*Identity
@@ -142,7 +145,16 @@ func (p *KubernetesProvider) Start(ctx context.Context, startupTimeout time.Dura
 		return fmt.Errorf("sync kubernetes provider caches")
 	}
 
+	p.reportMapSize()
+
 	return nil
+}
+
+func (p *KubernetesProvider) AttachMetrics(m *appmetrics.Metrics) {
+	p.mu.Lock()
+	p.metrics = m
+	p.mu.Unlock()
+	p.reportMapSize()
 }
 
 func (p *KubernetesProvider) runContext() context.Context {
@@ -225,6 +237,7 @@ func (p *KubernetesProvider) onDelete(obj interface{}) {
 		}
 	}
 	delete(p.ipByPod, key)
+	p.reportMapSizeLocked()
 }
 
 func buildIdentity(providerName string, pod *corev1.Pod) *Identity {
@@ -288,11 +301,13 @@ func (p *KubernetesProvider) upsertPod(pod *corev1.Pod, previousIP string) {
 	}
 	if newIP == "" {
 		delete(p.ipByPod, key)
+		p.reportMapSizeLocked()
 		return
 	}
 
 	p.byIP[newIP] = buildIdentity(p.name, pod)
 	p.ipByPod[key] = newIP
+	p.reportMapSizeLocked()
 }
 
 func podKey(pod *corev1.Pod) string {
@@ -309,4 +324,17 @@ type watchListSemanticsUnsupported struct{}
 
 func (watchListSemanticsUnsupported) IsWatchListSemanticsUnSupported() bool {
 	return true
+}
+
+func (p *KubernetesProvider) reportMapSize() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	p.reportMapSizeLocked()
+}
+
+func (p *KubernetesProvider) reportMapSizeLocked() {
+	if p.metrics == nil {
+		return
+	}
+	p.metrics.IdentityMapEntries.WithLabelValues(p.name, "kubernetes").Set(float64(len(p.byIP)))
 }

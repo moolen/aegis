@@ -263,6 +263,9 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 		if m != nil {
 			m.DiscoveryProviderStartsTotal.WithLabelValues(handle.Name, handle.Kind).Inc()
 		}
+		if attachable, ok := handle.Provider.(interface{ AttachMetrics(*appmetrics.Metrics) }); ok {
+			attachable.AttachMetrics(m)
+		}
 
 		if err := handle.Provider.Start(ctx, discoveryProviderStartupTimeout); err != nil {
 			logger.Warn("discovery provider start failed", "provider", handle.Name, "kind", handle.Kind, "error", err)
@@ -293,6 +296,9 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 
 		if m != nil {
 			m.DiscoveryProviderStartsTotal.WithLabelValues(handle.Name, handle.Kind).Inc()
+		}
+		if attachable, ok := handle.Provider.(interface{ AttachMetrics(*appmetrics.Metrics) }); ok {
+			attachable.AttachMetrics(m)
 		}
 
 		if err := handle.Provider.Start(ctx, discoveryProviderStartupTimeout); err != nil {

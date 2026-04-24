@@ -8,6 +8,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	appmetrics "github.com/moolen/aegis/internal/metrics"
 )
 
 func TestEC2ProviderResolvesDiscoveredInstance(t *testing.T) {
@@ -194,6 +198,45 @@ func TestEC2ProviderStartReturnsWhenLifecycleCancelled(t *testing.T) {
 	}
 }
 
+func TestEC2ProviderUpdatesIdentityMapGauge(t *testing.T) {
+	source := newFakeEC2InstanceSource()
+	source.SetInstances([]EC2Instance{{
+		ID:        "i-abc123",
+		PrivateIP: "10.0.0.80",
+	}})
+
+	provider, err := NewEC2Provider(EC2ProviderConfig{
+		Name:         "production-ec2",
+		Source:       source,
+		PollInterval: 10 * time.Millisecond,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewEC2Provider() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	provider.AttachMetrics(m)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := provider.Start(ctx, time.Second); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	requireEventuallyEC2Identity(t, provider, "10.0.0.80")
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_map_entries", map[string]string{"provider": "production-ec2", "kind": "ec2"}); got != 1 {
+		t.Fatalf("map gauge after start = %v, want 1", got)
+	}
+
+	source.SetInstances(nil)
+	requireEventuallyNoEC2Identity(t, provider, "10.0.0.80")
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_map_entries", map[string]string{"provider": "production-ec2", "kind": "ec2"}); got != 0 {
+		t.Fatalf("map gauge after refresh = %v, want 0", got)
+	}
+}
+
 func requireEventuallyEC2Identity(t *testing.T, provider *EC2Provider, ip string) *Identity {
 	t.Helper()
 
@@ -252,6 +295,48 @@ func (s *fakeEC2InstanceSource) Instances(context.Context, []EC2TagFilter) ([]EC
 	defer s.mu.Unlock()
 
 	return cloneEC2Instances(s.instances), nil
+}
+
+func gatheredGaugeValue(t *testing.T, reg *prometheus.Registry, metricName string, labels map[string]string) float64 {
+	t.Helper()
+
+	metricFamilies, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+
+	for _, family := range metricFamilies {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			pairs := metric.GetLabel()
+			if len(pairs) != len(labels) {
+				continue
+			}
+
+			matched := true
+			for _, pair := range pairs {
+				if labels[pair.GetName()] != pair.GetValue() {
+					matched = false
+					break
+				}
+			}
+
+			if !matched {
+				continue
+			}
+
+			if metric.GetGauge() == nil {
+				t.Fatalf("metric gauge = nil for %s", metricName)
+			}
+			return metric.GetGauge().GetValue()
+		}
+		t.Fatalf("metric %s with labels %v not found", metricName, labels)
+	}
+
+	t.Fatalf("metric family %s not found", metricName)
+	return 0
 }
 
 type blockingEC2InstanceSource struct {

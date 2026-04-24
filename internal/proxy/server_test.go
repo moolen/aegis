@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
@@ -181,6 +182,116 @@ func TestProxyAllowsHTTPRequestsWhenPolicyMatches(t *testing.T) {
 	}
 	if upstreamHits.Load() != 1 {
 		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+}
+
+func TestProxyRecordsHTTPDecisionAndPolicyDurationMetrics(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		DestinationGuard: mustDestinationGuard(t, nil, []string{"127.0.0.0/8"}),
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{"app": "web"}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "allow",
+		"policy":   "allow-web",
+		"reason":   "policy_allowed",
+	}); got != 1 {
+		t.Fatalf("decision metric = %v, want 1", got)
+	}
+	if got := histogramSampleCount(t, reg, "aegis_policy_evaluation_duration_seconds", map[string]string{"protocol": "http"}); got != 1 {
+		t.Fatalf("policy evaluation count = %d, want 1", got)
+	}
+}
+
+func TestProxyRecordsDeniedHTTPDecisionMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "jobs"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{80},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "deny",
+		"policy":   "none",
+		"reason":   "policy_denied",
+	}); got != 1 {
+		t.Fatalf("decision metric = %v, want 1", got)
 	}
 }
 
@@ -1107,4 +1218,43 @@ func mustDestinationGuard(t *testing.T, allowedHostPatterns []string, allowedCID
 		t.Fatalf("NewDestinationGuard() error = %v", err)
 	}
 	return guard
+}
+
+func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if !hasPrometheusLabels(metric.GetLabel(), labels) {
+				continue
+			}
+			if metric.GetHistogram() == nil {
+				t.Fatalf("metric %q is not a histogram", name)
+			}
+			return metric.GetHistogram().GetSampleCount()
+		}
+	}
+
+	t.Fatalf("metric %q with labels %#v not found", name, labels)
+	return 0
+}
+
+func hasPrometheusLabels(pairs []*dto.LabelPair, want map[string]string) bool {
+	if len(pairs) != len(want) {
+		return false
+	}
+	for _, pair := range pairs {
+		if want[pair.GetName()] != pair.GetValue() {
+			return false
+		}
+	}
+	return true
 }

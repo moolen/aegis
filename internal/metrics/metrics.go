@@ -4,13 +4,16 @@ import "github.com/prometheus/client_golang/prometheus"
 
 type Metrics struct {
 	RequestsTotal                  *prometheus.CounterVec
+	RequestDecisionsTotal          *prometheus.CounterVec
 	ErrorsTotal                    *prometheus.CounterVec
 	RequestDuration                *prometheus.HistogramVec
+	PolicyEvaluationDuration       *prometheus.HistogramVec
 	DNSResolutionsTotal            *prometheus.CounterVec
 	DNSDuration                    prometheus.Histogram
 	DiscoveryProviderStartsTotal   *prometheus.CounterVec
 	DiscoveryProviderFailuresTotal *prometheus.CounterVec
 	DiscoveryProvidersActive       prometheus.Gauge
+	IdentityMapEntries             *prometheus.GaugeVec
 	IdentityResolutionsTotal       *prometheus.CounterVec
 	IdentityOverlapsTotal          *prometheus.CounterVec
 	ProxyProtocolConnectionsTotal  *prometheus.CounterVec
@@ -20,6 +23,7 @@ type Metrics struct {
 	MITMCACyclesTotal              *prometheus.CounterVec
 	MITMCertificateCacheEntries    prometheus.Gauge
 	MITMCertificateCacheEvictions  *prometheus.CounterVec
+	UpstreamTLSErrorsTotal         *prometheus.CounterVec
 	TLSSNIMissingTotal             prometheus.Counter
 }
 
@@ -31,6 +35,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Total number of proxied requests.",
 			},
 			[]string{"method", "protocol"},
+		),
+		RequestDecisionsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_request_decisions_total",
+				Help: "Total number of proxy allow or deny decisions.",
+			},
+			[]string{"protocol", "action", "policy", "reason"},
 		),
 		ErrorsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -46,6 +57,14 @@ func New(reg prometheus.Registerer) *Metrics {
 				Buckets: prometheus.DefBuckets,
 			},
 			[]string{"method", "protocol"},
+		),
+		PolicyEvaluationDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "aegis_policy_evaluation_duration_seconds",
+				Help:    "Policy evaluation duration.",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"protocol"},
 		),
 		DNSResolutionsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -80,6 +99,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Name: "aegis_discovery_providers_active",
 				Help: "Number of active discovery providers.",
 			},
+		),
+		IdentityMapEntries: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_identity_map_entries",
+				Help: "Current number of IP to identity mappings per provider.",
+			},
+			[]string{"provider", "kind"},
 		),
 		IdentityResolutionsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -143,6 +169,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"reason"},
 		),
+		UpstreamTLSErrorsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_upstream_tls_errors_total",
+				Help: "Total number of upstream TLS errors by stage.",
+			},
+			[]string{"stage"},
+		),
 		TLSSNIMissingTotal: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Name: "aegis_tls_sni_missing_total",
@@ -153,13 +186,16 @@ func New(reg prometheus.Registerer) *Metrics {
 
 	reg.MustRegister(
 		m.RequestsTotal,
+		m.RequestDecisionsTotal,
 		m.ErrorsTotal,
 		m.RequestDuration,
+		m.PolicyEvaluationDuration,
 		m.DNSResolutionsTotal,
 		m.DNSDuration,
 		m.DiscoveryProviderStartsTotal,
 		m.DiscoveryProviderFailuresTotal,
 		m.DiscoveryProvidersActive,
+		m.IdentityMapEntries,
 		m.IdentityResolutionsTotal,
 		m.IdentityOverlapsTotal,
 		m.ProxyProtocolConnectionsTotal,
@@ -169,6 +205,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.MITMCACyclesTotal,
 		m.MITMCertificateCacheEntries,
 		m.MITMCertificateCacheEvictions,
+		m.UpstreamTLSErrorsTotal,
 		m.TLSSNIMissingTotal,
 		prometheus.NewGoCollector(),
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),

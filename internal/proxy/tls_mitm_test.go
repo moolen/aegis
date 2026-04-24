@@ -237,6 +237,75 @@ func TestProxyConnectMITMRequiresCAConfiguration(t *testing.T) {
 	}
 }
 
+func TestProxyConnectMITMRecordsUpstreamTLSErrorMetric(t *testing.T) {
+	ca := newMITMTestCA(t)
+	otherCA := newMITMTestCA(t)
+	mitmEngine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{otherCA.issueServerCertificate(t, "tunnel.internal")},
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		DestinationGuard: mustDestinationGuard(t, nil, []string{"127.0.0.0/8"}),
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-tls-http",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Listener.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		MITM: mitmEngine,
+		UpstreamTLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    ca.roots,
+		},
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	clientTLSConn := mustMITMConnectClient(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%d", mustPort(t, upstream.Listener.Addr().String())), ca.roots)
+	defer clientTLSConn.Close()
+
+	if _, err := fmt.Fprintf(clientTLSConn, "GET /allowed HTTP/1.1\r\nHost: tunnel.internal\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("Fprintf() error = %v", err)
+	}
+
+	_ = clientTLSConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, _ = clientTLSConn.Read(buf)
+
+	if got := counterValue(t, reg, "aegis_upstream_tls_errors_total", map[string]string{"stage": "handshake"}); got != 1 {
+		t.Fatalf("upstream tls error metric = %v, want 1", got)
+	}
+}
+
 func TestMITMEngineCertificateForSNICachesCertificates(t *testing.T) {
 	ca := newMITMTestCA(t)
 	engine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))

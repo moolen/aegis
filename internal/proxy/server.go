@@ -92,10 +92,16 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reqIdentity := identity.Unknown()
+	var decision *policy.Decision
 	if s.deps.PolicyEngine != nil {
-		reqIdentity := s.resolveRequestIdentity(r)
-		decision := s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
+		reqIdentity = s.resolveRequestIdentity(r)
+		decision = s.evaluatePolicy("http", func() *policy.Decision {
+			return s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
+		})
 		if decision == nil || !decision.Allowed {
+			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "policy_denied")
+			s.logRequestDecision(slog.LevelWarn, "http", "deny", "policy_denied", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r))
 			s.writeError(w, http.StatusForbidden, "request denied by policy", "policy")
 			return
 		}
@@ -104,12 +110,16 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
 		if IsDestinationBlocked(err) {
+			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "destination_blocked")
+			s.logRequestDecision(slog.LevelWarn, "http", "deny", "destination_blocked", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r))
 			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
 			return
 		}
 		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
 		return
 	}
+	s.recordRequestDecision("http", "allow", decisionPolicyName(decision), "policy_allowed")
+	s.logRequestDecision(slog.LevelInfo, "http", "allow", "policy_allowed", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r))
 
 	outReq := r.Clone(r.Context())
 	outReq.RequestURI = ""
@@ -155,9 +165,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var decision *policy.Decision
 	if s.deps.PolicyEngine != nil {
 		reqIdentity = s.resolveRequestIdentity(r)
-		decision = s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
+		decision = s.evaluatePolicy("connect", func() *policy.Decision {
+			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
+		})
 		if decision == nil || !decision.Allowed {
 			s.recordConnectResult(connectDecisionMode(decision), "policy_denied")
+			s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "policy_denied")
+			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "policy_denied", reqIdentity, host, port, decision, http.MethodConnect, "")
 			s.writeError(w, http.StatusForbidden, "connect target denied by policy", "policy")
 			return
 		}
@@ -174,6 +188,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if IsDestinationBlocked(err) {
 			s.recordConnectResult(mode, "destination_blocked")
+			s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "destination_blocked")
+			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "destination_blocked", reqIdentity, host, port, decision, http.MethodConnect, "")
 			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
 			return
 		}
@@ -234,6 +250,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if decision != nil && decision.TLSMode == "mitm" {
+		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), "policy_allowed")
+		s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "")
 		s.handleConnectMITM(clientConn, buf.Reader, clientHello, upstreamConn, reqIdentity, sni, port)
 		return
 	}
@@ -246,6 +264,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.recordConnectResult("passthrough", "established")
+	s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), "policy_allowed")
+	s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "")
 	s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
 }
 
@@ -287,13 +307,19 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 		}
 
 		if s.deps.PolicyEngine != nil {
-			decision := s.deps.PolicyEngine.Evaluate(reqIdentity, serverName, port, req.Method, requestPolicyPath(req))
+			decision := s.evaluatePolicy("mitm_http", func() *policy.Decision {
+				return s.deps.PolicyEngine.Evaluate(reqIdentity, serverName, port, req.Method, requestPolicyPath(req))
+			})
 			if decision == nil || !decision.Allowed {
 				s.recordPolicyError()
+				s.recordRequestDecision("mitm_http", "deny", decisionPolicyName(decision), "policy_denied")
+				s.logRequestDecision(slog.LevelWarn, "mitm_http", "deny", "policy_denied", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req))
 				s.deps.Logger.Warn("connect mitm request denied by policy", "server_name", serverName, "method", req.Method, "path", requestPolicyPath(req))
 				_ = writeMITMErrorResponse(clientTLSConn, http.StatusForbidden, "request denied by policy")
 				return
 			}
+			s.recordRequestDecision("mitm_http", "allow", decisionPolicyName(decision), "policy_allowed")
+			s.logRequestDecision(slog.LevelInfo, "mitm_http", "allow", "policy_allowed", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req))
 		}
 
 		req.RequestURI = ""
@@ -363,6 +389,7 @@ func (s *Server) handshakeUpstreamTLS(upstreamConn net.Conn, serverName string) 
 
 	tlsConn := tls.Client(upstreamConn, cfg)
 	if err := tlsConn.Handshake(); err != nil {
+		s.recordUpstreamTLSError("handshake")
 		upstreamConn.Close()
 		return nil, err
 	}
@@ -397,6 +424,13 @@ func (s *Server) recordTLSError() {
 	s.deps.Metrics.ErrorsTotal.WithLabelValues("tls").Inc()
 }
 
+func (s *Server) recordUpstreamTLSError(stage string) {
+	if s.deps.Metrics == nil {
+		return
+	}
+	s.deps.Metrics.UpstreamTLSErrorsTotal.WithLabelValues(stage).Inc()
+}
+
 func (s *Server) recordPolicyError() {
 	if s.deps.Metrics == nil {
 		return
@@ -419,6 +453,22 @@ func (s *Server) recordMITMCertificateResult(result string) {
 	}
 
 	s.deps.Metrics.MITMCertificatesTotal.WithLabelValues(result).Inc()
+}
+
+func (s *Server) recordRequestDecision(protocol string, action string, policyName string, reason string) {
+	if s.deps.Metrics == nil {
+		return
+	}
+	s.deps.Metrics.RequestDecisionsTotal.WithLabelValues(protocol, action, normalizePolicyName(policyName), reason).Inc()
+}
+
+func (s *Server) evaluatePolicy(protocol string, fn func() *policy.Decision) *policy.Decision {
+	start := time.Now()
+	decision := fn()
+	if s.deps.Metrics != nil {
+		s.deps.Metrics.PolicyEvaluationDuration.WithLabelValues(protocol).Observe(time.Since(start).Seconds())
+	}
+	return decision
 }
 
 func (s *Server) recordTLSConnectBlock(err error) {
@@ -609,4 +659,46 @@ func connectResolvedMode(decision *policy.Decision) string {
 		return "passthrough"
 	}
 	return decision.TLSMode
+}
+
+func (s *Server) logRequestDecision(level slog.Level, protocol string, action string, reason string, reqIdentity *identity.Identity, host string, port int, decision *policy.Decision, method string, path string) {
+	fields := []any{
+		"protocol", protocol,
+		"action", action,
+		"reason", reason,
+		"host", host,
+		"port", port,
+		"policy", normalizePolicyName(decisionPolicyName(decision)),
+	}
+	if method != "" {
+		fields = append(fields, "method", method)
+	}
+	if path != "" {
+		fields = append(fields, "path", path)
+	}
+	if decision != nil && decision.TLSMode != "" {
+		fields = append(fields, "tls_mode", decision.TLSMode)
+	}
+	if reqIdentity != nil {
+		fields = append(fields,
+			"identity_source", reqIdentity.Source,
+			"identity_provider", reqIdentity.Provider,
+			"identity_name", reqIdentity.Name,
+		)
+	}
+	s.deps.Logger.Log(context.Background(), level, "request decision", fields...)
+}
+
+func decisionPolicyName(decision *policy.Decision) string {
+	if decision == nil {
+		return ""
+	}
+	return decision.Policy
+}
+
+func normalizePolicyName(name string) string {
+	if name == "" {
+		return "none"
+	}
+	return name
 }

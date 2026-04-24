@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	appmetrics "github.com/moolen/aegis/internal/metrics"
 )
 
 type EC2TagFilter struct {
@@ -39,6 +41,7 @@ type EC2Provider struct {
 	tagFilters   []EC2TagFilter
 	pollInterval time.Duration
 	logger       *slog.Logger
+	metrics      *appmetrics.Metrics
 
 	state atomic.Value
 
@@ -103,8 +106,14 @@ func (p *EC2Provider) Start(ctx context.Context, startupTimeout time.Duration) e
 	}
 
 	go p.poll(runCtx)
+	p.reportMapSize()
 
 	return nil
+}
+
+func (p *EC2Provider) AttachMetrics(m *appmetrics.Metrics) {
+	p.metrics = m
+	p.reportMapSize()
 }
 
 func (p *EC2Provider) Resolve(ip net.IP) (*Identity, error) {
@@ -161,6 +170,7 @@ func (p *EC2Provider) refresh(ctx context.Context) error {
 	}
 
 	p.state.Store(next)
+	p.reportMapSizeWithSize(len(next))
 	return nil
 }
 
@@ -199,4 +209,16 @@ func cloneEC2Filters(filters []EC2TagFilter) []EC2TagFilter {
 	}
 
 	return cloned
+}
+
+func (p *EC2Provider) reportMapSize() {
+	current, _ := p.state.Load().(map[string]*Identity)
+	p.reportMapSizeWithSize(len(current))
+}
+
+func (p *EC2Provider) reportMapSizeWithSize(size int) {
+	if p.metrics == nil {
+		return
+	}
+	p.metrics.IdentityMapEntries.WithLabelValues(p.name, "ec2").Set(float64(size))
 }
