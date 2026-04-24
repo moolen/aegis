@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,8 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	})
 
 	restCfg := &rest.Config{Host: "https://cluster-a"}
+	source := &fakeRuntimePodSource{}
+	resolver := &fakeRuntimeResolver{}
 	var loadedPath string
 	var sourceConfig *rest.Config
 	var providerCfg KubernetesProviderConfig
@@ -37,11 +40,11 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	}
 	newKubernetesPodSource = func(cfg *rest.Config) (KubernetesPodSource, error) {
 		sourceConfig = cfg
-		return fakeRuntimePodSource{}, nil
+		return source, nil
 	}
 	newKubernetesProvider = func(cfg KubernetesProviderConfig, logger *slog.Logger) (StartableResolver, error) {
 		providerCfg = cfg
-		return &KubernetesProvider{}, nil
+		return resolver, nil
 	}
 
 	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
@@ -64,14 +67,17 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	if providerCfg.Name != "cluster-a" {
 		t.Fatalf("provider config name = %q, want cluster-a", providerCfg.Name)
 	}
-	if providerCfg.Source == nil {
-		t.Fatal("provider config source = nil, want pod source")
+	if providerCfg.Source != source {
+		t.Fatalf("provider config source = %p, want %p", providerCfg.Source, source)
 	}
 	if len(providerCfg.Namespaces) != 1 || providerCfg.Namespaces[0] != "default" {
 		t.Fatalf("provider config namespaces = %#v, want []string{\"default\"}", providerCfg.Namespaces)
 	}
 	if providerCfg.ResyncPeriod != time.Minute {
 		t.Fatalf("provider config resync = %s, want %s", providerCfg.ResyncPeriod, time.Minute)
+	}
+	if handle.Provider != resolver {
+		t.Fatalf("handle provider = %p, want %p", handle.Provider, resolver)
 	}
 }
 
@@ -187,4 +193,14 @@ func (fakeRuntimeNamespaceClient) List(context.Context, metav1.ListOptions) (*co
 
 func (fakeRuntimeNamespaceClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
 	return watch.NewRaceFreeFake(), nil
+}
+
+type fakeRuntimeResolver struct{}
+
+func (*fakeRuntimeResolver) Start(context.Context) error {
+	return nil
+}
+
+func (*fakeRuntimeResolver) Resolve(net.IP) (*Identity, error) {
+	return nil, nil
 }
