@@ -75,6 +75,10 @@ TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
 NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
 the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
 discovery changes without restarting the process, send `SIGHUP` to Aegis.
+By default, Aegis also blocks loopback, private, and link-local upstream
+addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
+`dns.rebindingProtection.allowedHostPatterns` or
+`dns.rebindingProtection.allowedCIDRs` for explicit internal destinations.
 
 Send traffic through the proxy:
 

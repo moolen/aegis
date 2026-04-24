@@ -333,6 +333,8 @@ dns:
   cache_ttl: 30s
   timeout: 5s
   servers: []
+  rebindingProtection:
+    allowedCIDRs: ["127.0.0.0/8"]
 policies:
   - name: allow-http
     identitySelector:
@@ -360,6 +362,8 @@ dns:
   cache_ttl: 30s
   timeout: 5s
   servers: []
+  rebindingProtection:
+    allowedCIDRs: ["127.0.0.0/8"]
 policies:
   - name: allow-mitm
     identitySelector:

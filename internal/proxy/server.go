@@ -36,6 +36,7 @@ type PolicyEngine interface {
 
 type Dependencies struct {
 	Resolver          Resolver
+	DestinationGuard  *DestinationGuard
 	IdentityResolver  IdentityResolver
 	PolicyEngine      PolicyEngine
 	MITM              *MITMEngine
@@ -102,6 +103,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
+		if IsDestinationBlocked(err) {
+			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
+			return
+		}
 		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
 		return
 	}
@@ -167,6 +172,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
+		if IsDestinationBlocked(err) {
+			s.recordConnectResult(mode, "destination_blocked")
+			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
+			return
+		}
 		s.recordConnectResult(mode, "dns_error")
 		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
 		return
@@ -467,6 +477,11 @@ func requestPolicyPath(r *http.Request) string {
 
 func (s *Server) resolveAddr(ctx context.Context, host string, port int) (string, error) {
 	if ip := net.ParseIP(host); ip != nil {
+		if s.deps.DestinationGuard != nil {
+			if err := s.deps.DestinationGuard.ValidateDirectIP(host, ip); err != nil {
+				return "", err
+			}
+		}
 		return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
 	}
 	if s.deps.Resolver == nil {
@@ -480,8 +495,15 @@ func (s *Server) resolveAddr(ctx context.Context, host string, port int) (string
 	if len(ips) == 0 {
 		return "", fmt.Errorf("no IPs returned for %s", host)
 	}
+	selectedIP := ips[0]
+	if s.deps.DestinationGuard != nil {
+		selectedIP, err = s.deps.DestinationGuard.SelectResolvedIP(host, ips)
+		if err != nil {
+			return "", err
+		}
+	}
 
-	return net.JoinHostPort(ips[0].String(), strconv.Itoa(port)), nil
+	return net.JoinHostPort(selectedIP.String(), strconv.Itoa(port)), nil
 }
 
 func (s *Server) writeError(w http.ResponseWriter, status int, message string, stage string) {

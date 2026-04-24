@@ -16,6 +16,12 @@ dns:
   cache_ttl: 30s
   timeout: 5s
   servers: []
+  rebindingProtection:
+    # Allow internal destinations explicitly when you need them. By default,
+    # Aegis blocks loopback, private, and link-local upstream addresses to
+    # reduce DNS rebinding and SSRF risk.
+    allowedHostPatterns: []
+    allowedCIDRs: []
 discovery:
   kubernetes: []
   # kubernetes:

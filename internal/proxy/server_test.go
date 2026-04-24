@@ -184,6 +184,132 @@ func TestProxyAllowsHTTPRequestsWhenPolicyMatches(t *testing.T) {
 	}
 }
 
+func TestProxyBlocksHTTPRequestsToDirectLoopbackIP(t *testing.T) {
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		DestinationGuard: mustDestinationGuard(t, nil, nil),
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-all",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "*",
+				Ports: []int{8080},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, "http://127.0.0.1:8080/", nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestProxyBlocksDNSRebindingToPrivateAddress(t *testing.T) {
+	dnsCalls := 0
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: countingResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+			calls:  &dnsCalls,
+		},
+		DestinationGuard: mustDestinationGuard(t, nil, nil),
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{"app": "web"}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{80},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if dnsCalls != 1 {
+		t.Fatalf("dnsCalls = %d, want 1", dnsCalls)
+	}
+}
+
+func TestProxyAllowsExplicitlyAllowlistedInternalHostname(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"service.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		DestinationGuard: mustDestinationGuard(t, []string{"service.internal"}, nil),
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{"app": "web"}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "service.internal",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://service.internal%s/", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+}
+
 func TestProxyDeniesHTTPRequestsWithoutHittingUpstream(t *testing.T) {
 	var upstreamHits atomic.Int32
 	dnsCalls := 0
@@ -770,6 +896,42 @@ func TestProxyConnectBlocksSNIMismatch(t *testing.T) {
 	}
 }
 
+func TestProxyConnectBlocksResolvedPrivateAddress(t *testing.T) {
+	dnsCalls := 0
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: countingResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+			calls:  &dnsCalls,
+		},
+		DestinationGuard: mustDestinationGuard(t, nil, nil),
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-all",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, "example.com:443")
+	defer conn.Close()
+
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString() error = %v", err)
+	}
+	if !strings.Contains(statusLine, "403") {
+		t.Fatalf("unexpected status line %q", statusLine)
+	}
+	if dnsCalls != 1 {
+		t.Fatalf("dnsCalls = %d, want 1", dnsCalls)
+	}
+}
+
 type staticResolver struct {
 	lookup map[string][]net.IP
 }
@@ -935,4 +1097,14 @@ func mustPort(t *testing.T, hostport string) int {
 	}
 
 	return port
+}
+
+func mustDestinationGuard(t *testing.T, allowedHostPatterns []string, allowedCIDRs []string) *DestinationGuard {
+	t.Helper()
+
+	guard, err := NewDestinationGuard(allowedHostPatterns, allowedCIDRs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewDestinationGuard() error = %v", err)
+	}
+	return guard
 }

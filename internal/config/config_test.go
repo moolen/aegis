@@ -77,6 +77,55 @@ unknown: true
 	}
 }
 
+func TestLoadValidDNSRebindingProtectionConfig(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  rebindingProtection:
+    allowedHostPatterns: ["*.svc.cluster.local"]
+    allowedCIDRs: ["127.0.0.0/8", "10.0.0.0/8"]
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.DNS.RebindingProtection.AllowedHostPatterns) != 1 {
+		t.Fatalf("allowed host patterns = %d, want 1", len(cfg.DNS.RebindingProtection.AllowedHostPatterns))
+	}
+	if len(cfg.DNS.RebindingProtection.AllowedCIDRs) != 2 {
+		t.Fatalf("allowed CIDRs = %d, want 2", len(cfg.DNS.RebindingProtection.AllowedCIDRs))
+	}
+}
+
+func TestLoadRejectsEmptyDNSRebindingProtectionHostPattern(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  rebindingProtection:
+    allowedHostPatterns: [" "]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsInvalidDNSRebindingProtectionCIDR(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  rebindingProtection:
+    allowedCIDRs: ["not-a-cidr"]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestLoadValidPolicyConfig(t *testing.T) {
 	cfg, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"

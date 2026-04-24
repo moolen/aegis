@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -45,9 +46,15 @@ type MetricsConfig struct {
 }
 
 type DNSConfig struct {
-	CacheTTL time.Duration `yaml:"cache_ttl"`
-	Timeout  time.Duration `yaml:"timeout"`
-	Servers  []string      `yaml:"servers"`
+	CacheTTL            time.Duration             `yaml:"cache_ttl"`
+	Timeout             time.Duration             `yaml:"timeout"`
+	Servers             []string                  `yaml:"servers"`
+	RebindingProtection RebindingProtectionConfig `yaml:"rebindingProtection"`
+}
+
+type RebindingProtectionConfig struct {
+	AllowedHostPatterns []string `yaml:"allowedHostPatterns"`
+	AllowedCIDRs        []string `yaml:"allowedCIDRs"`
 }
 
 type DiscoveryConfig struct {
@@ -155,6 +162,22 @@ func (c Config) Validate() error {
 	for i, server := range c.DNS.Servers {
 		if server == "" {
 			return fmt.Errorf("dns.servers[%d] must not be empty", i)
+		}
+	}
+	for i, pattern := range c.DNS.RebindingProtection.AllowedHostPatterns {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("dns.rebindingProtection.allowedHostPatterns[%d] must not be empty", i)
+		}
+		if strings.ContainsAny(pattern, "[]?\\") {
+			return fmt.Errorf("dns.rebindingProtection.allowedHostPatterns[%d] only supports '*' wildcards", i)
+		}
+	}
+	for i, cidr := range c.DNS.RebindingProtection.AllowedCIDRs {
+		if strings.TrimSpace(cidr) == "" {
+			return fmt.Errorf("dns.rebindingProtection.allowedCIDRs[%d] must not be empty", i)
+		}
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return fmt.Errorf("dns.rebindingProtection.allowedCIDRs[%d] must be a valid CIDR: %w", i, err)
 		}
 	}
 	for i, policy := range c.Policies {

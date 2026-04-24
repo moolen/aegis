@@ -275,6 +275,8 @@ config:
     cache_ttl: 30s
     timeout: 5s
     servers: []
+    rebindingProtection:
+      allowedHostPatterns: ["*.svc.cluster.local"]
   policies:
     - name: allow-echo
       identitySelector:

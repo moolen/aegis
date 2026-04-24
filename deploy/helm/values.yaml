@@ -31,6 +31,9 @@ config:
     cache_ttl: 30s
     timeout: 5s
     servers: []
+    rebindingProtection:
+      allowedHostPatterns: []
+      allowedCIDRs: []
   policies:
     - name: allow-example
       identitySelector:

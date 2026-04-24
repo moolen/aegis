@@ -167,6 +167,14 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		Timeout:  cfg.DNS.Timeout,
 		Servers:  cfg.DNS.Servers,
 	}, nil, logger, m)
+	destinationGuard, err := proxy.NewDestinationGuard(
+		cfg.DNS.RebindingProtection.AllowedHostPatterns,
+		cfg.DNS.RebindingProtection.AllowedCIDRs,
+		logger,
+	)
+	if err != nil {
+		return proxy.Dependencies{}, fmt.Errorf("build destination guard: %w", err)
+	}
 	engine, err := policy.NewEngine(cfg.Policies)
 	if err != nil {
 		return proxy.Dependencies{}, fmt.Errorf("compile policy engine: %w", err)
@@ -186,6 +194,7 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 
 	return proxy.Dependencies{
 		Resolver:         resolver,
+		DestinationGuard: destinationGuard,
 		IdentityResolver: identityResolver,
 		PolicyEngine:     engine,
 		MITM:             mitmEngine,
