@@ -23,6 +23,15 @@ Planned but not implemented yet:
 - MITM certificate generation and HTTP inspection inside TLS.
 - Proxy Protocol v2 and production hardening features.
 
+Current runtime limitation:
+
+- Plain HTTP policy enforcement is active, but the shipped runtime does not yet
+  wire a real identity resolver.
+- Until identity discovery lands, policy matching in the running process is
+  effectively limited to policies with empty/default
+  `identitySelector.matchLabels`; non-empty selectors only work in tests or with
+  additional runtime wiring.
+
 ## Quick Start
 
 Build and run:
@@ -71,7 +80,9 @@ mounted at `/etc/aegis/aegis.yaml`.
 
 These deployment files are scaffolding only. They reflect the current runtime:
 plain HTTP requests are policy-enforced, while `CONNECT` remains a basic tunnel
-without identity-aware TLS inspection or interception support.
+without identity-aware TLS inspection or interception support. The runtime also
+does not yet resolve real workload identity, so plain HTTP policy matches are
+effectively limited to empty/default selectors.
 
 ## Design Docs
 

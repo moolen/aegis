@@ -37,6 +37,10 @@ func run() int {
 		logger.Error("load config failed", "path", configPath, "error", err)
 		return 1
 	}
+	if len(cfg.Policies) == 0 {
+		logger.Error("load config failed", "error", "policies must contain at least one entry to enable plain HTTP policy enforcement safely")
+		return 1
+	}
 
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
