@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,28 +18,21 @@ import (
 )
 
 func TestNewKubernetesRuntimeProviderUsesExplicitKubeconfig(t *testing.T) {
-	restoreLoad := loadRESTConfig
-	restoreSource := newKubernetesPodSource
-	t.Cleanup(func() {
-		loadRESTConfig = restoreLoad
-		newKubernetesPodSource = restoreSource
-	})
-
 	var loadedPath string
-	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
-		loadedPath = kubeconfig
-		return &rest.Config{}, nil
-	}
-	newKubernetesPodSource = func(*rest.Config) (KubernetesPodSource, error) {
-		return fakeRuntimePodSource{}, nil
-	}
-
-	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+	handle, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
 		Name:         "cluster-a",
 		Kubeconfig:   "/tmp/a.kubeconfig",
 		Namespaces:   []string{"default"},
 		ResyncPeriod: func() *time.Duration { d := 15 * time.Second; return &d }(),
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		loadRESTConfig: func(kubeconfig string) (*rest.Config, error) {
+			loadedPath = kubeconfig
+			return &rest.Config{}, nil
+		},
+		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
+			return fakeRuntimePodSource{}, nil
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewKubernetesRuntimeProvider() error = %v", err)
 	}
@@ -51,45 +45,53 @@ func TestNewKubernetesRuntimeProviderUsesExplicitKubeconfig(t *testing.T) {
 }
 
 func TestNewKubernetesRuntimeProviderFallsBackToInClusterConfig(t *testing.T) {
-	restoreLoad := loadRESTConfig
-	restoreSource := newKubernetesPodSource
-	t.Cleanup(func() {
-		loadRESTConfig = restoreLoad
-		newKubernetesPodSource = restoreSource
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		loadRESTConfig: func(kubeconfig string) (*rest.Config, error) {
+			if kubeconfig != "" {
+				t.Fatalf("loadRESTConfig kubeconfig = %q, want empty", kubeconfig)
+			}
+			return &rest.Config{}, nil
+		},
+		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
+			return fakeRuntimePodSource{}, nil
+		},
 	})
-
-	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
-		if kubeconfig != "" {
-			t.Fatalf("loadRESTConfig kubeconfig = %q, want empty", kubeconfig)
-		}
-		return &rest.Config{}, nil
-	}
-	newKubernetesPodSource = func(*rest.Config) (KubernetesPodSource, error) {
-		return fakeRuntimePodSource{}, nil
-	}
-
-	_, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewKubernetesRuntimeProvider() error = %v", err)
 	}
 }
 
-func TestNewKubernetesRuntimeProviderPropagatesSourceErrors(t *testing.T) {
-	restoreLoad := loadRESTConfig
-	restoreSource := newKubernetesPodSource
-	t.Cleanup(func() {
-		loadRESTConfig = restoreLoad
-		newKubernetesPodSource = restoreSource
+func TestNewKubernetesRuntimeProviderPropagatesLoadRESTConfigErrors(t *testing.T) {
+	loadErr := errors.New("missing credentials")
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		loadRESTConfig: func(string) (*rest.Config, error) {
+			return nil, loadErr
+		},
+		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
+			t.Fatal("newKubernetesPodSource should not be called when rest config load fails")
+			return nil, nil
+		},
 	})
-
-	loadRESTConfig = func(string) (*rest.Config, error) {
-		return &rest.Config{}, nil
+	if err == nil {
+		t.Fatal("expected construction error")
 	}
-	newKubernetesPodSource = func(*rest.Config) (KubernetesPodSource, error) {
-		return nil, errors.New("no cluster")
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("error = %v, want wrapped load error", err)
 	}
+	if !strings.Contains(err.Error(), "load kubernetes rest config for cluster-a") {
+		t.Fatalf("error = %q, want contextual load message", err)
+	}
+}
 
-	_, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func TestNewKubernetesRuntimeProviderPropagatesSourceErrors(t *testing.T) {
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		loadRESTConfig: func(string) (*rest.Config, error) {
+			return &rest.Config{}, nil
+		},
+		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
+			return nil, errors.New("no cluster")
+		},
+	})
 	if err == nil {
 		t.Fatal("expected construction error")
 	}

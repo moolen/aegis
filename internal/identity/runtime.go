@@ -20,20 +20,28 @@ type StartableResolver interface {
 	Resolve(net.IP) (*Identity, error)
 }
 
-var loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return rest.InClusterConfig()
+type kubernetesRuntimeProviderDeps struct {
+	loadRESTConfig         func(string) (*rest.Config, error)
+	newKubernetesPodSource func(*rest.Config) (KubernetesPodSource, error)
 }
 
-var newKubernetesPodSource = func(restCfg *rest.Config) (KubernetesPodSource, error) {
-	clientset, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, err
-	}
+func defaultKubernetesRuntimeProviderDeps() kubernetesRuntimeProviderDeps {
+	return kubernetesRuntimeProviderDeps{
+		loadRESTConfig: func(kubeconfig string) (*rest.Config, error) {
+			if kubeconfig != "" {
+				return clientcmd.BuildConfigFromFlags("", kubeconfig)
+			}
+			return rest.InClusterConfig()
+		},
+		newKubernetesPodSource: func(restCfg *rest.Config) (KubernetesPodSource, error) {
+			clientset, err := kubernetes.NewForConfig(restCfg)
+			if err != nil {
+				return nil, err
+			}
 
-	return coreV1PodSource{client: clientset.CoreV1()}, nil
+			return coreV1PodSource{client: clientset.CoreV1()}, nil
+		},
+	}
 }
 
 type RuntimeProvider struct {
@@ -51,26 +59,30 @@ func (s coreV1PodSource) Pods(namespace string) KubernetesPodNamespaceClient {
 }
 
 func NewKubernetesRuntimeProvider(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (RuntimeProvider, error) {
-	restCfg, err := loadRESTConfig(cfg.Kubeconfig)
+	return newKubernetesRuntimeProvider(cfg, logger, defaultKubernetesRuntimeProviderDeps())
+}
+
+func newKubernetesRuntimeProvider(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger, deps kubernetesRuntimeProviderDeps) (RuntimeProvider, error) {
+	restCfg, err := deps.loadRESTConfig(cfg.Kubeconfig)
 	if err != nil {
 		return RuntimeProvider{}, fmt.Errorf("load kubernetes rest config for %s: %w", cfg.Name, err)
 	}
 
-	source, err := newKubernetesPodSource(restCfg)
+	source, err := deps.newKubernetesPodSource(restCfg)
 	if err != nil {
 		return RuntimeProvider{}, fmt.Errorf("build kubernetes pod source for %s: %w", cfg.Name, err)
 	}
 
-	resync := time.Minute
+	var resyncPeriod time.Duration
 	if cfg.ResyncPeriod != nil {
-		resync = *cfg.ResyncPeriod
+		resyncPeriod = *cfg.ResyncPeriod
 	}
 
 	provider, err := NewKubernetesProvider(KubernetesProviderConfig{
 		Name:         cfg.Name,
 		Source:       source,
 		Namespaces:   cfg.Namespaces,
-		ResyncPeriod: resync,
+		ResyncPeriod: resyncPeriod,
 	}, logger)
 	if err != nil {
 		return RuntimeProvider{}, err
