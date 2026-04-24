@@ -26,6 +26,8 @@ var newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, lo
 	return identity.NewKubernetesRuntimeProvider(cfg, logger)
 }
 
+var discoveryProviderStartupTimeout = 30 * time.Second
+
 func main() {
 	os.Exit(run())
 }
@@ -47,6 +49,9 @@ func run() int {
 		return 1
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
 	resolver := dns.NewResolver(dns.Config{
@@ -59,7 +64,7 @@ func run() int {
 		logger.Error("compile policy engine failed", "error", err)
 		return 1
 	}
-	identityResolver, err := buildIdentityResolver(context.Background(), cfg.Discovery, logger, m)
+	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
 	if err != nil {
 		logger.Error("build identity resolver failed", "error", err)
 		return 1
@@ -91,9 +96,6 @@ func run() int {
 	go serve(logger, "metrics", metricsSrv, errCh)
 
 	logger.Info("aegis started", "proxy_listen", cfg.Proxy.Listen, "metrics_listen", cfg.Metrics.Listen)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	select {
 	case err := <-errCh:
@@ -144,10 +146,6 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 
 	active := make([]identity.ProviderHandle, 0, len(cfg.Kubernetes))
 	for _, kubeCfg := range cfg.Kubernetes {
-		if m != nil {
-			m.DiscoveryProviderStartsTotal.WithLabelValues(kubeCfg.Name, "kubernetes").Inc()
-		}
-
 		handle, err := newKubernetesRuntimeProvider(kubeCfg, logger)
 		if err != nil {
 			logger.Warn("discovery provider build failed", "provider", kubeCfg.Name, "kind", "kubernetes", "error", err)
@@ -157,7 +155,11 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 			continue
 		}
 
-		if err := handle.Provider.Start(ctx); err != nil {
+		if m != nil {
+			m.DiscoveryProviderStartsTotal.WithLabelValues(handle.Name, handle.Kind).Inc()
+		}
+
+		if err := handle.Provider.Start(ctx, discoveryProviderStartupTimeout); err != nil {
 			logger.Warn("discovery provider start failed", "provider", handle.Name, "kind", handle.Kind, "error", err)
 			if m != nil {
 				m.DiscoveryProviderFailuresTotal.WithLabelValues(handle.Name, handle.Kind, "start").Inc()

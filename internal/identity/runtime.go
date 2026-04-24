@@ -16,7 +16,7 @@ import (
 )
 
 type StartableResolver interface {
-	Start(context.Context) error
+	Start(context.Context, time.Duration) error
 	Resolve(net.IP) (*Identity, error)
 }
 

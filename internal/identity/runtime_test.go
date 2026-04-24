@@ -229,7 +229,7 @@ func (fakeRuntimeNamespaceClient) Watch(context.Context, metav1.ListOptions) (wa
 
 type fakeRuntimeResolver struct{}
 
-func (*fakeRuntimeResolver) Start(context.Context) error {
+func (*fakeRuntimeResolver) Start(context.Context, time.Duration) error {
 	return nil
 }
 

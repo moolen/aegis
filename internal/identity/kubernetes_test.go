@@ -29,7 +29,7 @@ func TestKubernetesProviderResolvesCreatedPod(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := provider.Start(ctx); err != nil {
+	if err := provider.Start(ctx, time.Second); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 
@@ -209,6 +209,70 @@ func TestKubernetesProviderIgnoresPodsWithoutIP(t *testing.T) {
 	requireConsistentlyNoIdentity(t, provider, "10.0.0.60")
 }
 
+func TestKubernetesProviderStartCancelsRunContextOnStartupTimeout(t *testing.T) {
+	client := newBlockingPodNamespaceClient()
+	provider, err := NewKubernetesProvider(KubernetesProviderConfig{
+		Name:         "cluster-a",
+		Source:       staticPodSource{client: client},
+		Namespaces:   []string{"default"},
+		ResyncPeriod: time.Second,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewKubernetesProvider() error = %v", err)
+	}
+
+	err = provider.Start(context.Background(), 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected startup timeout")
+	}
+	if !waitForSignal(client.listCalled, time.Second) {
+		t.Fatal("List() was never called")
+	}
+	if !waitForSignal(client.listCanceled, time.Second) {
+		t.Fatal("timed-out startup did not cancel provider run context")
+	}
+}
+
+func TestKubernetesProviderStartReturnsWhenLifecycleContextCancelled(t *testing.T) {
+	client := newBlockingPodNamespaceClient()
+	provider, err := NewKubernetesProvider(KubernetesProviderConfig{
+		Name:         "cluster-a",
+		Source:       staticPodSource{client: client},
+		Namespaces:   []string{"default"},
+		ResyncPeriod: time.Second,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewKubernetesProvider() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- provider.Start(ctx, time.Minute)
+	}()
+
+	if !waitForSignal(client.listCalled, time.Second) {
+		t.Fatal("List() was never called")
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected lifecycle cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start() did not return after lifecycle cancellation")
+	}
+
+	if !waitForSignal(client.listCanceled, time.Second) {
+		t.Fatal("lifecycle cancellation did not cancel provider run context")
+	}
+}
+
 func requireEventuallyIdentity(t *testing.T, provider *KubernetesProvider, ip string) *Identity {
 	t.Helper()
 
@@ -278,7 +342,7 @@ func startTestKubernetesProvider(t *testing.T, source *fakePodSource, namespaces
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	if err := provider.Start(ctx); err != nil {
+	if err := provider.Start(ctx, time.Second); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 
@@ -424,4 +488,56 @@ func (c *fakePodNamespaceClient) List(context.Context, metav1.ListOptions) (*cor
 
 func (c *fakePodNamespaceClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
 	return c.watcher, nil
+}
+
+type staticPodSource struct {
+	client KubernetesPodNamespaceClient
+}
+
+func (s staticPodSource) Pods(string) KubernetesPodNamespaceClient {
+	return s.client
+}
+
+type blockingPodNamespaceClient struct {
+	listCalled    chan struct{}
+	listCanceled  chan struct{}
+	watchCanceled chan struct{}
+}
+
+func newBlockingPodNamespaceClient() *blockingPodNamespaceClient {
+	return &blockingPodNamespaceClient{
+		listCalled:    make(chan struct{}),
+		listCanceled:  make(chan struct{}),
+		watchCanceled: make(chan struct{}),
+	}
+}
+
+func (c *blockingPodNamespaceClient) List(ctx context.Context, _ metav1.ListOptions) (*corev1.PodList, error) {
+	closeOnce(c.listCalled)
+	<-ctx.Done()
+	closeOnce(c.listCanceled)
+	return nil, ctx.Err()
+}
+
+func (c *blockingPodNamespaceClient) Watch(ctx context.Context, _ metav1.ListOptions) (watch.Interface, error) {
+	<-ctx.Done()
+	closeOnce(c.watchCanceled)
+	return watch.NewRaceFreeFake(), ctx.Err()
+}
+
+func waitForSignal(ch <-chan struct{}, timeout time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func closeOnce(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }

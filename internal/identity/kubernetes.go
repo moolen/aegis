@@ -36,10 +36,12 @@ type KubernetesProvider struct {
 	informers []cache.SharedIndexInformer
 	logger    *slog.Logger
 
-	mu      sync.RWMutex
-	byIP    map[string]*Identity
-	ipByPod map[string]string
-	started bool
+	mu           sync.RWMutex
+	byIP         map[string]*Identity
+	ipByPod      map[string]string
+	started      bool
+	lifecycleCtx context.Context
+	runCancel    context.CancelFunc
 }
 
 func NewKubernetesProvider(cfg KubernetesProviderConfig, logger *slog.Logger) (*KubernetesProvider, error) {
@@ -74,10 +76,10 @@ func NewKubernetesProvider(cfg KubernetesProviderConfig, logger *slog.Logger) (*
 		source := cfg.Source.Pods(namespace)
 		listWatch := &cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				return source.List(context.Background(), options)
+				return source.List(provider.runContext(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				return source.Watch(context.Background(), options)
+				return source.Watch(provider.runContext(), options)
 			},
 		}
 		informer := cache.NewSharedIndexInformer(
@@ -100,17 +102,21 @@ func NewKubernetesProvider(cfg KubernetesProviderConfig, logger *slog.Logger) (*
 	return provider, nil
 }
 
-func (p *KubernetesProvider) Start(ctx context.Context) error {
+func (p *KubernetesProvider) Start(ctx context.Context, startupTimeout time.Duration) error {
 	p.mu.Lock()
 	if p.started {
 		p.mu.Unlock()
 		return nil
 	}
+
+	runCtx, runCancel := context.WithCancel(ctx)
 	p.started = true
+	p.lifecycleCtx = runCtx
+	p.runCancel = runCancel
 	p.mu.Unlock()
 
 	for _, informer := range p.informers {
-		go informer.Run(ctx.Done())
+		go informer.Run(runCtx.Done())
 	}
 
 	hasSynced := make([]cache.InformerSynced, 0, len(p.informers))
@@ -118,14 +124,45 @@ func (p *KubernetesProvider) Start(ctx context.Context) error {
 		hasSynced = append(hasSynced, informer.HasSynced)
 	}
 
-	if ok := cache.WaitForCacheSync(ctx.Done(), hasSynced...); !ok {
-		if err := ctx.Err(); err != nil {
+	startupCtx := runCtx
+	cancelStartup := func() {}
+	if startupTimeout > 0 {
+		startupCtxWithTimeout, cancel := context.WithTimeout(runCtx, startupTimeout)
+		startupCtx = startupCtxWithTimeout
+		cancelStartup = cancel
+	}
+	defer cancelStartup()
+
+	if ok := cache.WaitForCacheSync(startupCtx.Done(), hasSynced...); !ok {
+		runCancel()
+		p.resetRunState()
+		if err := startupCtx.Err(); err != nil {
 			return fmt.Errorf("sync kubernetes provider caches: %w", err)
 		}
 		return fmt.Errorf("sync kubernetes provider caches")
 	}
 
 	return nil
+}
+
+func (p *KubernetesProvider) runContext() context.Context {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.lifecycleCtx == nil {
+		return context.Background()
+	}
+
+	return p.lifecycleCtx
+}
+
+func (p *KubernetesProvider) resetRunState() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.runCancel = nil
+	p.lifecycleCtx = nil
+	p.started = false
 }
 
 func (p *KubernetesProvider) Resolve(ip net.IP) (*Identity, error) {
