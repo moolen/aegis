@@ -36,5 +36,5 @@ config:
 # Plain HTTP requests are policy-enforced, Kubernetes discovery can be wired at
 # runtime, and CONNECT remains a basic tunnel without TLS inspection yet.
 # The default empty identitySelector.matchLabels is a safe starter policy that
-# matches the first runtime-discovered identity; tighten it once you know the
-# workload labels you want to authorize.
+# matches any discovered identity; tighten it once you know the workload labels
+# you want to authorize.

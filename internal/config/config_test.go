@@ -299,4 +299,14 @@ func TestExampleConfigIncludesDiscoverySection(t *testing.T) {
 	if !bytes.Contains(data, []byte("discovery:")) {
 		t.Fatal("example config does not include discovery section")
 	}
+	if !bytes.Contains(data, []byte("kubernetes:")) {
+		t.Fatal("example config does not include discovery.kubernetes section")
+	}
+	cfg, err := Load(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Discovery.Kubernetes) != 0 {
+		t.Fatalf("example config should keep discovery disabled for local runs, got %d providers", len(cfg.Discovery.Kubernetes))
+	}
 }

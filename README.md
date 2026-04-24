@@ -48,6 +48,12 @@ make build
 ./bin/aegis -config aegis.example.yaml
 ```
 
+`aegis.example.yaml` keeps `discovery.kubernetes` empty so the quick start runs
+locally without requiring in-cluster Kubernetes credentials. To enable runtime
+Kubernetes discovery, add a provider entry under `discovery.kubernetes` and set
+either `kubeconfig` for a local run or leave it unset only when running inside
+the target cluster.
+
 Send traffic through the proxy:
 
 ```bash
@@ -90,7 +96,9 @@ plain HTTP requests are policy-enforced, while `CONNECT` remains a basic tunnel
 without identity-aware TLS inspection or interception support. Kubernetes
 discovery is runtime-wired today, multiple discovery providers are supported in
 config order, and provider startup failures are tolerated when at least one
-provider becomes active. EC2 discovery and TLS inspection are still pending.
+provider becomes active. For local development, discovery stays disabled unless
+you configure a Kubernetes provider explicitly. EC2 discovery and TLS
+inspection are still pending.
 
 ## Design Docs
 

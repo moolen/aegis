@@ -7,10 +7,12 @@ dns:
   timeout: 5s
   servers: []
 discovery:
-  kubernetes:
-    - name: in-cluster
-      namespaces: ["default"]
-      resyncPeriod: 30s
+  kubernetes: []
+  # kubernetes:
+  #   - name: cluster-a
+  #     kubeconfig: /path/to/kubeconfig
+  #     namespaces: ["default"]
+  #     resyncPeriod: 30s
 policies:
   - name: allow-example
     identitySelector:
