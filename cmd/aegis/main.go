@@ -16,10 +16,15 @@ import (
 
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/dns"
+	"github.com/moolen/aegis/internal/identity"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
 	"github.com/moolen/aegis/internal/policy"
 	"github.com/moolen/aegis/internal/proxy"
 )
+
+var newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+	return identity.NewKubernetesRuntimeProvider(cfg, logger)
+}
 
 func main() {
 	os.Exit(run())
@@ -54,12 +59,18 @@ func run() int {
 		logger.Error("compile policy engine failed", "error", err)
 		return 1
 	}
+	identityResolver, err := buildIdentityResolver(context.Background(), cfg.Discovery, logger, m)
+	if err != nil {
+		logger.Error("build identity resolver failed", "error", err)
+		return 1
+	}
 
 	proxyHandler := proxy.NewServer(proxy.Dependencies{
-		Resolver:     resolver,
-		PolicyEngine: engine,
-		Metrics:      m,
-		Logger:       logger,
+		Resolver:         resolver,
+		IdentityResolver: identityResolver,
+		PolicyEngine:     engine,
+		Metrics:          m,
+		Logger:           logger,
 	})
 	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
 
@@ -124,6 +135,55 @@ func shutdownServer(logger *slog.Logger, name string, srv *http.Server, ctx cont
 		return fmt.Errorf("shutdown %s server: %w", name, err)
 	}
 	return nil
+}
+
+func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logger *slog.Logger, m *appmetrics.Metrics) (proxy.IdentityResolver, error) {
+	if len(cfg.Kubernetes) == 0 {
+		return nil, nil
+	}
+
+	active := make([]identity.ProviderHandle, 0, len(cfg.Kubernetes))
+	for _, kubeCfg := range cfg.Kubernetes {
+		if m != nil {
+			m.DiscoveryProviderStartsTotal.WithLabelValues(kubeCfg.Name, "kubernetes").Inc()
+		}
+
+		handle, err := newKubernetesRuntimeProvider(kubeCfg, logger)
+		if err != nil {
+			logger.Warn("discovery provider build failed", "provider", kubeCfg.Name, "kind", "kubernetes", "error", err)
+			if m != nil {
+				m.DiscoveryProviderFailuresTotal.WithLabelValues(kubeCfg.Name, "kubernetes", "build").Inc()
+			}
+			continue
+		}
+
+		if err := handle.Provider.Start(ctx); err != nil {
+			logger.Warn("discovery provider start failed", "provider", handle.Name, "kind", handle.Kind, "error", err)
+			if m != nil {
+				m.DiscoveryProviderFailuresTotal.WithLabelValues(handle.Name, handle.Kind, "start").Inc()
+			}
+			continue
+		}
+
+		active = append(active, identity.ProviderHandle{
+			Name:     handle.Name,
+			Kind:     handle.Kind,
+			Resolver: handle.Provider,
+		})
+	}
+
+	if len(active) == 0 {
+		if len(cfg.Kubernetes) > 0 {
+			return nil, fmt.Errorf("discovery configured but no providers became active")
+		}
+		return nil, nil
+	}
+
+	if m != nil {
+		m.DiscoveryProvidersActive.Set(float64(len(active)))
+	}
+
+	return identity.NewCompositeResolver(active, logger, m), nil
 }
 
 var _ interface {
