@@ -37,6 +37,7 @@ type PolicyEngine interface {
 type Dependencies struct {
 	Resolver          Resolver
 	DestinationGuard  *DestinationGuard
+	DrainTracker      *DrainTracker
 	IdentityResolver  IdentityResolver
 	PolicyEngine      PolicyEngine
 	MITM              *MITMEngine
@@ -226,6 +227,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		upstreamConn.Close()
 		return
 	}
+	releaseTunnel := s.trackConnectTunnel(mode, clientConn, upstreamConn)
+	defer releaseTunnel()
 
 	if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		s.deps.Logger.Debug("set connect client read deadline failed", "error", err)
@@ -422,6 +425,13 @@ func (s *Server) recordTLSError() {
 	}
 
 	s.deps.Metrics.ErrorsTotal.WithLabelValues("tls").Inc()
+}
+
+func (s *Server) trackConnectTunnel(mode string, closers ...io.Closer) func() {
+	if s.deps.DrainTracker == nil {
+		return func() {}
+	}
+	return s.deps.DrainTracker.Track(mode, closers...)
 }
 
 func (s *Server) recordUpstreamTLSError(stage string) {

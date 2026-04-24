@@ -67,8 +67,9 @@ func run() int {
 
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
+	drainTracker := proxy.NewDrainTracker(logger, m)
 	reloadableHandler := &reloadableProxyHandler{}
-	runtime := newRuntimeManager(ctx, logger, m, configPath, reloadableHandler)
+	runtime := newRuntimeManager(ctx, logger, m, configPath, reloadableHandler, drainTracker)
 	defer runtime.Close()
 	if err := runtime.LoadInitial(cfg); err != nil {
 		logger.Error("build runtime failed", "error", err)
@@ -115,7 +116,7 @@ func run() int {
 	}
 
 shutdown:
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), runtime.ShutdownGracePeriod())
 	defer cancel()
 
 	if err := shutdownServer(logger, "proxy", proxySrv, shutdownCtx); err != nil {
@@ -124,6 +125,8 @@ shutdown:
 	if err := shutdownServer(logger, "metrics", metricsSrv, shutdownCtx); err != nil {
 		return 1
 	}
+	drainResult := drainTracker.Shutdown(shutdownCtx)
+	logger.Info("aegis shutdown complete", "result", drainResult, "grace_period", runtime.ShutdownGracePeriod())
 
 	logger.Info("aegis stopped")
 	return 0
@@ -150,7 +153,7 @@ func shutdownServer(logger *slog.Logger, name string, srv *http.Server, ctx cont
 func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, *http.Server, *appmetrics.Metrics, error) {
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
-	deps, err := buildProxyDependencies(ctx, cfg, logger, m)
+	deps, err := buildProxyDependencies(ctx, cfg, logger, m, proxy.NewDrainTracker(logger, m))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -161,7 +164,7 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	return proxySrv, metricsSrv, m, nil
 }
 
-func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics) (proxy.Dependencies, error) {
+func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics, drainTracker *proxy.DrainTracker) (proxy.Dependencies, error) {
 	resolver := dns.NewResolver(dns.Config{
 		CacheTTL: cfg.DNS.CacheTTL,
 		Timeout:  cfg.DNS.Timeout,
@@ -195,6 +198,7 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 	return proxy.Dependencies{
 		Resolver:         resolver,
 		DestinationGuard: destinationGuard,
+		DrainTracker:     drainTracker,
 		IdentityResolver: identityResolver,
 		PolicyEngine:     engine,
 		MITM:             mitmEngine,

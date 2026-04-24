@@ -19,10 +19,14 @@ type Metrics struct {
 	ProxyProtocolConnectionsTotal  *prometheus.CounterVec
 	ConfigReloadsTotal             *prometheus.CounterVec
 	ConnectTunnelsTotal            *prometheus.CounterVec
+	ConnectTunnelsActive           *prometheus.GaugeVec
 	MITMCertificatesTotal          *prometheus.CounterVec
 	MITMCACyclesTotal              *prometheus.CounterVec
 	MITMCertificateCacheEntries    prometheus.Gauge
 	MITMCertificateCacheEvictions  *prometheus.CounterVec
+	ShutdownsTotal                 *prometheus.CounterVec
+	ShutdownDuration               prometheus.Histogram
+	ShutdownForcedTunnelCloses     *prometheus.CounterVec
 	UpstreamTLSErrorsTotal         *prometheus.CounterVec
 	TLSSNIMissingTotal             prometheus.Counter
 }
@@ -142,6 +146,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"mode", "result"},
 		),
+		ConnectTunnelsActive: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_connect_tunnels_active",
+				Help: "Current number of active CONNECT tunnels.",
+			},
+			[]string{"mode"},
+		),
 		MITMCertificatesTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "aegis_mitm_certificates_total",
@@ -168,6 +179,27 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Total number of MITM certificate cache evictions by reason.",
 			},
 			[]string{"reason"},
+		),
+		ShutdownsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_shutdowns_total",
+				Help: "Total number of shutdown outcomes.",
+			},
+			[]string{"result"},
+		),
+		ShutdownDuration: prometheus.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:    "aegis_shutdown_duration_seconds",
+				Help:    "Shutdown duration.",
+				Buckets: prometheus.DefBuckets,
+			},
+		),
+		ShutdownForcedTunnelCloses: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_shutdown_forced_tunnel_closes_total",
+				Help: "Total number of active CONNECT tunnels force-closed during shutdown.",
+			},
+			[]string{"mode"},
 		),
 		UpstreamTLSErrorsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -201,10 +233,14 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.ProxyProtocolConnectionsTotal,
 		m.ConfigReloadsTotal,
 		m.ConnectTunnelsTotal,
+		m.ConnectTunnelsActive,
 		m.MITMCertificatesTotal,
 		m.MITMCACyclesTotal,
 		m.MITMCertificateCacheEntries,
 		m.MITMCertificateCacheEvictions,
+		m.ShutdownsTotal,
+		m.ShutdownDuration,
+		m.ShutdownForcedTunnelCloses,
 		m.UpstreamTLSErrorsTotal,
 		m.TLSSNIMissingTotal,
 		prometheus.NewGoCollector(),

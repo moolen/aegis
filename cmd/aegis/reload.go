@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/moolen/aegis/internal/config"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
@@ -36,8 +37,9 @@ type runtimeManager struct {
 	metrics    *appmetrics.Metrics
 	configPath string
 	handler    *reloadableProxyHandler
+	drain      *proxy.DrainTracker
 
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	current runtimeGeneration
 }
 
@@ -47,13 +49,14 @@ type runtimeGeneration struct {
 	mitm   *proxy.MITMEngine
 }
 
-func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler) *runtimeManager {
+func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler, drain *proxy.DrainTracker) *runtimeManager {
 	return &runtimeManager{
 		rootCtx:    rootCtx,
 		logger:     logger,
 		metrics:    metrics,
 		configPath: configPath,
 		handler:    handler,
+		drain:      drain,
 	}
 }
 
@@ -102,7 +105,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	}
 
 	generationCtx, cancel := context.WithCancel(m.rootCtx)
-	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics)
+	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics, m.drain)
 	if err != nil {
 		cancel()
 		return err
@@ -123,6 +126,16 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	}
 
 	return nil
+}
+
+func (m *runtimeManager) ShutdownGracePeriod() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.current.cfg.Shutdown.GracePeriod <= 0 {
+		return 10 * time.Second
+	}
+	return m.current.cfg.Shutdown.GracePeriod
 }
 
 func (m *runtimeManager) recordReloadResult(result string) {

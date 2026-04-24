@@ -22,11 +22,13 @@ Implemented in this bootstrap:
 - Optional Proxy Protocol v2 support on the proxy listener so identity
   resolution can use the original client IP behind an L4 load balancer.
 - Live `SIGHUP` config reload for policy, DNS, discovery, and MITM CA changes.
+- Configurable graceful shutdown with explicit CONNECT tunnel draining and
+  force-close accounting when the grace period expires.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`, including reload, Proxy Protocol, CONNECT,
   MITM certificate-cache and CA lifecycle counters, request decision counters,
-  policy-evaluation latency, upstream TLS error counters, and per-provider
-  identity-map gauges.
+  active tunnel and shutdown counters, policy-evaluation latency, upstream TLS
+  error counters, and per-provider identity-map gauges.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
 
 Planned but not implemented yet:
@@ -55,6 +57,9 @@ Current runtime behavior:
 - `SIGHUP` reloads the config file in place. Listener settings stay immutable
   during reload: `proxy.listen`, `metrics.listen`, and `proxy.proxyProtocol.*`
   changes are rejected and require a process restart.
+- Shutdown uses `shutdown.gracePeriod` to stop accepting new requests, drain
+  active CONNECT tunnels, and force-close any remaining hijacked tunnels when
+  the grace period expires.
 
 ## Quick Start
 
@@ -81,6 +86,8 @@ By default, Aegis also blocks loopback, private, and link-local upstream
 addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
 `dns.rebindingProtection.allowedHostPatterns` or
 `dns.rebindingProtection.allowedCIDRs` for explicit internal destinations.
+Use `shutdown.gracePeriod` to control how long Aegis drains in-flight traffic
+before it force-closes remaining CONNECT tunnels during process shutdown.
 
 Send traffic through the proxy:
 

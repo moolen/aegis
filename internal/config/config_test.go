@@ -77,6 +77,17 @@ unknown: true
 	}
 }
 
+func TestLoadRejectsNonPositiveShutdownGracePeriod(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+shutdown:
+  gracePeriod: 0s
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestLoadValidDNSRebindingProtectionConfig(t *testing.T) {
 	cfg, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"

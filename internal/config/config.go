@@ -15,12 +15,14 @@ const (
 	defaultMetricsListen = ":9090"
 	defaultDNSCacheTTL   = 30 * time.Second
 	defaultDNSTimeout    = 5 * time.Second
+	defaultGracePeriod   = 10 * time.Second
 )
 
 type Config struct {
 	Proxy     ProxyConfig     `yaml:"proxy"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
 	DNS       DNSConfig       `yaml:"dns"`
+	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 	Policies  []PolicyConfig  `yaml:"policies"`
 	Discovery DiscoveryConfig `yaml:"discovery"`
 }
@@ -43,6 +45,10 @@ type ProxyProtocolConfig struct {
 
 type MetricsConfig struct {
 	Listen string `yaml:"listen"`
+}
+
+type ShutdownConfig struct {
+	GracePeriod time.Duration `yaml:"gracePeriod"`
 }
 
 type DNSConfig struct {
@@ -114,6 +120,9 @@ func Load(r io.Reader) (Config, error) {
 			CacheTTL: defaultDNSCacheTTL,
 			Timeout:  defaultDNSTimeout,
 		},
+		Shutdown: ShutdownConfig{
+			GracePeriod: defaultGracePeriod,
+		},
 	}
 
 	decoder := yaml.NewDecoder(r)
@@ -152,6 +161,9 @@ func (c Config) Validate() error {
 	}
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")
+	}
+	if c.Shutdown.GracePeriod <= 0 {
+		return fmt.Errorf("shutdown.gracePeriod must be greater than zero")
 	}
 	if c.DNS.CacheTTL <= 0 {
 		return fmt.Errorf("dns.cache_ttl must be greater than zero")

@@ -412,7 +412,7 @@ func TestRuntimeManagerReloadSwapsHandlerAndCountsSuccess(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := appmetrics.New(reg)
 	handler := &reloadableProxyHandler{}
-	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler, nil)
 	defer manager.Close()
 
 	cfg, err := loadRuntimeConfig(configPath)
@@ -456,7 +456,7 @@ func TestRuntimeManagerReloadFailureKeepsCurrentHandlerAndCountsError(t *testing
 	reg := prometheus.NewRegistry()
 	m := appmetrics.New(reg)
 	handler := &reloadableProxyHandler{}
-	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler, nil)
 	defer manager.Close()
 
 	cfg, err := loadRuntimeConfig(configPath)
@@ -494,6 +494,23 @@ func TestValidateReloadableConfigRejectsProxyProtocolChange(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerShutdownGracePeriodUsesConfigValue(t *testing.T) {
+	manager := &runtimeManager{}
+	manager.current.cfg.Shutdown.GracePeriod = 17 * time.Second
+
+	if got := manager.ShutdownGracePeriod(); got != 17*time.Second {
+		t.Fatalf("ShutdownGracePeriod() = %v, want %v", got, 17*time.Second)
+	}
+}
+
+func TestRuntimeManagerShutdownGracePeriodFallsBackToDefault(t *testing.T) {
+	manager := &runtimeManager{}
+
+	if got := manager.ShutdownGracePeriod(); got != 10*time.Second {
+		t.Fatalf("ShutdownGracePeriod() = %v, want %v", got, 10*time.Second)
+	}
+}
+
 func TestRuntimeManagerReloadTracksMITMCARotationAndCacheReset(t *testing.T) {
 	certA, keyA := writeTestCAFiles(t, "Aegis Test CA A")
 	certB, keyB := writeTestCAFiles(t, "Aegis Test CA B")
@@ -502,7 +519,7 @@ func TestRuntimeManagerReloadTracksMITMCARotationAndCacheReset(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := appmetrics.New(reg)
 	handler := &reloadableProxyHandler{}
-	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler, nil)
 	defer manager.Close()
 
 	cfg, err := loadRuntimeConfig(configPath)
@@ -549,7 +566,7 @@ func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := appmetrics.New(reg)
 	handler := &reloadableProxyHandler{}
-	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler, nil)
 	defer manager.Close()
 
 	cfg, err := loadRuntimeConfig(configPath)
@@ -724,6 +741,9 @@ func testRuntimeConfig() config.Config {
 		DNS: config.DNSConfig{
 			CacheTTL: 30 * time.Second,
 			Timeout:  5 * time.Second,
+		},
+		Shutdown: config.ShutdownConfig{
+			GracePeriod: 10 * time.Second,
 		},
 		Policies: []config.PolicyConfig{{
 			Name: "allow-example",
