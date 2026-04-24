@@ -1,4 +1,4 @@
-.PHONY: build test lint docker fmt e2e
+.PHONY: build test lint docker fmt e2e e2e-kind
 
 GO ?= $(shell command -v go 2>/dev/null || printf '/usr/local/go/bin/go')
 GOFMT ?= $(shell command -v gofmt 2>/dev/null || printf '/usr/local/go/bin/gofmt')
@@ -19,6 +19,9 @@ test:
 
 e2e:
 	$(GO) test -tags e2e ./e2e/...
+
+e2e-kind:
+	$(GO) test -tags kind_e2e -timeout 30m ./e2e/...
 
 lint:
 	test -z "$(GOFMT_DIFF)"
