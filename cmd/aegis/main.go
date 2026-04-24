@@ -177,6 +177,7 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		if err != nil {
 			return proxy.Dependencies{}, fmt.Errorf("load mitm engine: %w", err)
 		}
+		mitmEngine.AttachMetrics(m)
 	}
 	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
 	if err != nil {

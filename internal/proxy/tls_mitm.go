@@ -4,14 +4,18 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"sync"
 	"time"
+
+	"github.com/moolen/aegis/internal/metrics"
 )
 
 const (
@@ -20,13 +24,15 @@ const (
 )
 
 type MITMEngine struct {
-	ca       tls.Certificate
-	caLeaf   *x509.Certificate
-	logger   *slog.Logger
-	now      func() time.Time
-	mu       sync.Mutex
-	cache    map[string]cachedMITMCertificate
-	validFor time.Duration
+	ca          tls.Certificate
+	caLeaf      *x509.Certificate
+	fingerprint string
+	logger      *slog.Logger
+	metrics     *metrics.Metrics
+	now         func() time.Time
+	mu          sync.Mutex
+	cache       map[string]cachedMITMCertificate
+	validFor    time.Duration
 }
 
 type cachedMITMCertificate struct {
@@ -61,14 +67,16 @@ func NewMITMEngine(ca tls.Certificate, logger *slog.Logger) (*MITMEngine, error)
 	if logger == nil {
 		logger = slog.Default()
 	}
+	fingerprint := sha256.Sum256(caLeaf.Raw)
 
 	return &MITMEngine{
-		ca:       ca,
-		caLeaf:   caLeaf,
-		logger:   logger,
-		now:      time.Now,
-		cache:    make(map[string]cachedMITMCertificate),
-		validFor: defaultMITMCertificateTTL,
+		ca:          ca,
+		caLeaf:      caLeaf,
+		fingerprint: hex.EncodeToString(fingerprint[:]),
+		logger:      logger,
+		now:         time.Now,
+		cache:       make(map[string]cachedMITMCertificate),
+		validFor:    defaultMITMCertificateTTL,
 	}, nil
 }
 
@@ -82,8 +90,13 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, str
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if cached, ok := e.cache[serverName]; ok && now.Before(cached.expiresAt) {
-		return cached.certificate, "cache_hit", nil
+	if cached, ok := e.cache[serverName]; ok {
+		if now.Before(cached.expiresAt) {
+			return cached.certificate, "cache_hit", nil
+		}
+		delete(e.cache, serverName)
+		e.recordCacheEntriesLocked()
+		e.recordCacheEviction("expired", 1)
 	}
 
 	certificate, err := e.generateCertificate(serverName, now)
@@ -95,9 +108,29 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, str
 		certificate: certificate,
 		expiresAt:   certificate.Leaf.NotAfter,
 	}
+	e.recordCacheEntriesLocked()
 	e.logger.Debug("issued mitm certificate", "server_name", serverName, "not_after", certificate.Leaf.NotAfter)
 
 	return certificate, "issued", nil
+}
+
+func (e *MITMEngine) Fingerprint() string {
+	return e.fingerprint
+}
+
+func (e *MITMEngine) CacheEntries() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return len(e.cache)
+}
+
+func (e *MITMEngine) AttachMetrics(m *metrics.Metrics) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.metrics = m
+	e.recordCacheEntriesLocked()
 }
 
 func (e *MITMEngine) generateCertificate(serverName string, now time.Time) (*tls.Certificate, error) {
@@ -140,4 +173,20 @@ func (e *MITMEngine) generateCertificate(serverName string, now time.Time) (*tls
 		PrivateKey:  leafKey,
 		Leaf:        leaf,
 	}, nil
+}
+
+func (e *MITMEngine) recordCacheEntriesLocked() {
+	if e.metrics == nil {
+		return
+	}
+
+	e.metrics.MITMCertificateCacheEntries.Set(float64(len(e.cache)))
+}
+
+func (e *MITMEngine) recordCacheEviction(reason string, count int) {
+	if e.metrics == nil || count <= 0 {
+		return
+	}
+
+	e.metrics.MITMCertificateCacheEvictions.WithLabelValues(reason).Add(float64(count))
 }

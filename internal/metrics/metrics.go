@@ -17,6 +17,9 @@ type Metrics struct {
 	ConfigReloadsTotal             *prometheus.CounterVec
 	ConnectTunnelsTotal            *prometheus.CounterVec
 	MITMCertificatesTotal          *prometheus.CounterVec
+	MITMCACyclesTotal              *prometheus.CounterVec
+	MITMCertificateCacheEntries    prometheus.Gauge
+	MITMCertificateCacheEvictions  *prometheus.CounterVec
 	TLSSNIMissingTotal             prometheus.Counter
 }
 
@@ -120,6 +123,26 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"result"},
 		),
+		MITMCACyclesTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_mitm_ca_cycles_total",
+				Help: "Total number of MITM CA lifecycle outcomes.",
+			},
+			[]string{"result"},
+		),
+		MITMCertificateCacheEntries: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "aegis_mitm_certificate_cache_entries",
+				Help: "Number of certificates currently held in the MITM certificate cache.",
+			},
+		),
+		MITMCertificateCacheEvictions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_mitm_certificate_cache_evictions_total",
+				Help: "Total number of MITM certificate cache evictions by reason.",
+			},
+			[]string{"reason"},
+		),
 		TLSSNIMissingTotal: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Name: "aegis_tls_sni_missing_total",
@@ -143,6 +166,9 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.ConfigReloadsTotal,
 		m.ConnectTunnelsTotal,
 		m.MITMCertificatesTotal,
+		m.MITMCACyclesTotal,
+		m.MITMCertificateCacheEntries,
+		m.MITMCertificateCacheEvictions,
 		m.TLSSNIMissingTotal,
 		prometheus.NewGoCollector(),
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),

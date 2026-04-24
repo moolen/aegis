@@ -10,6 +10,7 @@ import (
 
 	"github.com/moolen/aegis/internal/config"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/proxy"
 )
 
 type reloadableProxyHandler struct {
@@ -43,6 +44,7 @@ type runtimeManager struct {
 type runtimeGeneration struct {
 	cfg    config.Config
 	cancel context.CancelFunc
+	mitm   *proxy.MITMEngine
 }
 
 func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler) *runtimeManager {
@@ -109,12 +111,15 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	nextHandler := newProxyServer(deps).Handler()
 	m.handler.Swap(nextHandler)
 
+	m.recordMITMLifecycle(m.current.mitm, deps.MITM, enforceImmutable)
+
 	if m.current.cancel != nil {
 		m.current.cancel()
 	}
 	m.current = runtimeGeneration{
 		cfg:    cfg,
 		cancel: cancel,
+		mitm:   deps.MITM,
 	}
 
 	return nil
@@ -125,6 +130,57 @@ func (m *runtimeManager) recordReloadResult(result string) {
 		return
 	}
 	m.metrics.ConfigReloadsTotal.WithLabelValues(result).Inc()
+}
+
+func (m *runtimeManager) recordMITMLifecycle(previous *proxy.MITMEngine, next *proxy.MITMEngine, isReload bool) {
+	result := "disabled"
+	switch {
+	case previous == nil && next == nil:
+		return
+	case previous == nil && next != nil:
+		if isReload {
+			result = "enabled"
+		} else {
+			result = "initial"
+		}
+	case previous != nil && next == nil:
+		result = "disabled"
+	case previous.Fingerprint() == next.Fingerprint():
+		result = "unchanged"
+	default:
+		result = "rotated"
+	}
+
+	if m.metrics != nil {
+		m.metrics.MITMCACyclesTotal.WithLabelValues(result).Inc()
+	}
+
+	switch result {
+	case "initial":
+		m.logger.Info("mitm ca loaded", "fingerprint", next.Fingerprint())
+	case "enabled":
+		m.logger.Info("mitm ca enabled", "fingerprint", next.Fingerprint())
+	case "disabled":
+		m.logger.Info("mitm ca disabled")
+	case "unchanged":
+		m.logger.Info("mitm ca reloaded without fingerprint change", "fingerprint", next.Fingerprint())
+	case "rotated":
+		m.logger.Info("mitm ca rotated", "previous_fingerprint", previous.Fingerprint(), "fingerprint", next.Fingerprint())
+	}
+
+	if previous != nil {
+		evictions := previous.CacheEntries()
+		if evictions > 0 && m.metrics != nil {
+			reason := "reload"
+			if next == nil {
+				reason = "disabled"
+			} else if result == "rotated" {
+				reason = "rotation"
+			}
+			m.metrics.MITMCertificateCacheEvictions.WithLabelValues(reason).Add(float64(evictions))
+			m.logger.Info("mitm certificate cache reset", "reason", reason, "entries", evictions)
+		}
+	}
 }
 
 func loadRuntimeConfig(path string) (config.Config, error) {

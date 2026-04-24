@@ -2,9 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -487,6 +494,91 @@ func TestValidateReloadableConfigRejectsProxyProtocolChange(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerReloadTracksMITMCARotationAndCacheReset(t *testing.T) {
+	certA, keyA := writeTestCAFiles(t, "Aegis Test CA A")
+	certB, keyB := writeTestCAFiles(t, "Aegis Test CA B")
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithCA("policy-a", ":3128", ":9090", certA, keyA))
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	handler := &reloadableProxyHandler{}
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+	if manager.current.mitm == nil {
+		t.Fatal("expected initial MITM engine")
+	}
+
+	if _, _, err := manager.current.mitm.CertificateForSNI("example.com"); err != nil {
+		t.Fatalf("CertificateForSNI() error = %v", err)
+	}
+	if got := gaugeValue(t, reg, "aegis_mitm_certificate_cache_entries"); got != 1 {
+		t.Fatalf("cache entries gauge = %v, want 1", got)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAMLWithCA("policy-b", ":3128", ":9090", certB, keyB))
+	if err := manager.ReloadFromFile(); err != nil {
+		t.Fatalf("ReloadFromFile() error = %v", err)
+	}
+
+	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "initial"}); got != 1 {
+		t.Fatalf("initial mitm ca metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "rotated"}); got != 1 {
+		t.Fatalf("rotated mitm ca metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_certificate_cache_evictions_total", map[string]string{"reason": "rotation"}); got != 1 {
+		t.Fatalf("cache eviction metric = %v, want 1", got)
+	}
+	if got := gaugeValue(t, reg, "aegis_mitm_certificate_cache_entries"); got != 0 {
+		t.Fatalf("cache entries gauge = %v, want 0", got)
+	}
+}
+
+func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
+	certFile, keyFile := writeTestCAFiles(t, "Aegis Test CA")
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithCA("policy-a", ":3128", ":9090", certFile, keyFile))
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	handler := &reloadableProxyHandler{}
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+	if _, _, err := manager.current.mitm.CertificateForSNI("example.com"); err != nil {
+		t.Fatalf("CertificateForSNI() error = %v", err)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAMLWithCA("policy-b", ":3128", ":9090", certFile, keyFile))
+	if err := manager.ReloadFromFile(); err != nil {
+		t.Fatalf("ReloadFromFile() error = %v", err)
+	}
+
+	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "unchanged"}); got != 1 {
+		t.Fatalf("unchanged mitm ca metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_certificate_cache_evictions_total", map[string]string{"reason": "reload"}); got != 1 {
+		t.Fatalf("cache eviction metric = %v, want 1", got)
+	}
+	if got := gaugeValue(t, reg, "aegis_mitm_certificate_cache_entries"); got != 0 {
+		t.Fatalf("cache entries gauge = %v, want 0", got)
+	}
+}
+
 func TestBuildIdentityResolverUsesHealthyEC2Provider(t *testing.T) {
 	restoreKubernetes := newKubernetesRuntimeProvider
 	restoreEC2 := newEC2RuntimeProvider
@@ -595,6 +687,32 @@ func runtimeConfigYAML(policyName string, proxyListen string, metricsListen stri
 		"          allowedPaths: [\"/*\"]\n"
 }
 
+func runtimeConfigYAMLWithCA(policyName string, proxyListen string, metricsListen string, certFile string, keyFile string) string {
+	return "proxy:\n" +
+		"  listen: \"" + proxyListen + "\"\n" +
+		"  ca:\n" +
+		"    certFile: \"" + certFile + "\"\n" +
+		"    keyFile: \"" + keyFile + "\"\n" +
+		"metrics:\n" +
+		"  listen: \"" + metricsListen + "\"\n" +
+		"dns:\n" +
+		"  cache_ttl: 30s\n" +
+		"  timeout: 5s\n" +
+		"  servers: []\n" +
+		"policies:\n" +
+		"  - name: " + policyName + "\n" +
+		"    identitySelector:\n" +
+		"      matchLabels: {}\n" +
+		"    egress:\n" +
+		"      - fqdn: \"example.com\"\n" +
+		"        ports: [443]\n" +
+		"        tls:\n" +
+		"          mode: mitm\n" +
+		"        http:\n" +
+		"          allowedMethods: [\"GET\"]\n" +
+		"          allowedPaths: [\"/*\"]\n"
+}
+
 func testRuntimeConfig() config.Config {
 	return config.Config{
 		Proxy: config.ProxyConfig{
@@ -620,6 +738,50 @@ func testRuntimeConfig() config.Config {
 			}},
 		}},
 	}
+}
+
+func writeTestCAFiles(t *testing.T, commonName string) (string, string) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject: pkix.Name{
+			CommonName: commonName,
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
+	if err != nil {
+		t.Fatalf("CreateCertificate() error = %v", err)
+	}
+
+	keyBytes, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("MarshalECPrivateKey() error = %v", err)
+	}
+
+	dir := t.TempDir()
+	certFile := dir + "/ca.crt"
+	keyFile := dir + "/ca.key"
+
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatalf("WriteFile(cert) error = %v", err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}), 0o600); err != nil {
+		t.Fatalf("WriteFile(key) error = %v", err)
+	}
+
+	return certFile, keyFile
 }
 
 func TestBuildIdentityResolverPrefersKubernetesBeforeEC2(t *testing.T) {
