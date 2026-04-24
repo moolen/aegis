@@ -3,7 +3,8 @@
 Aegis is an identity-aware HTTP egress proxy. The repository currently contains
 the first policy-aware slice on top of the MVP bootstrap: a runnable
 HTTP/CONNECT forward proxy, config loading, plain HTTP policy enforcement,
-metrics, tests, CI, and deployment scaffolding.
+runtime-wired Kubernetes identity discovery, metrics, tests, CI, and
+deployment scaffolding.
 
 ## Current Status
 
@@ -11,6 +12,9 @@ Implemented in this bootstrap:
 
 - YAML config loading and validation.
 - HTTP proxying with policy enforcement for plain HTTP requests.
+- Kubernetes identity discovery wired into the running process.
+- Multiple discovery providers evaluated in config order, with first-match
+  precedence.
 - Basic `CONNECT` tunneling that remains bootstrap-grade.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`.
@@ -18,19 +22,22 @@ Implemented in this bootstrap:
 
 Planned but not implemented yet:
 
-- Kubernetes and EC2 identity discovery.
+- EC2 identity discovery.
 - TLS ClientHello inspection and SNI validation.
 - MITM certificate generation and HTTP inspection inside TLS.
 - Proxy Protocol v2 and production hardening features.
 
-Current runtime limitation:
+Current runtime behavior:
 
-- Plain HTTP policy enforcement is active, but the shipped runtime does not yet
-  wire a real identity resolver.
-- Until identity discovery lands, policy matching in the running process is
-  effectively limited to policies with empty/default
-  `identitySelector.matchLabels`; non-empty selectors only work in tests or with
-  additional runtime wiring.
+- Plain HTTP policy enforcement uses the configured identity resolver before any
+  upstream dial.
+- Kubernetes discovery providers are started at boot and composed in config
+  order. The first provider that resolves a source IP wins.
+- Provider startup failures are tolerated as long as at least one configured
+  provider becomes active; failures are surfaced through structured logs and
+  Prometheus metrics.
+- `CONNECT` remains a basic tunnel. TLS inspection and identity-aware HTTPS
+  enforcement are not implemented yet.
 
 ## Quick Start
 
@@ -80,9 +87,10 @@ mounted at `/etc/aegis/aegis.yaml`.
 
 These deployment files are scaffolding only. They reflect the current runtime:
 plain HTTP requests are policy-enforced, while `CONNECT` remains a basic tunnel
-without identity-aware TLS inspection or interception support. The runtime also
-does not yet resolve real workload identity, so plain HTTP policy matches are
-effectively limited to empty/default selectors.
+without identity-aware TLS inspection or interception support. Kubernetes
+discovery is runtime-wired today, multiple discovery providers are supported in
+config order, and provider startup failures are tolerated when at least one
+provider becomes active. EC2 discovery and TLS inspection are still pending.
 
 ## Design Docs
 

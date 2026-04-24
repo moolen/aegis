@@ -6,6 +6,11 @@ dns:
   cache_ttl: 30s
   timeout: 5s
   servers: []
+discovery:
+  kubernetes:
+    - name: in-cluster
+      namespaces: ["default"]
+      resyncPeriod: 30s
 policies:
   - name: allow-example
     identitySelector:

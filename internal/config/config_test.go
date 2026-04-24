@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -286,5 +288,15 @@ discovery:
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestExampleConfigIncludesDiscoverySection(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.yaml"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Contains(data, []byte("discovery:")) {
+		t.Fatal("example config does not include discovery section")
 	}
 }
