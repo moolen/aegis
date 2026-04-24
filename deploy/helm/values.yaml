@@ -19,6 +19,9 @@ resources: {}
 config:
   proxy:
     listen: ":3128"
+    # proxyProtocol:
+    #   enabled: true
+    #   headerTimeout: 2s
     # ca:
     #   certFile: /etc/aegis/ca/ca.crt
     #   keyFile: /etc/aegis/ca/ca.key

@@ -248,7 +248,7 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 		return fakeHandlerProvider{handler: http.NewServeMux()}
 	}
 
-	_, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy:   config.ProxyConfig{Listen: ":8080"},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
@@ -315,7 +315,7 @@ func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
 		return fakeHandlerProvider{handler: http.NewServeMux()}
 	}
 
-	_, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy: config.ProxyConfig{
 			Listen: ":8080",
 			CA: config.CAConfig{
@@ -355,7 +355,7 @@ func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
 		return nil, errors.New("bad ca")
 	}
 
-	_, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy: config.ProxyConfig{
 			Listen: ":8080",
 			CA: config.CAConfig{

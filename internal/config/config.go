@@ -25,13 +25,19 @@ type Config struct {
 }
 
 type ProxyConfig struct {
-	Listen string   `yaml:"listen"`
-	CA     CAConfig `yaml:"ca"`
+	Listen        string              `yaml:"listen"`
+	CA            CAConfig            `yaml:"ca"`
+	ProxyProtocol ProxyProtocolConfig `yaml:"proxyProtocol"`
 }
 
 type CAConfig struct {
 	CertFile string `yaml:"certFile"`
 	KeyFile  string `yaml:"keyFile"`
+}
+
+type ProxyProtocolConfig struct {
+	Enabled       bool           `yaml:"enabled"`
+	HeaderTimeout *time.Duration `yaml:"headerTimeout"`
 }
 
 type MetricsConfig struct {
@@ -133,6 +139,9 @@ func (c Config) Validate() error {
 	}
 	if (c.Proxy.CA.CertFile == "") != (c.Proxy.CA.KeyFile == "") {
 		return fmt.Errorf("proxy.ca.certFile and proxy.ca.keyFile must be set together")
+	}
+	if c.Proxy.ProxyProtocol.HeaderTimeout != nil && *c.Proxy.ProxyProtocol.HeaderTimeout <= 0 {
+		return fmt.Errorf("proxy.proxyProtocol.headerTimeout must be greater than zero")
 	}
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")

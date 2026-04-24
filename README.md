@@ -19,13 +19,15 @@ Implemented in this bootstrap:
   passthrough rules.
 - CA-backed TLS MITM for `CONNECT` rules with `tls.mode: mitm`, including
   decrypted HTTP method/path enforcement.
+- Optional Proxy Protocol v2 support on the proxy listener so identity
+  resolution can use the original client IP behind an L4 load balancer.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
 
 Planned but not implemented yet:
 
-- Proxy Protocol v2 and production hardening features.
+- Config reload and remaining production hardening features.
 
 Current runtime behavior:
 
@@ -43,6 +45,9 @@ Current runtime behavior:
 - TLS MITM requires `proxy.ca.certFile` and `proxy.ca.keyFile`; once
   configured, Aegis terminates client TLS, verifies upstream TLS, and evaluates
   decrypted HTTP requests before forwarding them.
+- When `proxy.proxyProtocol.enabled` is set, the proxy listener requires Proxy
+  Protocol v2 on inbound connections and uses the forwarded source IP for
+  request identity resolution.
 
 ## Quick Start
 
@@ -61,7 +66,9 @@ leave it unset only when running inside the target cluster. To enable EC2
 discovery, add a provider entry under `discovery.ec2`, set the target AWS
 `region`, and define the tag filters that scope instance discovery. To enable
 TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
-`proxy.ca.certFile` and `proxy.ca.keyFile`.
+`proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs behind an
+NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
+the balancer to emit Proxy Protocol v2 on the proxy port.
 
 Send traffic through the proxy:
 
@@ -108,7 +115,9 @@ in deterministic config order, and provider startup failures are tolerated when
 at least one provider becomes active. For local development, discovery stays
 disabled unless you configure a provider explicitly. The Helm chart includes an
 optional `proxyCA.existingSecret` mount for the CA files referenced by
-`config.proxy.ca`.
+`config.proxy.ca`. The Fargate scaffold also exposes an
+`enable_proxy_protocol_v2` switch on the NLB target group so source IP
+preservation can be paired with `config.proxy.proxyProtocol.enabled`.
 
 ## Design Docs
 

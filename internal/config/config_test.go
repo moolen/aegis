@@ -53,6 +53,20 @@ metrics:
 	}
 }
 
+func TestLoadRejectsInvalidProxyProtocolHeaderTimeout(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  proxyProtocol:
+    enabled: true
+    headerTimeout: 0s
+metrics:
+  listen: ":9090"
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"

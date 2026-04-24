@@ -1,5 +1,11 @@
 proxy:
   listen: ":3128"
+  # Uncomment when Aegis sits behind an L4 load balancer that injects
+  # Proxy Protocol v2 headers and you want identity resolution to use the
+  # original client source IP instead of the balancer IP.
+  # proxyProtocol:
+  #   enabled: true
+  #   headerTimeout: 2s
   # Uncomment to enable TLS MITM for CONNECT rules with tls.mode: mitm.
   # ca:
   #   certFile: /etc/aegis/ca/ca.crt

@@ -44,6 +44,11 @@ variable "config_file_system_id" {
   type = string
 }
 
+variable "enable_proxy_protocol_v2" {
+  type    = bool
+  default = false
+}
+
 resource "aws_ecs_cluster" "this" {
   name = var.name
 }
@@ -89,6 +94,7 @@ resource "aws_lb_target_group" "proxy" {
   protocol    = "TCP"
   target_type = "ip"
   vpc_id      = var.vpc_id
+  proxy_protocol_v2 = var.enable_proxy_protocol_v2
 
   health_check {
     port     = "9090"
