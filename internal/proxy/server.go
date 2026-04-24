@@ -152,29 +152,36 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		reqIdentity = s.resolveRequestIdentity(r)
 		decision = s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
 		if decision == nil || !decision.Allowed {
+			s.recordConnectResult(connectDecisionMode(decision), "policy_denied")
 			s.writeError(w, http.StatusForbidden, "connect target denied by policy", "policy")
 			return
 		}
 		if decision.TLSMode == "mitm" && s.deps.MITM == nil {
+			s.recordConnectResult("mitm", "configuration_error")
 			s.writeError(w, http.StatusInternalServerError, "connect tls mitm requires proxy.ca cert and key configuration", "tls")
 			return
 		}
 	}
 
+	mode := connectResolvedMode(decision)
+
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
+		s.recordConnectResult(mode, "dns_error")
 		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
 		return
 	}
 
 	upstreamConn, err := (&net.Dialer{}).DialContext(r.Context(), "tcp", targetAddr)
 	if err != nil {
+		s.recordConnectResult(mode, "upstream_dial_error")
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("connect upstream failed: %v", err), "dial")
 		return
 	}
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
+		s.recordConnectResult(mode, "server_error")
 		upstreamConn.Close()
 		s.writeError(w, http.StatusInternalServerError, "response writer does not support hijacking", "server")
 		return
@@ -182,6 +189,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	clientConn, buf, err := hijacker.Hijack()
 	if err != nil {
+		s.recordConnectResult(mode, "server_error")
 		upstreamConn.Close()
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("hijack failed: %v", err), "server")
 		return
@@ -199,6 +207,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	clientHello, sni, err := readClientHello(buf.Reader)
 	_ = clientConn.SetReadDeadline(time.Time{})
 	if err != nil {
+		s.recordConnectResult(mode, "tls_blocked")
 		s.recordTLSConnectBlock(err)
 		s.deps.Logger.Warn("connect tls inspection failed", "target", host, "error", err)
 		clientConn.Close()
@@ -206,6 +215,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !strings.EqualFold(sni, host) {
+		s.recordConnectResult(mode, "tls_blocked")
 		s.recordTLSConnectBlock(nil)
 		s.deps.Logger.Warn("connect tls sni mismatch", "target", host, "sni", sni)
 		clientConn.Close()
@@ -219,17 +229,20 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := upstreamConn.Write(clientHello); err != nil {
+		s.recordConnectResult("passthrough", "upstream_error")
 		clientConn.Close()
 		upstreamConn.Close()
 		return
 	}
 
+	s.recordConnectResult("passthrough", "established")
 	s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
 }
 
 func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, upstreamConn net.Conn, reqIdentity *identity.Identity, serverName string, port int) {
 	clientTLSConn, err := s.handshakeClientMITM(clientConn, clientReader, clientHello, serverName)
 	if err != nil {
+		s.recordConnectResult("mitm", "client_tls_error")
 		s.recordTLSError()
 		s.deps.Logger.Warn("connect mitm client handshake failed", "server_name", serverName, "error", err)
 		clientConn.Close()
@@ -240,11 +253,14 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 
 	upstreamTLSConn, err := s.handshakeUpstreamTLS(upstreamConn, serverName)
 	if err != nil {
+		s.recordConnectResult("mitm", "upstream_tls_error")
 		s.recordTLSError()
 		s.deps.Logger.Warn("connect mitm upstream handshake failed", "server_name", serverName, "error", err)
 		return
 	}
 	defer upstreamTLSConn.Close()
+
+	s.recordConnectResult("mitm", "established")
 
 	clientReaderTLS := bufio.NewReader(clientTLSConn)
 	upstreamReaderTLS := bufio.NewReader(upstreamTLSConn)
@@ -301,10 +317,12 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 }
 
 func (s *Server) handshakeClientMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, serverName string) (*tls.Conn, error) {
-	certificate, err := s.deps.MITM.CertificateForSNI(serverName)
+	certificate, result, err := s.deps.MITM.CertificateForSNI(serverName)
 	if err != nil {
+		s.recordMITMCertificateResult("error")
 		return nil, err
 	}
+	s.recordMITMCertificateResult(result)
 
 	tlsConn := tls.Server(&replayConn{
 		Conn:   clientConn,
@@ -375,6 +393,22 @@ func (s *Server) recordPolicyError() {
 	}
 
 	s.deps.Metrics.ErrorsTotal.WithLabelValues("policy").Inc()
+}
+
+func (s *Server) recordConnectResult(mode string, result string) {
+	if s.deps.Metrics == nil {
+		return
+	}
+
+	s.deps.Metrics.ConnectTunnelsTotal.WithLabelValues(mode, result).Inc()
+}
+
+func (s *Server) recordMITMCertificateResult(result string) {
+	if s.deps.Metrics == nil {
+		return
+	}
+
+	s.deps.Metrics.MITMCertificatesTotal.WithLabelValues(result).Inc()
 }
 
 func (s *Server) recordTLSConnectBlock(err error) {
@@ -539,4 +573,18 @@ func writeMITMErrorResponse(w io.Writer, status int, message string) error {
 
 func isConnectionClosed(err error) bool {
 	return err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
+}
+
+func connectDecisionMode(decision *policy.Decision) string {
+	if decision == nil || decision.TLSMode == "" {
+		return "unknown"
+	}
+	return decision.TLSMode
+}
+
+func connectResolvedMode(decision *policy.Decision) string {
+	if decision == nil || decision.TLSMode == "" {
+		return "passthrough"
+	}
+	return decision.TLSMode
 }

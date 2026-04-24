@@ -72,9 +72,9 @@ func NewMITMEngine(ca tls.Certificate, logger *slog.Logger) (*MITMEngine, error)
 	}, nil
 }
 
-func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, error) {
+func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, string, error) {
 	if serverName == "" {
-		return nil, fmt.Errorf("server name is required")
+		return nil, "", fmt.Errorf("server name is required")
 	}
 
 	now := e.now()
@@ -83,12 +83,12 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, err
 	defer e.mu.Unlock()
 
 	if cached, ok := e.cache[serverName]; ok && now.Before(cached.expiresAt) {
-		return cached.certificate, nil
+		return cached.certificate, "cache_hit", nil
 	}
 
 	certificate, err := e.generateCertificate(serverName, now)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	e.cache[serverName] = cachedMITMCertificate{
@@ -97,7 +97,7 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, err
 	}
 	e.logger.Debug("issued mitm certificate", "server_name", serverName, "not_after", certificate.Leaf.NotAfter)
 
-	return certificate, nil
+	return certificate, "issued", nil
 }
 
 func (e *MITMEngine) generateCertificate(serverName string, now time.Time) (*tls.Certificate, error) {

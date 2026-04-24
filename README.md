@@ -23,7 +23,8 @@ Implemented in this bootstrap:
   resolution can use the original client IP behind an L4 load balancer.
 - Live `SIGHUP` config reload for policy, DNS, discovery, and MITM CA changes.
 - Structured JSON logging with `slog`.
-- Prometheus metrics and `/healthz`.
+- Prometheus metrics and `/healthz`, including reload, Proxy Protocol, CONNECT,
+  and MITM certificate-cache counters.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
 
 Planned but not implemented yet:

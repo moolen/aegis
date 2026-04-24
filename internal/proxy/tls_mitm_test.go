@@ -20,8 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
+	"github.com/moolen/aegis/internal/metrics"
 )
 
 func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
@@ -52,6 +55,8 @@ func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
 	upstream.StartTLS()
 	defer upstream.Close()
 
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
 	proxyServer := httptest.NewServer(NewServer(Dependencies{
 		Resolver: staticResolver{
 			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
@@ -79,7 +84,8 @@ func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    ca.roots,
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}).Handler())
 	defer proxyServer.Close()
 
@@ -101,6 +107,12 @@ func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
 	}
 	if upstreamHits.Load() != 1 {
 		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+	if got := counterValue(t, reg, "aegis_connect_tunnels_total", map[string]string{"mode": "mitm", "result": "established"}); got != 1 {
+		t.Fatalf("connect tunnel metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_certificates_total", map[string]string{"result": "issued"}); got != 1 {
+		t.Fatalf("mitm certificate metric = %v, want 1", got)
 	}
 }
 
@@ -177,6 +189,8 @@ func TestProxyConnectMITMDeniesHTTPRequest(t *testing.T) {
 
 func TestProxyConnectMITMRequiresCAConfiguration(t *testing.T) {
 	dnsCalls := 0
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
 	proxyServer := httptest.NewServer(NewServer(Dependencies{
 		Resolver: countingResolver{
 			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
@@ -200,7 +214,8 @@ func TestProxyConnectMITMRequiresCAConfiguration(t *testing.T) {
 				},
 			}},
 		}}),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}).Handler())
 	defer proxyServer.Close()
 
@@ -216,6 +231,36 @@ func TestProxyConnectMITMRequiresCAConfiguration(t *testing.T) {
 	}
 	if dnsCalls != 0 {
 		t.Fatalf("dnsCalls = %d, want 0", dnsCalls)
+	}
+	if got := counterValue(t, reg, "aegis_connect_tunnels_total", map[string]string{"mode": "mitm", "result": "configuration_error"}); got != 1 {
+		t.Fatalf("connect tunnel metric = %v, want 1", got)
+	}
+}
+
+func TestMITMEngineCertificateForSNICachesCertificates(t *testing.T) {
+	ca := newMITMTestCA(t)
+	engine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+
+	first, firstResult, err := engine.CertificateForSNI("tunnel.internal")
+	if err != nil {
+		t.Fatalf("CertificateForSNI() first error = %v", err)
+	}
+	second, secondResult, err := engine.CertificateForSNI("tunnel.internal")
+	if err != nil {
+		t.Fatalf("CertificateForSNI() second error = %v", err)
+	}
+
+	if firstResult != "issued" {
+		t.Fatalf("first result = %q, want issued", firstResult)
+	}
+	if secondResult != "cache_hit" {
+		t.Fatalf("second result = %q, want cache_hit", secondResult)
+	}
+	if first != second {
+		t.Fatalf("certificate pointers differ: %p vs %p", first, second)
 	}
 }
 

@@ -485,6 +485,9 @@ func TestProxyEstablishesConnectTunnel(t *testing.T) {
 	if string(reply) != "pong" {
 		t.Fatalf("reply = %q, want %q", string(reply), "pong")
 	}
+	if got := counterValue(t, reg, "aegis_connect_tunnels_total", map[string]string{"mode": "passthrough", "result": "established"}); got != 1 {
+		t.Fatalf("connect tunnel metric = %v, want 1", got)
+	}
 
 	<-done
 }
