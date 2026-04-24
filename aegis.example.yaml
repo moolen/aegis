@@ -6,3 +6,15 @@ dns:
   cache_ttl: 30s
   timeout: 5s
   servers: []
+policies:
+  - name: allow-example
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET"]
+          allowedPaths: ["/*"]

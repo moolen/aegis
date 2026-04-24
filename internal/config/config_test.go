@@ -47,3 +47,66 @@ unknown: true
 		t.Fatal("expected unknown field error")
 	}
 }
+
+func TestLoadValidPolicyConfig(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-web
+    identitySelector:
+      matchLabels:
+        app: web
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET"]
+          allowedPaths: ["/api/*"]
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("policies = %d, want 1", len(cfg.Policies))
+	}
+}
+
+func TestLoadRejectsInvalidTLSMode(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: invalid
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsHTTPRulesForPassthrough(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+        http:
+          allowedMethods: ["GET"]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
