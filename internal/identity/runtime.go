@@ -25,22 +25,26 @@ type kubernetesRuntimeProviderDeps struct {
 	newKubernetesPodSource func(*rest.Config) (KubernetesPodSource, error)
 }
 
+var loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
+	if kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+	}
+	return rest.InClusterConfig()
+}
+
+var newKubernetesPodSource = func(restCfg *rest.Config) (KubernetesPodSource, error) {
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return coreV1PodSource{client: clientset.CoreV1()}, nil
+}
+
 func defaultKubernetesRuntimeProviderDeps() kubernetesRuntimeProviderDeps {
 	return kubernetesRuntimeProviderDeps{
-		loadRESTConfig: func(kubeconfig string) (*rest.Config, error) {
-			if kubeconfig != "" {
-				return clientcmd.BuildConfigFromFlags("", kubeconfig)
-			}
-			return rest.InClusterConfig()
-		},
-		newKubernetesPodSource: func(restCfg *rest.Config) (KubernetesPodSource, error) {
-			clientset, err := kubernetes.NewForConfig(restCfg)
-			if err != nil {
-				return nil, err
-			}
-
-			return coreV1PodSource{client: clientset.CoreV1()}, nil
-		},
+		loadRESTConfig:         loadRESTConfig,
+		newKubernetesPodSource: newKubernetesPodSource,
 	}
 }
 
@@ -59,6 +63,12 @@ func (s coreV1PodSource) Pods(namespace string) KubernetesPodNamespaceClient {
 }
 
 func NewKubernetesRuntimeProvider(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (RuntimeProvider, error) {
+	resyncPeriod := time.Minute
+	if cfg.ResyncPeriod != nil {
+		resyncPeriod = *cfg.ResyncPeriod
+	}
+
+	cfg.ResyncPeriod = &resyncPeriod
 	return newKubernetesRuntimeProvider(cfg, logger, defaultKubernetesRuntimeProviderDeps())
 }
 
