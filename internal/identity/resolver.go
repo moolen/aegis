@@ -12,3 +12,11 @@ type Identity struct {
 type Resolver interface {
 	Resolve(ip net.IP) (*Identity, error)
 }
+
+func Unknown() *Identity {
+	return &Identity{
+		Source: "unknown",
+		Name:   "unknown",
+		Labels: map[string]string{},
+	}
+}
