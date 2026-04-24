@@ -1,8 +1,15 @@
 # E2E
 
-This directory is reserved for the later Kind-based end-to-end suite described
-in `aegis-design-doc.md`.
+This directory now contains lightweight tagged cross-process smoke tests. Run
+them with:
 
-The MVP bootstrap stops at unit tests and local proxy smoke coverage inside the
-`internal/proxy` package. Full cross-process and cluster-aware end-to-end tests
-land in a follow-up phase.
+```bash
+go test -tags e2e ./e2e/...
+```
+
+The current suite exercises the real `aegis` binary as a subprocess and covers
+reload-sensitive runtime behavior that is awkward to prove in package-local
+tests.
+
+The heavier Kind-based and cluster-aware end-to-end suite described in
+`aegis-design-doc.md` is still a later phase.
