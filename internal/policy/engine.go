@@ -74,6 +74,30 @@ func (e *Engine) Evaluate(id *identity.Identity, fqdn string, port int, method s
 	return &Decision{}
 }
 
+func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *Decision {
+	for _, policy := range e.policies {
+		if !policy.matchesIdentity(id) {
+			continue
+		}
+
+		decision := &Decision{Policy: policy.name}
+		for _, rule := range policy.egress {
+			if !rule.matchesConnect(fqdn, port) {
+				continue
+			}
+
+			decision.Allowed = true
+			decision.Rule = rule.fqdnPattern
+			decision.TLSMode = rule.tlsMode
+			return decision
+		}
+
+		return decision
+	}
+
+	return &Decision{}
+}
+
 func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 	policy := Policy{
 		name:     cfg.Name,
@@ -154,11 +178,7 @@ func (p Policy) matchesIdentity(id *identity.Identity) bool {
 }
 
 func (r Rule) matches(fqdn string, port int, method string, reqPath string) bool {
-	if _, ok := r.ports[port]; !ok {
-		return false
-	}
-
-	if !matchGlob(r.fqdnPattern, strings.ToLower(fqdn)) {
+	if !r.matchesConnect(fqdn, port) {
 		return false
 	}
 
@@ -167,6 +187,18 @@ func (r Rule) matches(fqdn string, port int, method string, reqPath string) bool
 	}
 
 	return r.http.matches(method, reqPath)
+}
+
+func (r Rule) matchesConnect(fqdn string, port int) bool {
+	if _, ok := r.ports[port]; !ok {
+		return false
+	}
+
+	if !matchGlob(r.fqdnPattern, strings.ToLower(fqdn)) {
+		return false
+	}
+
+	return true
 }
 
 func (r HTTPRule) matches(method string, reqPath string) bool {

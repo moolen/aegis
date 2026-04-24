@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -399,6 +401,8 @@ func TestProxyFallsBackToUnknownIdentity(t *testing.T) {
 }
 
 func TestProxyEstablishesConnectTunnel(t *testing.T) {
+	clientHello := mustClientHello(t, "tunnel.internal")
+
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
@@ -414,8 +418,11 @@ func TestProxyEstablishesConnectTunnel(t *testing.T) {
 		}
 		defer conn.Close()
 
-		buf := make([]byte, 4)
+		buf := make([]byte, len(clientHello)+4)
 		_, _ = io.ReadFull(conn, buf)
+		if !bytes.Equal(buf[:len(clientHello)], clientHello) {
+			t.Fatal("upstream did not receive expected client hello")
+		}
 		_, _ = conn.Write([]byte("pong"))
 	}()
 
@@ -467,7 +474,7 @@ func TestProxyEstablishesConnectTunnel(t *testing.T) {
 		}
 	}
 
-	if _, err := conn.Write([]byte("ping")); err != nil {
+	if _, err := conn.Write(append(clientHello, []byte("ping")...)); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 
@@ -482,7 +489,9 @@ func TestProxyEstablishesConnectTunnel(t *testing.T) {
 	<-done
 }
 
-func TestProxyConnectIgnoresIdentityResolverAndPolicyEngine(t *testing.T) {
+func TestProxyConnectUsesIdentityResolverAndPolicyEngine(t *testing.T) {
+	clientHello := mustClientHello(t, "tunnel.internal")
+
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
@@ -498,21 +507,29 @@ func TestProxyConnectIgnoresIdentityResolverAndPolicyEngine(t *testing.T) {
 		}
 		defer conn.Close()
 
-		buf := make([]byte, 4)
+		buf := make([]byte, len(clientHello)+4)
 		_, _ = io.ReadFull(conn, buf)
 		_, _ = conn.Write([]byte("pong"))
 	}()
 
 	identityResolver := &spyIdentityResolver{
 		resolve: func(net.IP) (*identity.Identity, error) {
-			t.Fatal("identity resolver should not be called for CONNECT")
-			return nil, nil
+			return &identity.Identity{Labels: map[string]string{"app": "web"}}, nil
 		},
 	}
 	policyEngine := &policyEngineStub{
 		evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
-			t.Fatal("policy engine should not be called for CONNECT")
+			t.Fatal("http policy evaluation should not be called for CONNECT")
 			return nil
+		},
+		evaluateConnect: func(id *identity.Identity, fqdn string, port int) *policy.Decision {
+			if id == nil || id.Labels["app"] != "web" {
+				t.Fatalf("connect policy identity = %#v, want app=web", id)
+			}
+			if fqdn != "tunnel.internal" {
+				t.Fatalf("fqdn = %q, want %q", fqdn, "tunnel.internal")
+			}
+			return &policy.Decision{Allowed: true, TLSMode: "passthrough"}
 		},
 	}
 
@@ -563,7 +580,7 @@ func TestProxyConnectIgnoresIdentityResolverAndPolicyEngine(t *testing.T) {
 		}
 	}
 
-	if _, err := conn.Write([]byte("ping")); err != nil {
+	if _, err := conn.Write(append(clientHello, []byte("ping")...)); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 
@@ -575,14 +592,179 @@ func TestProxyConnectIgnoresIdentityResolverAndPolicyEngine(t *testing.T) {
 		t.Fatalf("reply = %q, want %q", string(reply), "pong")
 	}
 
-	if identityResolver.calls != 0 {
-		t.Fatalf("identity resolver calls = %d, want 0", identityResolver.calls)
+	if identityResolver.calls != 1 {
+		t.Fatalf("identity resolver calls = %d, want 1", identityResolver.calls)
 	}
-	if policyEngine.calls != 0 {
-		t.Fatalf("policy engine calls = %d, want 0", policyEngine.calls)
+	if policyEngine.connectCalls != 1 {
+		t.Fatalf("connect policy calls = %d, want 1", policyEngine.connectCalls)
 	}
 
 	<-done
+}
+
+func TestProxyConnectDeniesBeforeDNSLookup(t *testing.T) {
+	dnsCalls := 0
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: countingResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+			calls:  &dnsCalls,
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "jobs"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, "example.com:443")
+	defer conn.Close()
+
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString() error = %v", err)
+	}
+	if !strings.Contains(statusLine, "403") {
+		t.Fatalf("unexpected status line %q", statusLine)
+	}
+	if dnsCalls != 0 {
+		t.Fatalf("dnsCalls = %d, want 0", dnsCalls)
+	}
+}
+
+func TestProxyConnectBlocksMissingSNI(t *testing.T) {
+	clientHello := mustClientHello(t, "")
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamRead := make(chan int, 1)
+	go func() {
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			upstreamRead <- -1
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, len(clientHello))
+		n, _ := conn.Read(buf)
+		upstreamRead <- n
+	}()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{
+				"tunnel.internal": {net.ParseIP("127.0.0.1")},
+			},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-all",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:")))
+	defer conn.Close()
+	readConnectEstablished(t, reader)
+
+	if _, err := conn.Write(clientHello); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected tunnel to close for missing sni")
+	}
+
+	if n := <-upstreamRead; n != 0 {
+		t.Fatalf("upstream read = %d, want 0", n)
+	}
+}
+
+func TestProxyConnectBlocksSNIMismatch(t *testing.T) {
+	clientHello := mustClientHello(t, "other.internal")
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamRead := make(chan int, 1)
+	go func() {
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			upstreamRead <- -1
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, len(clientHello))
+		n, _ := conn.Read(buf)
+		upstreamRead <- n
+	}()
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{
+				"tunnel.internal": {net.ParseIP("127.0.0.1")},
+			},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-all",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:")))
+	defer conn.Close()
+	readConnectEstablished(t, reader)
+
+	if _, err := conn.Write(clientHello); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected tunnel to close for sni mismatch")
+	}
+
+	if n := <-upstreamRead; n != 0 {
+		t.Fatalf("upstream read = %d, want 0", n)
+	}
 }
 
 type staticResolver struct {
@@ -639,8 +821,10 @@ func (r *spyIdentityResolver) Resolve(ip net.IP) (*identity.Identity, error) {
 }
 
 type policyEngineStub struct {
-	calls    int
-	evaluate func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision
+	calls           int
+	connectCalls    int
+	evaluate        func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision
+	evaluateConnect func(id *identity.Identity, fqdn string, port int) *policy.Decision
 }
 
 func (p *policyEngineStub) Evaluate(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
@@ -649,6 +833,14 @@ func (p *policyEngineStub) Evaluate(id *identity.Identity, fqdn string, port int
 		return &policy.Decision{}
 	}
 	return p.evaluate(id, fqdn, port, method, reqPath)
+}
+
+func (p *policyEngineStub) EvaluateConnect(id *identity.Identity, fqdn string, port int) *policy.Decision {
+	p.connectCalls++
+	if p.evaluateConnect == nil {
+		return &policy.Decision{}
+	}
+	return p.evaluateConnect(id, fqdn, port)
 }
 
 func mustPolicyEngine(t *testing.T, cfgs []config.PolicyConfig) *policy.Engine {
@@ -681,6 +873,49 @@ func proxiedRequest(proxyAddr string, method string, targetURL string, body io.R
 
 func hostPortSuffix(hostport string) string {
 	return hostport[strings.LastIndex(hostport, ":"):]
+}
+
+func mustConnectProxy(t *testing.T, proxyAddr string, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
+	proxyURL, err := url.Parse(proxyAddr)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		conn.Close()
+		t.Fatalf("Fprintf() error = %v", err)
+	}
+
+	return conn, bufio.NewReader(conn)
+}
+
+func readConnectEstablished(t *testing.T, reader *bufio.Reader) {
+	t.Helper()
+
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString() error = %v", err)
+	}
+	if !strings.Contains(statusLine, "200") {
+		t.Fatalf("unexpected status line %q", statusLine)
+	}
+
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("reading headers: %v", readErr)
+		}
+		if line == "\r\n" {
+			return
+		}
+	}
 }
 
 func mustPort(t *testing.T, hostport string) int {

@@ -15,14 +15,14 @@ Implemented in this bootstrap:
 - Kubernetes and EC2 identity discovery wired into the running process.
 - Multiple discovery providers evaluated in deterministic config order, with
   first-match precedence.
-- Basic `CONNECT` tunneling that remains bootstrap-grade.
+- `CONNECT` tunneling with policy enforcement and TLS SNI validation for
+  passthrough rules.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
 
 Planned but not implemented yet:
 
-- TLS ClientHello inspection and SNI validation.
 - MITM certificate generation and HTTP inspection inside TLS.
 - Proxy Protocol v2 and production hardening features.
 
@@ -36,8 +36,9 @@ Current runtime behavior:
 - Provider startup failures are tolerated as long as at least one configured
   provider becomes active; failures are surfaced through structured logs and
   Prometheus metrics.
-- `CONNECT` remains a basic tunnel. TLS inspection and identity-aware HTTPS
-  enforcement are not implemented yet.
+- `CONNECT` requests resolve identity, evaluate policy, require a TLS
+  ClientHello with matching SNI, and then run in passthrough mode.
+- TLS MITM and HTTP inspection inside HTTPS tunnels are not implemented yet.
 
 ## Quick Start
 
@@ -94,13 +95,13 @@ current runtime shape: proxy on port `3128`, metrics on `9090`, and config
 mounted at `/etc/aegis/aegis.yaml`.
 
 These deployment files are scaffolding only. They reflect the current runtime:
-plain HTTP requests are policy-enforced, while `CONNECT` remains a basic tunnel
-without identity-aware TLS inspection or interception support. Kubernetes and
-EC2 discovery are runtime-wired today, multiple discovery providers are
-supported in deterministic config order, and provider startup failures are
-tolerated when at least one provider becomes active. For local development,
-discovery stays disabled unless you configure a provider explicitly. TLS
-inspection is still pending.
+plain HTTP requests are policy-enforced, while `CONNECT` now enforces policy
+and validates SNI before passthrough. Kubernetes and EC2 discovery are
+runtime-wired today, multiple discovery providers are supported in
+deterministic config order, and provider startup failures are tolerated when at
+least one provider becomes active. For local development, discovery stays
+disabled unless you configure a provider explicitly. TLS MITM inspection is
+still pending.
 
 ## Design Docs
 

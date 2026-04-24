@@ -456,3 +456,65 @@ func TestEvaluateMatchesFQDNCaseInsensitively(t *testing.T) {
 		t.Fatalf("decision.Allowed = false, want true")
 	}
 }
+
+func TestEvaluateConnectMatchesPassthroughRuleWithoutHTTPInspection(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"example.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatalf("decision.Allowed = false, want true")
+	}
+	if decision.TLSMode != "passthrough" {
+		t.Fatalf("decision.TLSMode = %q, want %q", decision.TLSMode, "passthrough")
+	}
+}
+
+func TestEvaluateConnectReturnsMITMDecisionWithoutHTTPMatch(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"GET"},
+				AllowedPaths:   []string{"/allowed"},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"example.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatalf("decision.Allowed = false, want true")
+	}
+	if decision.TLSMode != "mitm" {
+		t.Fatalf("decision.TLSMode = %q, want %q", decision.TLSMode, "mitm")
+	}
+}

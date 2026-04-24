@@ -13,6 +13,7 @@ type Metrics struct {
 	DiscoveryProvidersActive       prometheus.Gauge
 	IdentityResolutionsTotal       *prometheus.CounterVec
 	IdentityOverlapsTotal          *prometheus.CounterVec
+	TLSSNIMissingTotal             prometheus.Counter
 }
 
 func New(reg prometheus.Registerer) *Metrics {
@@ -87,6 +88,12 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"winner_provider", "winner_kind", "shadow_provider", "shadow_kind"},
 		),
+		TLSSNIMissingTotal: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "aegis_tls_sni_missing_total",
+				Help: "Total number of TLS connections blocked for missing SNI.",
+			},
+		),
 	}
 
 	reg.MustRegister(
@@ -100,6 +107,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.DiscoveryProvidersActive,
 		m.IdentityResolutionsTotal,
 		m.IdentityOverlapsTotal,
+		m.TLSSNIMissingTotal,
 		prometheus.NewGoCollector(),
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 	)

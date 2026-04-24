@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,7 @@ type IdentityResolver interface {
 
 type PolicyEngine interface {
 	Evaluate(id *identity.Identity, fqdn string, port int, method string, path string) *policy.Decision
+	EvaluateConnect(id *identity.Identity, fqdn string, port int) *policy.Decision
 }
 
 type Dependencies struct {
@@ -139,6 +141,19 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.deps.PolicyEngine != nil {
+		reqIdentity := s.resolveRequestIdentity(r)
+		decision := s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
+		if decision == nil || !decision.Allowed {
+			s.writeError(w, http.StatusForbidden, "connect target denied by policy", "policy")
+			return
+		}
+		if decision.TLSMode == "mitm" {
+			s.writeError(w, http.StatusNotImplemented, "connect tls mitm not implemented", "tls")
+			return
+		}
+	}
+
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
@@ -171,12 +186,29 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if buf.Reader.Buffered() > 0 {
-		if _, err := io.Copy(upstreamConn, buf); err != nil {
-			clientConn.Close()
-			upstreamConn.Close()
-			return
-		}
+	if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		s.deps.Logger.Debug("set connect client read deadline failed", "error", err)
+	}
+	clientHello, sni, err := readClientHello(buf.Reader)
+	_ = clientConn.SetReadDeadline(time.Time{})
+	if err != nil {
+		s.recordTLSConnectBlock(err)
+		s.deps.Logger.Warn("connect tls inspection failed", "target", host, "error", err)
+		clientConn.Close()
+		upstreamConn.Close()
+		return
+	}
+	if !strings.EqualFold(sni, host) {
+		s.recordTLSConnectBlock(nil)
+		s.deps.Logger.Warn("connect tls sni mismatch", "target", host, "sni", sni)
+		clientConn.Close()
+		upstreamConn.Close()
+		return
+	}
+	if _, err := upstreamConn.Write(clientHello); err != nil {
+		clientConn.Close()
+		upstreamConn.Close()
+		return
 	}
 
 	var wg sync.WaitGroup
@@ -184,7 +216,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstreamConn, clientConn)
+		_, _ = io.Copy(upstreamConn, buf.Reader)
 		_ = upstreamConn.Close()
 	}()
 
@@ -195,6 +227,17 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	wg.Wait()
+}
+
+func (s *Server) recordTLSConnectBlock(err error) {
+	if s.deps.Metrics == nil {
+		return
+	}
+
+	s.deps.Metrics.ErrorsTotal.WithLabelValues("tls").Inc()
+	if errors.Is(err, errTLSSNIMissing) {
+		s.deps.Metrics.TLSSNIMissingTotal.Inc()
+	}
 }
 
 func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
