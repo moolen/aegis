@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/proxy"
 )
 
 func TestBuildIdentityResolverKeepsHealthyProvidersAfterStartupFailure(t *testing.T) {
@@ -195,6 +197,64 @@ func TestBuildIdentityResolverReturnsNilWhenDiscoveryDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
+	restoreProvider := newKubernetesRuntimeProvider
+	restoreProxyServer := newProxyServer
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreProvider
+		newProxyServer = restoreProxyServer
+	})
+
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		if cfg.Name != "cluster-a" {
+			t.Fatalf("unexpected provider %q", cfg.Name)
+		}
+		return identity.RuntimeProvider{
+			Name: "cluster-a",
+			Kind: "kubernetes",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{Name: "default/api"},
+			},
+		}, nil
+	}
+
+	var captured proxy.Dependencies
+	newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
+		captured = deps
+		return fakeHandlerProvider{handler: http.NewServeMux()}
+	}
+
+	_, _, err := buildServers(context.Background(), config.Config{
+		Proxy:   config.ProxyConfig{Listen: ":8080"},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Policies: []config.PolicyConfig{{
+			Name: "allow-example",
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+		Discovery: config.DiscoveryConfig{
+			Kubernetes: []config.KubernetesDiscoveryConfig{{Name: "cluster-a"}},
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServers() error = %v", err)
+	}
+	if captured.IdentityResolver == nil {
+		t.Fatal("IdentityResolver was not injected into proxy dependencies")
+	}
+
+	id, err := captured.IdentityResolver.Resolve(net.ParseIP("10.0.0.10"))
+	if err != nil {
+		t.Fatalf("IdentityResolver.Resolve() error = %v", err)
+	}
+	if id == nil || id.Name != "default/api" {
+		t.Fatalf("IdentityResolver.Resolve() identity = %#v, want default/api", id)
+	}
+}
+
 type fakeStartableResolver struct {
 	identity *identity.Identity
 	startErr error
@@ -210,6 +270,14 @@ func (r fakeStartableResolver) Start(ctx context.Context, startupTimeout time.Du
 
 func (r fakeStartableResolver) Resolve(net.IP) (*identity.Identity, error) {
 	return r.identity, nil
+}
+
+type fakeHandlerProvider struct {
+	handler http.Handler
+}
+
+func (p fakeHandlerProvider) Handler() http.Handler {
+	return p.handler
 }
 
 func counterValue(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {

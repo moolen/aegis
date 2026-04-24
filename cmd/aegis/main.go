@@ -26,6 +26,10 @@ var newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, lo
 	return identity.NewKubernetesRuntimeProvider(cfg, logger)
 }
 
+var newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
+	return proxy.NewServer(deps)
+}
+
 var discoveryProviderStartupTimeout = 30 * time.Second
 
 func main() {
@@ -52,42 +56,10 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	registry := prometheus.NewRegistry()
-	m := appmetrics.New(registry)
-	resolver := dns.NewResolver(dns.Config{
-		CacheTTL: cfg.DNS.CacheTTL,
-		Timeout:  cfg.DNS.Timeout,
-		Servers:  cfg.DNS.Servers,
-	}, nil, logger, m)
-	engine, err := policy.NewEngine(cfg.Policies)
+	proxySrv, metricsSrv, err := buildServers(ctx, cfg, logger)
 	if err != nil {
-		logger.Error("compile policy engine failed", "error", err)
+		logger.Error("build servers failed", "error", err)
 		return 1
-	}
-	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
-	if err != nil {
-		logger.Error("build identity resolver failed", "error", err)
-		return 1
-	}
-
-	proxyHandler := proxy.NewServer(proxy.Dependencies{
-		Resolver:         resolver,
-		IdentityResolver: identityResolver,
-		PolicyEngine:     engine,
-		Metrics:          m,
-		Logger:           logger,
-	})
-	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
-
-	proxySrv := &http.Server{
-		Addr:              cfg.Proxy.Listen,
-		Handler:           proxyHandler.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	metricsSrv := &http.Server{
-		Addr:              cfg.Metrics.Listen,
-		Handler:           metricsHandler.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 2)
@@ -137,6 +109,43 @@ func shutdownServer(logger *slog.Logger, name string, srv *http.Server, ctx cont
 		return fmt.Errorf("shutdown %s server: %w", name, err)
 	}
 	return nil
+}
+
+func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, *http.Server, error) {
+	registry := prometheus.NewRegistry()
+	m := appmetrics.New(registry)
+	resolver := dns.NewResolver(dns.Config{
+		CacheTTL: cfg.DNS.CacheTTL,
+		Timeout:  cfg.DNS.Timeout,
+		Servers:  cfg.DNS.Servers,
+	}, nil, logger, m)
+	engine, err := policy.NewEngine(cfg.Policies)
+	if err != nil {
+		return nil, nil, fmt.Errorf("compile policy engine: %w", err)
+	}
+	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build identity resolver: %w", err)
+	}
+
+	proxyHandler := newProxyServer(proxy.Dependencies{
+		Resolver:         resolver,
+		IdentityResolver: identityResolver,
+		PolicyEngine:     engine,
+		Metrics:          m,
+		Logger:           logger,
+	})
+	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
+
+	return &http.Server{
+			Addr:              cfg.Proxy.Listen,
+			Handler:           proxyHandler.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}, &http.Server{
+			Addr:              cfg.Metrics.Listen,
+			Handler:           metricsHandler.Handler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}, nil
 }
 
 func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logger *slog.Logger, m *appmetrics.Metrics) (proxy.IdentityResolver, error) {
