@@ -216,10 +216,12 @@ func TestBuildIdentityResolverReturnsNilWhenDiscoveryDisabled(t *testing.T) {
 func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 	restoreProvider := newKubernetesRuntimeProvider
 	restoreEC2Provider := newEC2RuntimeProvider
+	restoreMITMEngine := newMITMEngineFromFiles
 	restoreProxyServer := newProxyServer
 	t.Cleanup(func() {
 		newKubernetesRuntimeProvider = restoreProvider
 		newEC2RuntimeProvider = restoreEC2Provider
+		newMITMEngineFromFiles = restoreMITMEngine
 		newProxyServer = restoreProxyServer
 	})
 
@@ -274,6 +276,108 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 	}
 	if id == nil || id.Name != "default/api" {
 		t.Fatalf("IdentityResolver.Resolve() identity = %#v, want default/api", id)
+	}
+}
+
+func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
+	restoreKubernetesProvider := newKubernetesRuntimeProvider
+	restoreEC2Provider := newEC2RuntimeProvider
+	restoreMITMEngine := newMITMEngineFromFiles
+	restoreProxyServer := newProxyServer
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetesProvider
+		newEC2RuntimeProvider = restoreEC2Provider
+		newMITMEngineFromFiles = restoreMITMEngine
+		newProxyServer = restoreProxyServer
+	})
+
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected kubernetes provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
+	}
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected ec2 provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
+	}
+
+	var gotCertFile string
+	var gotKeyFile string
+	expectedMITM := &proxy.MITMEngine{}
+	newMITMEngineFromFiles = func(certFile string, keyFile string, logger *slog.Logger) (*proxy.MITMEngine, error) {
+		gotCertFile = certFile
+		gotKeyFile = keyFile
+		return expectedMITM, nil
+	}
+
+	var captured proxy.Dependencies
+	newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
+		captured = deps
+		return fakeHandlerProvider{handler: http.NewServeMux()}
+	}
+
+	_, _, err := buildServers(context.Background(), config.Config{
+		Proxy: config.ProxyConfig{
+			Listen: ":8080",
+			CA: config.CAConfig{
+				CertFile: "/tmp/aegis-ca.crt",
+				KeyFile:  "/tmp/aegis-ca.key",
+			},
+		},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Policies: []config.PolicyConfig{{
+			Name: "allow-example",
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServers() error = %v", err)
+	}
+
+	if gotCertFile != "/tmp/aegis-ca.crt" || gotKeyFile != "/tmp/aegis-ca.key" {
+		t.Fatalf("mitm engine files = (%q, %q), want (/tmp/aegis-ca.crt, /tmp/aegis-ca.key)", gotCertFile, gotKeyFile)
+	}
+	if captured.MITM != expectedMITM {
+		t.Fatalf("captured MITM engine = %#v, want injected engine %#v", captured.MITM, expectedMITM)
+	}
+}
+
+func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
+	restoreMITMEngine := newMITMEngineFromFiles
+	t.Cleanup(func() {
+		newMITMEngineFromFiles = restoreMITMEngine
+	})
+
+	newMITMEngineFromFiles = func(certFile string, keyFile string, logger *slog.Logger) (*proxy.MITMEngine, error) {
+		return nil, errors.New("bad ca")
+	}
+
+	_, _, err := buildServers(context.Background(), config.Config{
+		Proxy: config.ProxyConfig{
+			Listen: ":8080",
+			CA: config.CAConfig{
+				CertFile: "/tmp/aegis-ca.crt",
+				KeyFile:  "/tmp/aegis-ca.key",
+			},
+		},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Policies: []config.PolicyConfig{{
+			Name: "allow-example",
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("expected buildServers() to fail")
+	}
+	if got := err.Error(); got != "load mitm engine: bad ca" {
+		t.Fatalf("error = %q, want %q", got, "load mitm engine: bad ca")
 	}
 }
 

@@ -28,9 +28,19 @@ spec:
             - name: config
               mountPath: /etc/aegis
               readOnly: true
+{{- if .Values.proxyCA.existingSecret }}
+            - name: proxy-ca
+              mountPath: {{ .Values.proxyCA.mountPath }}
+              readOnly: true
+{{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
       volumes:
         - name: config
           configMap:
             name: aegis-config
+{{- if .Values.proxyCA.existingSecret }}
+        - name: proxy-ca
+          secret:
+            secretName: {{ .Values.proxyCA.existingSecret }}
+{{- end }}

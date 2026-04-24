@@ -25,7 +25,13 @@ type Config struct {
 }
 
 type ProxyConfig struct {
-	Listen string `yaml:"listen"`
+	Listen string   `yaml:"listen"`
+	CA     CAConfig `yaml:"ca"`
+}
+
+type CAConfig struct {
+	CertFile string `yaml:"certFile"`
+	KeyFile  string `yaml:"keyFile"`
 }
 
 type MetricsConfig struct {
@@ -124,6 +130,9 @@ func LoadFile(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.Proxy.Listen == "" {
 		return fmt.Errorf("proxy.listen is required")
+	}
+	if (c.Proxy.CA.CertFile == "") != (c.Proxy.CA.KeyFile == "") {
+		return fmt.Errorf("proxy.ca.certFile and proxy.ca.keyFile must be set together")
 	}
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")

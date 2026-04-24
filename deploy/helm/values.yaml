@@ -8,11 +8,20 @@ service:
   proxyPort: 3128
   metricsPort: 9090
 
+proxyCA:
+  existingSecret: ""
+  mountPath: /etc/aegis/ca
+  certFile: ca.crt
+  keyFile: ca.key
+
 resources: {}
 
 config:
   proxy:
     listen: ":3128"
+    # ca:
+    #   certFile: /etc/aegis/ca/ca.crt
+    #   keyFile: /etc/aegis/ca/ca.key
   metrics:
     listen: ":9090"
   dns:
@@ -34,8 +43,8 @@ config:
 
 # Bootstrap status: this chart now renders a runnable default policy config.
 # Plain HTTP requests are policy-enforced, Kubernetes and EC2 discovery can be
-# wired at runtime, and CONNECT now validates SNI before passthrough. TLS MITM
-# is still not implemented.
+# wired at runtime, and CONNECT supports both SNI-validated passthrough and
+# CA-backed TLS MITM when config.proxy.ca is set and a CA secret is mounted.
 # The default empty identitySelector.matchLabels is a safe starter policy that
 # matches any discovered identity; tighten it once you know the workload labels
 # you want to authorize.

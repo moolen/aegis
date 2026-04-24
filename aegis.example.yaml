@@ -1,5 +1,9 @@
 proxy:
   listen: ":3128"
+  # Uncomment to enable TLS MITM for CONNECT rules with tls.mode: mitm.
+  # ca:
+  #   certFile: /etc/aegis/ca/ca.crt
+  #   keyFile: /etc/aegis/ca/ca.key
 metrics:
   listen: ":9090"
 dns:

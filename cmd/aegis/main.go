@@ -30,6 +30,10 @@ var newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Log
 	return identity.NewEC2RuntimeProvider(cfg, logger)
 }
 
+var newMITMEngineFromFiles = func(certFile string, keyFile string, logger *slog.Logger) (*proxy.MITMEngine, error) {
+	return proxy.NewMITMEngineFromFiles(certFile, keyFile, logger)
+}
+
 var newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
 	return proxy.NewServer(deps)
 }
@@ -127,6 +131,13 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("compile policy engine: %w", err)
 	}
+	var mitmEngine *proxy.MITMEngine
+	if cfg.Proxy.CA.CertFile != "" {
+		mitmEngine, err = newMITMEngineFromFiles(cfg.Proxy.CA.CertFile, cfg.Proxy.CA.KeyFile, logger)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load mitm engine: %w", err)
+		}
+	}
 	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build identity resolver: %w", err)
@@ -136,6 +147,7 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		Resolver:         resolver,
 		IdentityResolver: identityResolver,
 		PolicyEngine:     engine,
+		MITM:             mitmEngine,
 		Metrics:          m,
 		Logger:           logger,
 	})

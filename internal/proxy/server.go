@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -32,11 +35,13 @@ type PolicyEngine interface {
 }
 
 type Dependencies struct {
-	Resolver         Resolver
-	IdentityResolver IdentityResolver
-	PolicyEngine     PolicyEngine
-	Metrics          *metrics.Metrics
-	Logger           *slog.Logger
+	Resolver          Resolver
+	IdentityResolver  IdentityResolver
+	PolicyEngine      PolicyEngine
+	MITM              *MITMEngine
+	UpstreamTLSConfig *tls.Config
+	Metrics           *metrics.Metrics
+	Logger            *slog.Logger
 }
 
 type Server struct {
@@ -141,15 +146,17 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reqIdentity := identity.Unknown()
+	var decision *policy.Decision
 	if s.deps.PolicyEngine != nil {
-		reqIdentity := s.resolveRequestIdentity(r)
-		decision := s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
+		reqIdentity = s.resolveRequestIdentity(r)
+		decision = s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
 		if decision == nil || !decision.Allowed {
 			s.writeError(w, http.StatusForbidden, "connect target denied by policy", "policy")
 			return
 		}
-		if decision.TLSMode == "mitm" {
-			s.writeError(w, http.StatusNotImplemented, "connect tls mitm not implemented", "tls")
+		if decision.TLSMode == "mitm" && s.deps.MITM == nil {
+			s.writeError(w, http.StatusInternalServerError, "connect tls mitm requires proxy.ca cert and key configuration", "tls")
 			return
 		}
 	}
@@ -205,18 +212,143 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		upstreamConn.Close()
 		return
 	}
+
+	if decision != nil && decision.TLSMode == "mitm" {
+		s.handleConnectMITM(clientConn, buf.Reader, clientHello, upstreamConn, reqIdentity, sni, port)
+		return
+	}
+
 	if _, err := upstreamConn.Write(clientHello); err != nil {
 		clientConn.Close()
 		upstreamConn.Close()
 		return
 	}
 
+	s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
+}
+
+func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, upstreamConn net.Conn, reqIdentity *identity.Identity, serverName string, port int) {
+	clientTLSConn, err := s.handshakeClientMITM(clientConn, clientReader, clientHello, serverName)
+	if err != nil {
+		s.recordTLSError()
+		s.deps.Logger.Warn("connect mitm client handshake failed", "server_name", serverName, "error", err)
+		clientConn.Close()
+		upstreamConn.Close()
+		return
+	}
+	defer clientTLSConn.Close()
+
+	upstreamTLSConn, err := s.handshakeUpstreamTLS(upstreamConn, serverName)
+	if err != nil {
+		s.recordTLSError()
+		s.deps.Logger.Warn("connect mitm upstream handshake failed", "server_name", serverName, "error", err)
+		return
+	}
+	defer upstreamTLSConn.Close()
+
+	clientReaderTLS := bufio.NewReader(clientTLSConn)
+	upstreamReaderTLS := bufio.NewReader(upstreamTLSConn)
+
+	for {
+		req, err := http.ReadRequest(clientReaderTLS)
+		if err != nil {
+			if isConnectionClosed(err) {
+				return
+			}
+			s.recordTLSError()
+			s.deps.Logger.Warn("connect mitm read request failed", "server_name", serverName, "error", err)
+			return
+		}
+
+		if s.deps.PolicyEngine != nil {
+			decision := s.deps.PolicyEngine.Evaluate(reqIdentity, serverName, port, req.Method, requestPolicyPath(req))
+			if decision == nil || !decision.Allowed {
+				s.recordPolicyError()
+				s.deps.Logger.Warn("connect mitm request denied by policy", "server_name", serverName, "method", req.Method, "path", requestPolicyPath(req))
+				_ = writeMITMErrorResponse(clientTLSConn, http.StatusForbidden, "request denied by policy")
+				return
+			}
+		}
+
+		req.RequestURI = ""
+		removeHopByHopHeaders(req.Header)
+		if err := req.Write(upstreamTLSConn); err != nil {
+			s.recordTLSError()
+			s.deps.Logger.Warn("connect mitm write upstream request failed", "server_name", serverName, "error", err)
+			_ = writeMITMErrorResponse(clientTLSConn, http.StatusBadGateway, "upstream request failed")
+			return
+		}
+
+		resp, err := http.ReadResponse(upstreamReaderTLS, req)
+		if err != nil {
+			s.recordTLSError()
+			s.deps.Logger.Warn("connect mitm read upstream response failed", "server_name", serverName, "error", err)
+			_ = writeMITMErrorResponse(clientTLSConn, http.StatusBadGateway, "upstream response failed")
+			return
+		}
+
+		if err := resp.Write(clientTLSConn); err != nil {
+			resp.Body.Close()
+			if isConnectionClosed(err) {
+				return
+			}
+			s.recordTLSError()
+			s.deps.Logger.Warn("connect mitm write client response failed", "server_name", serverName, "error", err)
+			return
+		}
+		resp.Body.Close()
+	}
+}
+
+func (s *Server) handshakeClientMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, serverName string) (*tls.Conn, error) {
+	certificate, err := s.deps.MITM.CertificateForSNI(serverName)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConn := tls.Server(&replayConn{
+		Conn:   clientConn,
+		reader: io.MultiReader(bytes.NewReader(clientHello), clientReader),
+	}, &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{*certificate},
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, err
+	}
+
+	return tlsConn, nil
+}
+
+func (s *Server) handshakeUpstreamTLS(upstreamConn net.Conn, serverName string) (*tls.Conn, error) {
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverName,
+	}
+	if s.deps.UpstreamTLSConfig != nil {
+		cfg = s.deps.UpstreamTLSConfig.Clone()
+		cfg.ServerName = serverName
+		if cfg.MinVersion == 0 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
+	}
+
+	tlsConn := tls.Client(upstreamConn, cfg)
+	if err := tlsConn.Handshake(); err != nil {
+		upstreamConn.Close()
+		return nil, err
+	}
+
+	return tlsConn, nil
+}
+
+func (s *Server) spliceConnectTunnel(clientConn net.Conn, upstreamConn net.Conn, clientReader io.Reader) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstreamConn, buf.Reader)
+		_, _ = io.Copy(upstreamConn, clientReader)
 		_ = upstreamConn.Close()
 	}()
 
@@ -227,6 +359,22 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	wg.Wait()
+}
+
+func (s *Server) recordTLSError() {
+	if s.deps.Metrics == nil {
+		return
+	}
+
+	s.deps.Metrics.ErrorsTotal.WithLabelValues("tls").Inc()
+}
+
+func (s *Server) recordPolicyError() {
+	if s.deps.Metrics == nil {
+		return
+	}
+
+	s.deps.Metrics.ErrorsTotal.WithLabelValues("policy").Inc()
 }
 
 func (s *Server) recordTLSConnectBlock(err error) {
@@ -359,4 +507,36 @@ func removeHopByHopHeaders(header http.Header) {
 	} {
 		header.Del(key)
 	}
+}
+
+type replayConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (c *replayConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
+func writeMITMErrorResponse(w io.Writer, status int, message string) error {
+	body := message + "\n"
+	resp := &http.Response{
+		StatusCode:    status,
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		ContentLength: int64(len(body)),
+		Header: http.Header{
+			"Content-Length": []string{strconv.Itoa(len(body))},
+			"Content-Type":   []string{"text/plain; charset=utf-8"},
+			"Connection":     []string{"close"},
+		},
+		Body: io.NopCloser(strings.NewReader(body)),
+	}
+
+	return resp.Write(w)
+}
+
+func isConnectionClosed(err error) bool {
+	return err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
 }

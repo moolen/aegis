@@ -17,13 +17,14 @@ Implemented in this bootstrap:
   first-match precedence.
 - `CONNECT` tunneling with policy enforcement and TLS SNI validation for
   passthrough rules.
+- CA-backed TLS MITM for `CONNECT` rules with `tls.mode: mitm`, including
+  decrypted HTTP method/path enforcement.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
 
 Planned but not implemented yet:
 
-- MITM certificate generation and HTTP inspection inside TLS.
 - Proxy Protocol v2 and production hardening features.
 
 Current runtime behavior:
@@ -37,8 +38,11 @@ Current runtime behavior:
   provider becomes active; failures are surfaced through structured logs and
   Prometheus metrics.
 - `CONNECT` requests resolve identity, evaluate policy, require a TLS
-  ClientHello with matching SNI, and then run in passthrough mode.
-- TLS MITM and HTTP inspection inside HTTPS tunnels are not implemented yet.
+  ClientHello with matching SNI, and then run in passthrough or MITM mode
+  depending on the matched rule.
+- TLS MITM requires `proxy.ca.certFile` and `proxy.ca.keyFile`; once
+  configured, Aegis terminates client TLS, verifies upstream TLS, and evaluates
+  decrypted HTTP requests before forwarding them.
 
 ## Quick Start
 
@@ -55,7 +59,9 @@ AWS credentials. To enable runtime Kubernetes discovery, add a provider entry
 under `discovery.kubernetes` and set either `kubeconfig` for a local run or
 leave it unset only when running inside the target cluster. To enable EC2
 discovery, add a provider entry under `discovery.ec2`, set the target AWS
-`region`, and define the tag filters that scope instance discovery.
+`region`, and define the tag filters that scope instance discovery. To enable
+TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
+`proxy.ca.certFile` and `proxy.ca.keyFile`.
 
 Send traffic through the proxy:
 
@@ -96,12 +102,13 @@ mounted at `/etc/aegis/aegis.yaml`.
 
 These deployment files are scaffolding only. They reflect the current runtime:
 plain HTTP requests are policy-enforced, while `CONNECT` now enforces policy
-and validates SNI before passthrough. Kubernetes and EC2 discovery are
-runtime-wired today, multiple discovery providers are supported in
-deterministic config order, and provider startup failures are tolerated when at
-least one provider becomes active. For local development, discovery stays
-disabled unless you configure a provider explicitly. TLS MITM inspection is
-still pending.
+and validates SNI before entering passthrough or MITM mode. Kubernetes and EC2
+discovery are runtime-wired today, multiple discovery providers are supported
+in deterministic config order, and provider startup failures are tolerated when
+at least one provider becomes active. For local development, discovery stays
+disabled unless you configure a provider explicitly. The Helm chart includes an
+optional `proxyCA.existingSecret` mount for the CA files referenced by
+`config.proxy.ca`.
 
 ## Design Docs
 
