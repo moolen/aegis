@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -381,6 +383,110 @@ func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerReloadSwapsHandlerAndCountsSuccess(t *testing.T) {
+	restoreProxyServer := newProxyServer
+	t.Cleanup(func() {
+		newProxyServer = restoreProxyServer
+	})
+
+	generation := 0
+	newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
+		generation++
+		body := "generation-1"
+		if generation == 2 {
+			body = "generation-2"
+		}
+		return fakeHandlerProvider{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, body)
+		})}
+	}
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAML("policy-a", ":3128", ":9090", false, ""))
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	handler := &reloadableProxyHandler{}
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	if got := serveReloadableHandler(t, handler); got != "generation-1" {
+		t.Fatalf("body = %q, want generation-1", got)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAML("policy-b", ":3128", ":9090", false, ""))
+	if err := manager.ReloadFromFile(); err != nil {
+		t.Fatalf("ReloadFromFile() error = %v", err)
+	}
+
+	if got := serveReloadableHandler(t, handler); got != "generation-2" {
+		t.Fatalf("body = %q, want generation-2", got)
+	}
+	if got := counterValue(t, reg, "aegis_config_reloads_total", map[string]string{"result": "success"}); got != 1 {
+		t.Fatalf("reload success metric = %v, want 1", got)
+	}
+}
+
+func TestRuntimeManagerReloadFailureKeepsCurrentHandlerAndCountsError(t *testing.T) {
+	restoreProxyServer := newProxyServer
+	t.Cleanup(func() {
+		newProxyServer = restoreProxyServer
+	})
+
+	newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
+		return fakeHandlerProvider{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "stable-generation")
+		})}
+	}
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAML("policy-a", ":3128", ":9090", false, ""))
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	handler := &reloadableProxyHandler{}
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAML("policy-b", ":4000", ":9090", false, ""))
+	if err := manager.ReloadFromFile(); err == nil {
+		t.Fatal("expected ReloadFromFile() to fail")
+	}
+
+	if got := serveReloadableHandler(t, handler); got != "stable-generation" {
+		t.Fatalf("body = %q, want stable-generation", got)
+	}
+	if got := counterValue(t, reg, "aegis_config_reloads_total", map[string]string{"result": "error"}); got != 1 {
+		t.Fatalf("reload error metric = %v, want 1", got)
+	}
+}
+
+func TestValidateReloadableConfigRejectsProxyProtocolChange(t *testing.T) {
+	current := testRuntimeConfig()
+	next := testRuntimeConfig()
+	next.Proxy.ProxyProtocol.Enabled = true
+
+	err := validateReloadableConfig(current, next)
+	if err == nil {
+		t.Fatal("expected validateReloadableConfig() to fail")
+	}
+	if got := err.Error(); got != "proxy.proxyProtocol.enabled cannot change during reload" {
+		t.Fatalf("error = %q, want %q", got, "proxy.proxyProtocol.enabled cannot change during reload")
+	}
+}
+
 func TestBuildIdentityResolverUsesHealthyEC2Provider(t *testing.T) {
 	restoreKubernetes := newKubernetesRuntimeProvider
 	restoreEC2 := newEC2RuntimeProvider
@@ -427,6 +533,92 @@ func TestBuildIdentityResolverUsesHealthyEC2Provider(t *testing.T) {
 	}
 	if got := counterValue(t, reg, "aegis_discovery_provider_starts_total", map[string]string{"provider": "production-ec2", "kind": "ec2"}); got != 1 {
 		t.Fatalf("start counter = %v, want 1", got)
+	}
+}
+
+func serveReloadableHandler(t *testing.T, handler http.Handler) string {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	return resp.Body.String()
+}
+
+func writeRuntimeConfig(t *testing.T, contents string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := dir + "/aegis.yaml"
+	writeRuntimeConfigAt(t, path, contents)
+	return path
+}
+
+func writeRuntimeConfigAt(t *testing.T, path string, contents string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+func runtimeConfigYAML(policyName string, proxyListen string, metricsListen string, proxyProtocol bool, proxyProtocolTimeout string) string {
+	proxyProtocolBlock := ""
+	if proxyProtocol {
+		proxyProtocolBlock = "  proxyProtocol:\n    enabled: true\n"
+		if proxyProtocolTimeout != "" {
+			proxyProtocolBlock += "    headerTimeout: " + proxyProtocolTimeout + "\n"
+		}
+	}
+
+	return "proxy:\n" +
+		"  listen: \"" + proxyListen + "\"\n" +
+		proxyProtocolBlock +
+		"metrics:\n" +
+		"  listen: \"" + metricsListen + "\"\n" +
+		"dns:\n" +
+		"  cache_ttl: 30s\n" +
+		"  timeout: 5s\n" +
+		"  servers: []\n" +
+		"policies:\n" +
+		"  - name: " + policyName + "\n" +
+		"    identitySelector:\n" +
+		"      matchLabels: {}\n" +
+		"    egress:\n" +
+		"      - fqdn: \"example.com\"\n" +
+		"        ports: [80]\n" +
+		"        tls:\n" +
+		"          mode: mitm\n" +
+		"        http:\n" +
+		"          allowedMethods: [\"GET\"]\n" +
+		"          allowedPaths: [\"/*\"]\n"
+}
+
+func testRuntimeConfig() config.Config {
+	return config.Config{
+		Proxy: config.ProxyConfig{
+			Listen: ":3128",
+		},
+		Metrics: config.MetricsConfig{
+			Listen: ":9090",
+		},
+		DNS: config.DNSConfig{
+			CacheTTL: 30 * time.Second,
+			Timeout:  5 * time.Second,
+		},
+		Policies: []config.PolicyConfig{{
+			Name: "allow-example",
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{80},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}},
 	}
 }
 

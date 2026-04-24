@@ -21,13 +21,14 @@ Implemented in this bootstrap:
   decrypted HTTP method/path enforcement.
 - Optional Proxy Protocol v2 support on the proxy listener so identity
   resolution can use the original client IP behind an L4 load balancer.
+- Live `SIGHUP` config reload for policy, DNS, discovery, and MITM CA changes.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
 
 Planned but not implemented yet:
 
-- Config reload and remaining production hardening features.
+- Remaining production hardening features.
 
 Current runtime behavior:
 
@@ -48,6 +49,9 @@ Current runtime behavior:
 - When `proxy.proxyProtocol.enabled` is set, the proxy listener requires Proxy
   Protocol v2 on inbound connections and uses the forwarded source IP for
   request identity resolution.
+- `SIGHUP` reloads the config file in place. Listener settings stay immutable
+  during reload: `proxy.listen`, `metrics.listen`, and `proxy.proxyProtocol.*`
+  changes are rejected and require a process restart.
 
 ## Quick Start
 
@@ -68,7 +72,8 @@ discovery, add a provider entry under `discovery.ec2`, set the target AWS
 TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
 `proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs behind an
 NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
-the balancer to emit Proxy Protocol v2 on the proxy port.
+the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
+discovery changes without restarting the process, send `SIGHUP` to Aegis.
 
 Send traffic through the proxy:
 

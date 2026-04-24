@@ -56,47 +56,65 @@ func run() int {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	cfg, err := config.LoadFile(configPath)
+	cfg, err := loadRuntimeConfig(configPath)
 	if err != nil {
 		logger.Error("load config failed", "path", configPath, "error", err)
-		return 1
-	}
-	if len(cfg.Policies) == 0 {
-		logger.Error("load config failed", "error", "policies must contain at least one entry to enable plain HTTP policy enforcement safely")
 		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	proxySrv, metricsSrv, m, err := buildServers(ctx, cfg, logger)
-	if err != nil {
-		logger.Error("build servers failed", "error", err)
+	registry := prometheus.NewRegistry()
+	m := appmetrics.New(registry)
+	reloadableHandler := &reloadableProxyHandler{}
+	runtime := newRuntimeManager(ctx, logger, m, configPath, reloadableHandler)
+	defer runtime.Close()
+	if err := runtime.LoadInitial(cfg); err != nil {
+		logger.Error("build runtime failed", "error", err)
 		return 1
 	}
+
+	proxySrv, metricsSrv := newHTTPServers(cfg, reloadableHandler, appmetrics.NewServer(cfg.Metrics.Listen, registry).Handler())
 	proxyListener, metricsListener, err := buildListeners(cfg, logger, m)
 	if err != nil {
 		logger.Error("build listeners failed", "error", err)
 		return 1
 	}
+	defer proxyListener.Close()
+	defer metricsListener.Close()
 
 	errCh := make(chan error, 2)
+	reloadCh := make(chan os.Signal, 1)
+	signal.Notify(reloadCh, syscall.SIGHUP)
+	defer signal.Stop(reloadCh)
 
 	go serve(logger, "proxy", proxySrv, proxyListener, errCh)
 	go serve(logger, "metrics", metricsSrv, metricsListener, errCh)
 
 	logger.Info("aegis started", "proxy_listen", cfg.Proxy.Listen, "metrics_listen", cfg.Metrics.Listen)
 
-	select {
-	case err := <-errCh:
-		if err != nil {
-			logger.Error("server exited with error", "error", err)
-			return 1
+	for {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				logger.Error("server exited with error", "error", err)
+				return 1
+			}
+			return 0
+		case <-reloadCh:
+			if err := runtime.ReloadFromFile(); err != nil {
+				logger.Error("reload config failed", "path", configPath, "error", err)
+				continue
+			}
+			logger.Info("config reloaded", "path", configPath)
+		case <-ctx.Done():
+			logger.Info("shutdown signal received")
+			goto shutdown
 		}
-	case <-ctx.Done():
-		logger.Info("shutdown signal received")
 	}
 
+shutdown:
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -132,6 +150,18 @@ func shutdownServer(logger *slog.Logger, name string, srv *http.Server, ctx cont
 func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, *http.Server, *appmetrics.Metrics, error) {
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
+	deps, err := buildProxyDependencies(ctx, cfg, logger, m)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	proxyHandler := newProxyServer(deps)
+	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
+
+	proxySrv, metricsSrv := newHTTPServers(cfg, proxyHandler.Handler(), metricsHandler.Handler())
+	return proxySrv, metricsSrv, m, nil
+}
+
+func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics) (proxy.Dependencies, error) {
 	resolver := dns.NewResolver(dns.Config{
 		CacheTTL: cfg.DNS.CacheTTL,
 		Timeout:  cfg.DNS.Timeout,
@@ -139,39 +169,40 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}, nil, logger, m)
 	engine, err := policy.NewEngine(cfg.Policies)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("compile policy engine: %w", err)
+		return proxy.Dependencies{}, fmt.Errorf("compile policy engine: %w", err)
 	}
 	var mitmEngine *proxy.MITMEngine
 	if cfg.Proxy.CA.CertFile != "" {
 		mitmEngine, err = newMITMEngineFromFiles(cfg.Proxy.CA.CertFile, cfg.Proxy.CA.KeyFile, logger)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("load mitm engine: %w", err)
+			return proxy.Dependencies{}, fmt.Errorf("load mitm engine: %w", err)
 		}
 	}
 	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build identity resolver: %w", err)
+		return proxy.Dependencies{}, fmt.Errorf("build identity resolver: %w", err)
 	}
 
-	proxyHandler := newProxyServer(proxy.Dependencies{
+	return proxy.Dependencies{
 		Resolver:         resolver,
 		IdentityResolver: identityResolver,
 		PolicyEngine:     engine,
 		MITM:             mitmEngine,
 		Metrics:          m,
 		Logger:           logger,
-	})
-	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
+	}, nil
+}
 
+func newHTTPServers(cfg config.Config, proxyHandler http.Handler, metricsHandler http.Handler) (*http.Server, *http.Server) {
 	return &http.Server{
 			Addr:              cfg.Proxy.Listen,
-			Handler:           proxyHandler.Handler(),
+			Handler:           proxyHandler,
 			ReadHeaderTimeout: 10 * time.Second,
 		}, &http.Server{
 			Addr:              cfg.Metrics.Listen,
-			Handler:           metricsHandler.Handler(),
+			Handler:           metricsHandler,
 			ReadHeaderTimeout: 5 * time.Second,
-		}, m, nil
+		}
 }
 
 func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics) (net.Listener, net.Listener, error) {

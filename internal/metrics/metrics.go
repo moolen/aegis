@@ -14,6 +14,7 @@ type Metrics struct {
 	IdentityResolutionsTotal       *prometheus.CounterVec
 	IdentityOverlapsTotal          *prometheus.CounterVec
 	ProxyProtocolConnectionsTotal  *prometheus.CounterVec
+	ConfigReloadsTotal             *prometheus.CounterVec
 	TLSSNIMissingTotal             prometheus.Counter
 }
 
@@ -96,6 +97,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"result"},
 		),
+		ConfigReloadsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_config_reloads_total",
+				Help: "Total number of config reload outcomes.",
+			},
+			[]string{"result"},
+		),
 		TLSSNIMissingTotal: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Name: "aegis_tls_sni_missing_total",
@@ -116,6 +124,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.IdentityResolutionsTotal,
 		m.IdentityOverlapsTotal,
 		m.ProxyProtocolConnectionsTotal,
+		m.ConfigReloadsTotal,
 		m.TLSSNIMissingTotal,
 		prometheus.NewGoCollector(),
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
