@@ -23,6 +23,7 @@ type StartableResolver interface {
 type kubernetesRuntimeProviderDeps struct {
 	loadRESTConfig         func(string) (*rest.Config, error)
 	newKubernetesPodSource func(*rest.Config) (KubernetesPodSource, error)
+	newKubernetesProvider  func(KubernetesProviderConfig, *slog.Logger) (StartableResolver, error)
 }
 
 var loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
@@ -49,6 +50,7 @@ func defaultKubernetesRuntimeProviderDeps() kubernetesRuntimeProviderDeps {
 	return kubernetesRuntimeProviderDeps{
 		loadRESTConfig:         loadRESTConfig,
 		newKubernetesPodSource: newKubernetesPodSource,
+		newKubernetesProvider:  newKubernetesProvider,
 	}
 }
 
@@ -92,7 +94,7 @@ func newKubernetesRuntimeProvider(cfg config.KubernetesDiscoveryConfig, logger *
 		resyncPeriod = *cfg.ResyncPeriod
 	}
 
-	provider, err := newKubernetesProvider(KubernetesProviderConfig{
+	provider, err := deps.newKubernetesProvider(KubernetesProviderConfig{
 		Name:         cfg.Name,
 		Source:       source,
 		Namespaces:   cfg.Namespaces,

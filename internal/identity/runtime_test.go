@@ -137,6 +137,9 @@ func TestNewKubernetesRuntimeProviderFallsBackToInClusterConfig(t *testing.T) {
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			return fakeRuntimePodSource{}, nil
 		},
+		newKubernetesProvider: func(KubernetesProviderConfig, *slog.Logger) (StartableResolver, error) {
+			return &fakeRuntimeResolver{}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewKubernetesRuntimeProvider() error = %v", err)
@@ -151,6 +154,10 @@ func TestNewKubernetesRuntimeProviderPropagatesLoadRESTConfigErrors(t *testing.T
 		},
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			t.Fatal("newKubernetesPodSource should not be called when rest config load fails")
+			return nil, nil
+		},
+		newKubernetesProvider: func(KubernetesProviderConfig, *slog.Logger) (StartableResolver, error) {
+			t.Fatal("newKubernetesProvider should not be called when rest config load fails")
 			return nil, nil
 		},
 	})
@@ -173,9 +180,34 @@ func TestNewKubernetesRuntimeProviderPropagatesSourceErrors(t *testing.T) {
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			return nil, errors.New("no cluster")
 		},
+		newKubernetesProvider: func(KubernetesProviderConfig, *slog.Logger) (StartableResolver, error) {
+			t.Fatal("newKubernetesProvider should not be called when pod source construction fails")
+			return nil, nil
+		},
 	})
 	if err == nil {
 		t.Fatal("expected construction error")
+	}
+}
+
+func TestNewKubernetesRuntimeProviderPropagatesProviderErrors(t *testing.T) {
+	providerErr := errors.New("provider init failed")
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		loadRESTConfig: func(string) (*rest.Config, error) {
+			return &rest.Config{}, nil
+		},
+		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
+			return fakeRuntimePodSource{}, nil
+		},
+		newKubernetesProvider: func(KubernetesProviderConfig, *slog.Logger) (StartableResolver, error) {
+			return nil, providerErr
+		},
+	})
+	if err == nil {
+		t.Fatal("expected construction error")
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("error = %v, want wrapped provider error", err)
 	}
 }
 
