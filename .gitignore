@@ -1,5 +1,7 @@
 .worktrees/
 .cache/
+.gocache/
+.gomodcache/
 bin/
 dist/
 coverage.out
