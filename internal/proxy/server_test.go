@@ -10,12 +10,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/moolen/aegis/internal/config"
+	"github.com/moolen/aegis/internal/identity"
 	"github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/policy"
 )
 
 func TestProxyForwardsHTTPRequests(t *testing.T) {
@@ -70,6 +75,168 @@ func TestProxyForwardsHTTPRequests(t *testing.T) {
 	}
 	if receivedHost == "" || !strings.HasPrefix(receivedHost, "service.internal:") {
 		t.Fatalf("received host = %q, want service.internal:<port>", receivedHost)
+	}
+}
+
+func TestProxyDeniesHTTPRequestsBeforeDNSLookup(t *testing.T) {
+	dnsCalls := 0
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: countingResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+			calls:  &dnsCalls,
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "jobs"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{80},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if dnsCalls != 0 {
+		t.Fatalf("dnsCalls = %d, want 0", dnsCalls)
+	}
+}
+
+func TestProxyAllowsHTTPRequestsWhenPolicyMatches(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %q, want %q", r.Method, http.MethodGet)
+		}
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/allowed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/allowed"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/allowed", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+}
+
+func TestProxyDeniesHTTPRequestsWithoutHittingUpstream(t *testing.T) {
+	var upstreamHits atomic.Int32
+	dnsCalls := 0
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: countingResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+			calls:  &dnsCalls,
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"POST"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/blocked", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if upstreamHits.Load() != 0 {
+		t.Fatalf("upstreamHits = %d, want 0", upstreamHits.Load())
+	}
+	if dnsCalls != 0 {
+		t.Fatalf("dnsCalls = %d, want 0", dnsCalls)
 	}
 }
 
@@ -167,4 +334,80 @@ func (s staticResolver) LookupNetIP(_ context.Context, host string) ([]net.IP, e
 		return nil, fmt.Errorf("host not found: %s", host)
 	}
 	return ips, nil
+}
+
+type countingResolver struct {
+	lookup map[string][]net.IP
+	calls  *int
+}
+
+func (r countingResolver) LookupNetIP(_ context.Context, host string) ([]net.IP, error) {
+	if r.calls != nil {
+		*r.calls = *r.calls + 1
+	}
+	ips, ok := r.lookup[host]
+	if !ok {
+		return nil, fmt.Errorf("host not found: %s", host)
+	}
+	return ips, nil
+}
+
+type staticIdentityResolver struct {
+	identity *identity.Identity
+	err      error
+}
+
+func (r staticIdentityResolver) Resolve(net.IP) (*identity.Identity, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.identity, nil
+}
+
+func mustPolicyEngine(t *testing.T, cfgs []config.PolicyConfig) *policy.Engine {
+	t.Helper()
+
+	engine, err := policy.NewEngine(cfgs)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	return engine
+}
+
+func proxiedRequest(proxyAddr string, method string, targetURL string, body io.Reader) (*http.Response, error) {
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: func(*http.Request) (*url.URL, error) {
+				return url.Parse(proxyAddr)
+			},
+		},
+	}
+
+	req, err := http.NewRequest(method, targetURL, body)
+	if err != nil {
+		return nil, err
+	}
+
+	return client.Do(req)
+}
+
+func hostPortSuffix(hostport string) string {
+	return hostport[strings.LastIndex(hostport, ":"):]
+}
+
+func mustPort(t *testing.T, hostport string) int {
+	t.Helper()
+
+	_, portStr, err := net.SplitHostPort(hostport)
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi() error = %v", err)
+	}
+
+	return port
 }

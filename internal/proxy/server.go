@@ -12,17 +12,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moolen/aegis/internal/identity"
 	"github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/policy"
 )
 
 type Resolver interface {
 	LookupNetIP(context.Context, string) ([]net.IP, error)
 }
 
+type IdentityResolver interface {
+	Resolve(net.IP) (*identity.Identity, error)
+}
+
+type PolicyEngine interface {
+	Evaluate(id *identity.Identity, fqdn string, port int, method string, path string) *policy.Decision
+}
+
 type Dependencies struct {
-	Resolver Resolver
-	Metrics  *metrics.Metrics
-	Logger   *slog.Logger
+	Resolver         Resolver
+	IdentityResolver IdentityResolver
+	PolicyEngine     PolicyEngine
+	Metrics          *metrics.Metrics
+	Logger           *slog.Logger
 }
 
 type Server struct {
@@ -70,6 +82,20 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error(), "request")
 		return
+	}
+
+	if s.deps.PolicyEngine != nil {
+		reqIdentity := s.resolveRequestIdentity(r)
+		reqPath := r.URL.Path
+		if reqPath == "" {
+			reqPath = "/"
+		}
+
+		decision := s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, reqPath)
+		if decision == nil || !decision.Allowed {
+			s.writeError(w, http.StatusForbidden, "request denied by policy", "policy")
+			return
+		}
 	}
 
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
@@ -174,6 +200,36 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	wg.Wait()
+}
+
+func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
+	reqIdentity := identity.Unknown()
+	if s.deps.IdentityResolver == nil {
+		return reqIdentity
+	}
+
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		s.deps.Logger.Debug("split remote address failed", "remote_addr", r.RemoteAddr, "error", err)
+		return reqIdentity
+	}
+
+	remoteIP := net.ParseIP(remoteHost)
+	if remoteIP == nil {
+		s.deps.Logger.Debug("parse remote ip failed", "remote_addr", r.RemoteAddr)
+		return reqIdentity
+	}
+
+	resolvedIdentity, err := s.deps.IdentityResolver.Resolve(remoteIP)
+	if err != nil {
+		s.deps.Logger.Debug("resolve request identity failed", "remote_ip", remoteIP.String(), "error", err)
+		return reqIdentity
+	}
+	if resolvedIdentity == nil {
+		return reqIdentity
+	}
+
+	return resolvedIdentity
 }
 
 func (s *Server) resolveAddr(ctx context.Context, host string, port int) (string, error) {
