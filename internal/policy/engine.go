@@ -130,6 +130,9 @@ func compileHTTPRule(cfg config.HTTPRuleConfig) (*HTTPRule, error) {
 	}
 
 	for _, pattern := range cfg.AllowedPaths {
+		if err := validatePathPattern(pattern); err != nil {
+			return nil, err
+		}
 		httpRule.allowedPaths = append(httpRule.allowedPaths, pattern)
 	}
 
@@ -188,6 +191,16 @@ func (r HTTPRule) matches(method string, reqPath string) bool {
 	return true
 }
 
+func validatePathPattern(pattern string) error {
+	if strings.ContainsAny(pattern, "[]?\\") {
+		return fmt.Errorf("unsupported path glob %q: only '*' wildcards are allowed", pattern)
+	}
+
+	return nil
+}
+
+// matchGlob implements the supported HTTP path glob contract: literal characters
+// plus '*' wildcards only. Unlike path.Match, '*' spans nested path segments.
 func matchGlob(pattern string, value string) bool {
 	patternIndex := 0
 	valueIndex := 0

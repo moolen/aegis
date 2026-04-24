@@ -2,11 +2,58 @@ package policy
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
 )
+
+func TestNewEngineRejectsMalformedPathPattern(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedPaths: []string{"/api/["},
+			},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want invalid path pattern error")
+	}
+	if !strings.Contains(err.Error(), "unsupported path glob") {
+		t.Fatalf("NewEngine() error = %q, want unsupported path glob", err)
+	}
+}
+
+func TestNewEngineRejectsUnsupportedPathMetacharacters(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name: "allow-web",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedPaths: []string{"/api/?"},
+			},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want invalid path pattern error")
+	}
+	if !strings.Contains(err.Error(), "only '*'") {
+		t.Fatalf("NewEngine() error = %q, want '*' only contract", err)
+	}
+}
 
 func TestEvaluateAllowsMatchingRule(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
