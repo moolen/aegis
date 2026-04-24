@@ -19,6 +19,8 @@ const (
 	kindNamespace    = "aegis-e2e"
 	kindReleaseName  = "aegis"
 	kindCurlPodName  = "curl"
+	kindAllowedPod   = "curl-allowed"
+	kindDeniedPod    = "curl-denied"
 	kindEchoHostName = "echo.aegis-e2e.svc.cluster.local"
 )
 
@@ -124,6 +126,83 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 	if !strings.Contains(metrics, `aegis_requests_total{method="GET",protocol="http"} 2`) {
 		t.Fatalf("metrics output missing expected request counter:\n%s", metrics)
 	}
+
+	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindAllowedPod, "--ignore-not-found")
+	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindDeniedPod, "--ignore-not-found")
+	createCurlPod(t, repoRoot, kubeContext, kindAllowedPod, "role=allowed")
+	createCurlPod(t, repoRoot, kubeContext, kindDeniedPod, "role=denied")
+
+	identityValuesPath := writeKindValuesFile(t, kindIdentityValuesYAML())
+	runCommand(
+		t,
+		repoRoot,
+		4*time.Minute,
+		"helm",
+		"upgrade",
+		"--install",
+		kindReleaseName,
+		"./deploy/helm",
+		"-n",
+		kindNamespace,
+		"--create-namespace",
+		"-f",
+		identityValuesPath,
+		"--wait",
+		"--timeout",
+		"180s",
+	)
+	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "status", "deployment/aegis", "--timeout=180s")
+
+	waitFor(t, 30*time.Second, func() bool {
+		metricsBody := kubectlExecPod(t, repoRoot, kubeContext, kindAllowedPod, "curl", "-fsS", "http://aegis:9090/metrics")
+		active, activeOK := metricValueOrZero(metricsBody, "aegis_discovery_providers_active", map[string]string{})
+		entries, entriesOK := metricValueOrZero(metricsBody, "aegis_identity_map_entries", map[string]string{"provider": "kind-cluster", "kind": "kubernetes"})
+		return activeOK && entriesOK && active == 1 && entries >= 2
+	})
+
+	identityAllowedStatus := strings.TrimSpace(kubectlExecPod(
+		t,
+		repoRoot,
+		kubeContext,
+		kindAllowedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -sS --proxy http://aegis:3128 -o /dev/null -w '%%{http_code}' http://%s/allowed", kindEchoHostName),
+	))
+	if identityAllowedStatus != "200" {
+		t.Fatalf("identity-allowed request status = %q, want %q", identityAllowedStatus, "200")
+	}
+
+	identityDeniedStatus := strings.TrimSpace(kubectlExecPod(
+		t,
+		repoRoot,
+		kubeContext,
+		kindDeniedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -sS --proxy http://aegis:3128 -o /dev/null -w '%%{http_code}' http://%s/allowed", kindEchoHostName),
+	))
+	if identityDeniedStatus != "403" {
+		t.Fatalf("identity-denied request status = %q, want %q", identityDeniedStatus, "403")
+	}
+
+	identityMetrics := kubectlExecPod(t, repoRoot, kubeContext, kindAllowedPod, "curl", "-fsS", "http://aegis:9090/metrics")
+	if got := metricValue(t, identityMetrics, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "allow",
+		"policy":   "allow-echo-from-allowed",
+		"reason":   "policy_allowed",
+	}); got != 1 {
+		t.Fatalf("identity allow metric = %v, want 1", got)
+	}
+	if got := metricValue(t, identityMetrics, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "deny",
+		"policy":   "none",
+		"reason":   "policy_denied",
+	}); got < 1 {
+		t.Fatalf("identity deny metric = %v, want at least 1", got)
+	}
 }
 
 func mustRepoRoot(t *testing.T) string {
@@ -213,7 +292,13 @@ func kubectlApplyYAML(t *testing.T, repoRoot string, kubeContext string, namespa
 func kubectlExec(t *testing.T, repoRoot string, kubeContext string, args ...string) string {
 	t.Helper()
 
-	commandArgs := []string{"--context", kubeContext, "-n", kindNamespace, "exec", kindCurlPodName, "--"}
+	return kubectlExecPod(t, repoRoot, kubeContext, kindCurlPodName, args...)
+}
+
+func kubectlExecPod(t *testing.T, repoRoot string, kubeContext string, podName string, args ...string) string {
+	t.Helper()
+
+	commandArgs := []string{"--context", kubeContext, "-n", kindNamespace, "exec", podName, "--"}
 	commandArgs = append(commandArgs, args...)
 	return runCommand(t, repoRoot, 2*time.Minute, "kubectl", commandArgs...)
 }
@@ -261,6 +346,33 @@ func runCommandOutput(dir string, timeout time.Duration, name string, args ...st
 	return string(output), nil
 }
 
+func createCurlPod(t *testing.T, repoRoot string, kubeContext string, podName string, labels string) {
+	t.Helper()
+
+	runCommand(
+		t,
+		repoRoot,
+		2*time.Minute,
+		"kubectl",
+		"--context",
+		kubeContext,
+		"-n",
+		kindNamespace,
+		"run",
+		podName,
+		"--restart=Never",
+		"--labels",
+		labels,
+		"--image=curlimages/curl:8.8.0",
+		"--command",
+		"--",
+		"sh",
+		"-c",
+		"sleep 3600",
+	)
+	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "wait", "--for=condition=Ready", "pod/"+podName, "--timeout=180s")
+}
+
 func kindValuesYAML() string {
 	return `image:
   repository: aegis
@@ -281,6 +393,51 @@ config:
     - name: allow-echo
       identitySelector:
         matchLabels: {}
+      egress:
+        - fqdn: "echo.aegis-e2e.svc.cluster.local"
+          ports: [80]
+          tls:
+            mode: mitm
+          http:
+            allowedMethods: ["GET"]
+            allowedPaths: ["/allowed"]
+`
+}
+
+func kindIdentityValuesYAML() string {
+	return `image:
+  repository: aegis
+  tag: e2e-kind
+  pullPolicy: IfNotPresent
+serviceAccount:
+  create: true
+  name: aegis
+rbac:
+  create: true
+config:
+  proxy:
+    listen: ":3128"
+  metrics:
+    listen: ":9090"
+  shutdown:
+    gracePeriod: 10s
+  dns:
+    cache_ttl: 30s
+    timeout: 5s
+    servers: []
+    rebindingProtection:
+      allowedHostPatterns: ["*.svc.cluster.local"]
+  discovery:
+    kubernetes:
+      - name: kind-cluster
+        namespaces: ["aegis-e2e"]
+        resyncPeriod: 5s
+  policies:
+    - name: allow-echo-from-allowed
+      identitySelector:
+        matchLabels:
+          role: "allowed"
+          kubernetes.io/namespace: "aegis-e2e"
       egress:
         - fqdn: "echo.aegis-e2e.svc.cluster.local"
           ports: [80]

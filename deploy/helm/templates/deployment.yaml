@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aegis
+{{- $serviceAccountName := .Values.serviceAccount.name | default "aegis" }}
 spec:
   replicas: 1
   selector:
@@ -12,6 +13,9 @@ spec:
       labels:
         app.kubernetes.io/name: aegis
     spec:
+{{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
+      serviceAccountName: {{ $serviceAccountName }}
+{{- end }}
       containers:
         - name: aegis
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

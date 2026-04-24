@@ -8,6 +8,13 @@ service:
   proxyPort: 3128
   metricsPort: 9090
 
+serviceAccount:
+  create: false
+  name: ""
+
+rbac:
+  create: false
+
 proxyCA:
   existingSecret: ""
   mountPath: /etc/aegis/ca

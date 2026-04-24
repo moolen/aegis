@@ -123,8 +123,8 @@ policy denial, client trust failure, and upstream TLS validation. The heavier
 cluster-aware suite from the original design doc is split out into
 `make e2e-kind`, which creates a Kind cluster, loads a locally built Aegis
 image, installs the shipped Helm chart, and verifies in-cluster proxy
-allow/deny behavior. `make e2e-kind` requires Docker, `kind`, `kubectl`, and
-`helm`.
+allow/deny behavior plus Kubernetes-discovery-driven identity enforcement.
+`make e2e-kind` requires Docker, `kind`, `kubectl`, and `helm`.
 
 The local Go cache is not committed. If you need an isolated cache, use:
 
@@ -147,7 +147,9 @@ in deterministic config order, and provider startup failures are tolerated when
 at least one provider becomes active. For local development, discovery stays
 disabled unless you configure a provider explicitly. The Helm chart includes an
 optional `proxyCA.existingSecret` mount for the CA files referenced by
-`config.proxy.ca`. The Fargate scaffold also exposes an
+`config.proxy.ca`, and optional `serviceAccount` / `rbac` scaffolding so
+in-cluster Kubernetes discovery can watch pods when you enable
+`config.discovery.kubernetes`. The Fargate scaffold also exposes an
 `enable_proxy_protocol_v2` switch on the NLB target group so source IP
 preservation can be paired with `config.proxy.proxyProtocol.enabled`.
 
