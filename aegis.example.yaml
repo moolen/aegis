@@ -1,0 +1,8 @@
+proxy:
+  listen: ":3128"
+metrics:
+  listen: ":9090"
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  servers: []
