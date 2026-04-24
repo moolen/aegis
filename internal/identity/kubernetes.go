@@ -38,6 +38,7 @@ type KubernetesProvider struct {
 
 	mu      sync.RWMutex
 	byIP    map[string]*Identity
+	ipByPod map[string]string
 	started bool
 }
 
@@ -53,9 +54,10 @@ func NewKubernetesProvider(cfg KubernetesProviderConfig, logger *slog.Logger) (*
 	}
 
 	provider := &KubernetesProvider{
-		name:   cfg.Name,
-		logger: logger.With("provider", cfg.Name, "source", "kubernetes"),
-		byIP:   make(map[string]*Identity),
+		name:    cfg.Name,
+		logger:  logger.With("provider", cfg.Name, "source", "kubernetes"),
+		byIP:    make(map[string]*Identity),
+		ipByPod: make(map[string]string),
 	}
 
 	resyncPeriod := cfg.ResyncPeriod
@@ -144,20 +146,48 @@ func (p *KubernetesProvider) Resolve(ip net.IP) (*Identity, error) {
 
 func (p *KubernetesProvider) onAdd(obj interface{}) {
 	pod := podFromObject(obj)
-	if pod == nil || pod.Status.PodIP == "" {
+	if pod == nil {
+		return
+	}
+	p.upsertPod(pod, "")
+}
+
+func (p *KubernetesProvider) onUpdate(oldObj, newObj interface{}) {
+	newPod := podFromObject(newObj)
+	if newPod == nil {
 		return
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.byIP[pod.Status.PodIP] = buildIdentity(p.name, pod)
-}
+	oldPod := podFromObject(oldObj)
+	oldIP := ""
+	if oldPod != nil {
+		oldIP = oldPod.Status.PodIP
+	}
 
-func (p *KubernetesProvider) onUpdate(_, newObj interface{}) {
-	p.onAdd(newObj)
+	p.upsertPod(newPod, oldIP)
 }
 
 func (p *KubernetesProvider) onDelete(obj interface{}) {
+	pod := podFromObject(obj)
+	if pod == nil {
+		return
+	}
+
+	key := podKey(pod)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ip := p.ipByPod[key]
+	if ip == "" {
+		ip = pod.Status.PodIP
+	}
+	if ip != "" {
+		if current := p.byIP[ip]; current != nil && current.Name == key {
+			delete(p.byIP, ip)
+		}
+	}
+	delete(p.ipByPod, key)
 }
 
 func buildIdentity(providerName string, pod *corev1.Pod) *Identity {
@@ -201,6 +231,35 @@ func podFromObject(obj interface{}) *corev1.Pod {
 	default:
 		return nil
 	}
+}
+
+func (p *KubernetesProvider) upsertPod(pod *corev1.Pod, previousIP string) {
+	key := podKey(pod)
+	newIP := pod.Status.PodIP
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	oldIP := p.ipByPod[key]
+	if oldIP == "" {
+		oldIP = previousIP
+	}
+	if oldIP != "" && oldIP != newIP {
+		if current := p.byIP[oldIP]; current != nil && current.Name == key {
+			delete(p.byIP, oldIP)
+		}
+	}
+	if newIP == "" {
+		delete(p.ipByPod, key)
+		return
+	}
+
+	p.byIP[newIP] = buildIdentity(p.name, pod)
+	p.ipByPod[key] = newIP
+}
+
+func podKey(pod *corev1.Pod) string {
+	return pod.Namespace + "/" + pod.Name
 }
 
 type ioDiscard struct{}
