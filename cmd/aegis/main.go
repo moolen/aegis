@@ -17,6 +17,7 @@ import (
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/dns"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/policy"
 	"github.com/moolen/aegis/internal/proxy"
 )
 
@@ -44,11 +45,17 @@ func run() int {
 		Timeout:  cfg.DNS.Timeout,
 		Servers:  cfg.DNS.Servers,
 	}, nil, logger, m)
+	engine, err := policy.NewEngine(cfg.Policies)
+	if err != nil {
+		logger.Error("compile policy engine failed", "error", err)
+		return 1
+	}
 
 	proxyHandler := proxy.NewServer(proxy.Dependencies{
-		Resolver: resolver,
-		Metrics:  m,
-		Logger:   logger,
+		Resolver:     resolver,
+		PolicyEngine: engine,
+		Metrics:      m,
+		Logger:       logger,
 	})
 	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
 

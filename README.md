@@ -1,7 +1,8 @@
 # Aegis
 
 Aegis is an identity-aware HTTP egress proxy. The repository currently contains
-the MVP bootstrap: a runnable HTTP/CONNECT forward proxy, config loading,
+the first policy-aware slice on top of the MVP bootstrap: a runnable
+HTTP/CONNECT forward proxy, config loading, plain HTTP policy enforcement,
 metrics, tests, CI, and deployment scaffolding.
 
 ## Current Status
@@ -9,7 +10,8 @@ metrics, tests, CI, and deployment scaffolding.
 Implemented in this bootstrap:
 
 - YAML config loading and validation.
-- HTTP proxying and basic `CONNECT` tunneling.
+- HTTP proxying with policy enforcement for plain HTTP requests.
+- Basic `CONNECT` tunneling that remains bootstrap-grade.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`.
 - Container build, GitHub Actions CI, Helm chart, and Fargate starter files.
@@ -17,7 +19,6 @@ Implemented in this bootstrap:
 Planned but not implemented yet:
 
 - Kubernetes and EC2 identity discovery.
-- Policy evaluation and enforcement.
 - TLS ClientHello inspection and SNI validation.
 - MITM certificate generation and HTTP inspection inside TLS.
 - Proxy Protocol v2 and production hardening features.
@@ -68,9 +69,9 @@ service. `deploy/fargate` contains starter ECS/NLB files aligned with the
 current runtime shape: proxy on port `3128`, metrics on `9090`, and config
 mounted at `/etc/aegis/aegis.yaml`.
 
-These deployment files are scaffolding only. They intentionally describe the
-generic proxy bootstrap and do not claim identity-aware policy enforcement or
-TLS interception support yet.
+These deployment files are scaffolding only. They reflect the current runtime:
+plain HTTP requests are policy-enforced, while `CONNECT` remains a basic tunnel
+without identity-aware TLS inspection or interception support.
 
 ## Design Docs
 
