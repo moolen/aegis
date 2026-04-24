@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,56 @@ import (
 
 	"github.com/moolen/aegis/internal/config"
 )
+
+func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) {
+	originalLoadRESTConfig := loadRESTConfig
+	originalNewKubernetesPodSource := newKubernetesPodSource
+	t.Cleanup(func() {
+		loadRESTConfig = originalLoadRESTConfig
+		newKubernetesPodSource = originalNewKubernetesPodSource
+	})
+
+	restCfg := &rest.Config{Host: "https://cluster-a"}
+	var loadedPath string
+	var sourceConfig *rest.Config
+	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
+		loadedPath = kubeconfig
+		return restCfg, nil
+	}
+	newKubernetesPodSource = func(cfg *rest.Config) (KubernetesPodSource, error) {
+		sourceConfig = cfg
+		return fakeRuntimePodSource{}, nil
+	}
+
+	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+		Name:       "cluster-a",
+		Kubeconfig: "/tmp/a.kubeconfig",
+		Namespaces: []string{"default"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewKubernetesRuntimeProvider() error = %v", err)
+	}
+	if loadedPath != "/tmp/a.kubeconfig" {
+		t.Fatalf("loaded kubeconfig = %q, want /tmp/a.kubeconfig", loadedPath)
+	}
+	if sourceConfig != restCfg {
+		t.Fatalf("newKubernetesPodSource() config = %p, want %p", sourceConfig, restCfg)
+	}
+	if handle.Name != "cluster-a" || handle.Kind != "kubernetes" {
+		t.Fatalf("handle = %#v, want kubernetes/cluster-a", handle)
+	}
+
+	provider, ok := handle.Provider.(*KubernetesProvider)
+	if !ok {
+		t.Fatalf("handle.Provider type = %T, want *KubernetesProvider", handle.Provider)
+	}
+	if len(provider.informers) != 1 {
+		t.Fatalf("len(provider.informers) = %d, want 1", len(provider.informers))
+	}
+	if got := informerDurationField(t, provider.informers[0], "defaultEventHandlerResyncPeriod"); got != time.Minute {
+		t.Fatalf("defaultEventHandlerResyncPeriod = %s, want %s", got, time.Minute)
+	}
+}
 
 func TestNewKubernetesRuntimeProviderUsesExplicitKubeconfig(t *testing.T) {
 	var loadedPath string
@@ -111,4 +162,23 @@ func (fakeRuntimeNamespaceClient) List(context.Context, metav1.ListOptions) (*co
 
 func (fakeRuntimeNamespaceClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
 	return watch.NewRaceFreeFake(), nil
+}
+
+func informerDurationField(t *testing.T, informer interface{}, field string) time.Duration {
+	t.Helper()
+
+	value := reflect.ValueOf(informer)
+	if value.Kind() != reflect.Pointer {
+		t.Fatalf("informer value kind = %s, want pointer", value.Kind())
+	}
+
+	fieldValue := value.Elem().FieldByName(field)
+	if !fieldValue.IsValid() {
+		t.Fatalf("informer field %q not found", field)
+	}
+	if fieldValue.Type() != reflect.TypeFor[time.Duration]() {
+		t.Fatalf("informer field %q type = %s, want time.Duration", field, fieldValue.Type())
+	}
+
+	return time.Duration(fieldValue.Int())
 }
