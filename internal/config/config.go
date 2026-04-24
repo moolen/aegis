@@ -40,6 +40,7 @@ type DNSConfig struct {
 
 type DiscoveryConfig struct {
 	Kubernetes []KubernetesDiscoveryConfig `yaml:"kubernetes"`
+	EC2        []EC2DiscoveryConfig        `yaml:"ec2"`
 }
 
 type KubernetesDiscoveryConfig struct {
@@ -47,6 +48,18 @@ type KubernetesDiscoveryConfig struct {
 	Kubeconfig   string         `yaml:"kubeconfig"`
 	Namespaces   []string       `yaml:"namespaces"`
 	ResyncPeriod *time.Duration `yaml:"resyncPeriod"`
+}
+
+type EC2DiscoveryConfig struct {
+	Name         string               `yaml:"name"`
+	Region       string               `yaml:"region"`
+	TagFilters   []EC2TagFilterConfig `yaml:"tagFilters"`
+	PollInterval *time.Duration       `yaml:"pollInterval"`
+}
+
+type EC2TagFilterConfig struct {
+	Key    string   `yaml:"key"`
+	Values []string `yaml:"values"`
 }
 
 type PolicyConfig struct {
@@ -175,6 +188,27 @@ func (c Config) Validate() error {
 		}
 		if discovery.ResyncPeriod != nil && *discovery.ResyncPeriod <= 0 {
 			return fmt.Errorf("discovery.kubernetes[%d].resyncPeriod must be greater than zero", i)
+		}
+	}
+	for i, discovery := range c.Discovery.EC2 {
+		if strings.TrimSpace(discovery.Name) == "" {
+			return fmt.Errorf("discovery.ec2[%d].name is required", i)
+		}
+		if strings.TrimSpace(discovery.Region) == "" {
+			return fmt.Errorf("discovery.ec2[%d].region is required", i)
+		}
+		for j, filter := range discovery.TagFilters {
+			if strings.TrimSpace(filter.Key) == "" {
+				return fmt.Errorf("discovery.ec2[%d].tagFilters[%d].key is required", i, j)
+			}
+			for k, value := range filter.Values {
+				if strings.TrimSpace(value) == "" {
+					return fmt.Errorf("discovery.ec2[%d].tagFilters[%d].values[%d] must not be empty", i, j, k)
+				}
+			}
+		}
+		if discovery.PollInterval != nil && *discovery.PollInterval <= 0 {
+			return fmt.Errorf("discovery.ec2[%d].pollInterval must be greater than zero", i)
 		}
 	}
 

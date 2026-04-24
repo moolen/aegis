@@ -33,8 +33,9 @@ config:
             allowedPaths: ["/*"]
 
 # Bootstrap status: this chart now renders a runnable default policy config.
-# Plain HTTP requests are policy-enforced, Kubernetes discovery can be wired at
-# runtime, and CONNECT remains a basic tunnel without TLS inspection yet.
+# Plain HTTP requests are policy-enforced, Kubernetes and EC2 discovery can be
+# wired at runtime, and CONNECT remains a basic tunnel without TLS inspection
+# yet.
 # The default empty identitySelector.matchLabels is a safe starter policy that
 # matches any discovered identity; tighten it once you know the workload labels
 # you want to authorize.

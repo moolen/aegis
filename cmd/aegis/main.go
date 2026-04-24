@@ -26,6 +26,10 @@ var newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, lo
 	return identity.NewKubernetesRuntimeProvider(cfg, logger)
 }
 
+var newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+	return identity.NewEC2RuntimeProvider(cfg, logger)
+}
+
 var newProxyServer = func(deps proxy.Dependencies) interface{ Handler() http.Handler } {
 	return proxy.NewServer(deps)
 }
@@ -149,11 +153,11 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 }
 
 func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logger *slog.Logger, m *appmetrics.Metrics) (proxy.IdentityResolver, error) {
-	if len(cfg.Kubernetes) == 0 {
+	if len(cfg.Kubernetes) == 0 && len(cfg.EC2) == 0 {
 		return nil, nil
 	}
 
-	active := make([]identity.ProviderHandle, 0, len(cfg.Kubernetes))
+	active := make([]identity.ProviderHandle, 0, len(cfg.Kubernetes)+len(cfg.EC2))
 	for _, kubeCfg := range cfg.Kubernetes {
 		logger.Info("starting discovery provider", "provider", kubeCfg.Name, "kind", "kubernetes")
 
@@ -185,9 +189,40 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 		})
 		logger.Info("discovery provider active", "provider", handle.Name, "kind", handle.Kind)
 	}
+	for _, ec2Cfg := range cfg.EC2 {
+		logger.Info("starting discovery provider", "provider", ec2Cfg.Name, "kind", "ec2")
+
+		handle, err := newEC2RuntimeProvider(ec2Cfg, logger)
+		if err != nil {
+			logger.Warn("discovery provider build failed", "provider", ec2Cfg.Name, "kind", "ec2", "error", err)
+			if m != nil {
+				m.DiscoveryProviderFailuresTotal.WithLabelValues(ec2Cfg.Name, "ec2", "build").Inc()
+			}
+			continue
+		}
+
+		if m != nil {
+			m.DiscoveryProviderStartsTotal.WithLabelValues(handle.Name, handle.Kind).Inc()
+		}
+
+		if err := handle.Provider.Start(ctx, discoveryProviderStartupTimeout); err != nil {
+			logger.Warn("discovery provider start failed", "provider", handle.Name, "kind", handle.Kind, "error", err)
+			if m != nil {
+				m.DiscoveryProviderFailuresTotal.WithLabelValues(handle.Name, handle.Kind, "start").Inc()
+			}
+			continue
+		}
+
+		active = append(active, identity.ProviderHandle{
+			Name:     handle.Name,
+			Kind:     handle.Kind,
+			Resolver: handle.Provider,
+		})
+		logger.Info("discovery provider active", "provider", handle.Name, "kind", handle.Kind)
+	}
 
 	if len(active) == 0 {
-		if len(cfg.Kubernetes) > 0 {
+		if len(cfg.Kubernetes) > 0 || len(cfg.EC2) > 0 {
 			return nil, fmt.Errorf("discovery configured but no providers became active")
 		}
 		return nil, nil

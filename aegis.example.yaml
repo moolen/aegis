@@ -13,6 +13,14 @@ discovery:
   #     kubeconfig: /path/to/kubeconfig
   #     namespaces: ["default"]
   #     resyncPeriod: 30s
+  ec2: []
+  # ec2:
+  #   - name: production-ec2
+  #     region: eu-central-1
+  #     tagFilters:
+  #       - key: "aegis-managed"
+  #         values: ["true"]
+  #     pollInterval: 30s
 policies:
   - name: allow-example
     identitySelector:

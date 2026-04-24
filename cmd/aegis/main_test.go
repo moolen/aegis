@@ -20,8 +20,16 @@ import (
 )
 
 func TestBuildIdentityResolverKeepsHealthyProvidersAfterStartupFailure(t *testing.T) {
-	restore := newKubernetesRuntimeProvider
-	t.Cleanup(func() { newKubernetesRuntimeProvider = restore })
+	restoreKubernetes := newKubernetesRuntimeProvider
+	restoreEC2 := newEC2RuntimeProvider
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetes
+		newEC2RuntimeProvider = restoreEC2
+	})
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected ec2 provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
+	}
 
 	var attempts []string
 	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
@@ -155,8 +163,16 @@ func TestBuildIdentityResolverKeepsHealthyProvidersAfterStartupTimeout(t *testin
 }
 
 func TestBuildIdentityResolverFailsWhenDiscoveryConfiguredButNoProviderIsHealthy(t *testing.T) {
-	restore := newKubernetesRuntimeProvider
-	t.Cleanup(func() { newKubernetesRuntimeProvider = restore })
+	restoreKubernetes := newKubernetesRuntimeProvider
+	restoreEC2 := newEC2RuntimeProvider
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetes
+		newEC2RuntimeProvider = restoreEC2
+	})
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected ec2 provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
+	}
 
 	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
 		if cfg.Name == "broken-a" {
@@ -199,9 +215,11 @@ func TestBuildIdentityResolverReturnsNilWhenDiscoveryDisabled(t *testing.T) {
 
 func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 	restoreProvider := newKubernetesRuntimeProvider
+	restoreEC2Provider := newEC2RuntimeProvider
 	restoreProxyServer := newProxyServer
 	t.Cleanup(func() {
 		newKubernetesRuntimeProvider = restoreProvider
+		newEC2RuntimeProvider = restoreEC2Provider
 		newProxyServer = restoreProxyServer
 	})
 
@@ -216,6 +234,10 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 				identity: &identity.Identity{Name: "default/api"},
 			},
 		}, nil
+	}
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected ec2 provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
 	}
 
 	var captured proxy.Dependencies
@@ -252,6 +274,109 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 	}
 	if id == nil || id.Name != "default/api" {
 		t.Fatalf("IdentityResolver.Resolve() identity = %#v, want default/api", id)
+	}
+}
+
+func TestBuildIdentityResolverUsesHealthyEC2Provider(t *testing.T) {
+	restoreKubernetes := newKubernetesRuntimeProvider
+	restoreEC2 := newEC2RuntimeProvider
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetes
+		newEC2RuntimeProvider = restoreEC2
+	})
+
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected kubernetes provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
+	}
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		if cfg.Name != "production-ec2" {
+			t.Fatalf("unexpected provider %q", cfg.Name)
+		}
+		return identity.RuntimeProvider{
+			Name: "production-ec2",
+			Kind: "ec2",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{Name: "i-abc123"},
+			},
+		}, nil
+	}
+
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	resolver, err := buildIdentityResolver(context.Background(), config.DiscoveryConfig{
+		EC2: []config.EC2DiscoveryConfig{{
+			Name:   "production-ec2",
+			Region: "eu-central-1",
+		}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), m)
+	if err != nil {
+		t.Fatalf("buildIdentityResolver() error = %v", err)
+	}
+
+	id, err := resolver.Resolve(net.ParseIP("10.0.0.10"))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if id == nil || id.Name != "i-abc123" {
+		t.Fatalf("Resolve() identity = %#v, want i-abc123", id)
+	}
+	if got := counterValue(t, reg, "aegis_discovery_provider_starts_total", map[string]string{"provider": "production-ec2", "kind": "ec2"}); got != 1 {
+		t.Fatalf("start counter = %v, want 1", got)
+	}
+}
+
+func TestBuildIdentityResolverPrefersKubernetesBeforeEC2(t *testing.T) {
+	restoreKubernetes := newKubernetesRuntimeProvider
+	restoreEC2 := newEC2RuntimeProvider
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetes
+		newEC2RuntimeProvider = restoreEC2
+	})
+
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		return identity.RuntimeProvider{
+			Name: "cluster-a",
+			Kind: "kubernetes",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{Name: "default/api"},
+			},
+		}, nil
+	}
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		return identity.RuntimeProvider{
+			Name: "production-ec2",
+			Kind: "ec2",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{Name: "i-abc123"},
+			},
+		}, nil
+	}
+
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	resolver, err := buildIdentityResolver(context.Background(), config.DiscoveryConfig{
+		Kubernetes: []config.KubernetesDiscoveryConfig{{Name: "cluster-a"}},
+		EC2:        []config.EC2DiscoveryConfig{{Name: "production-ec2", Region: "eu-central-1"}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), m)
+	if err != nil {
+		t.Fatalf("buildIdentityResolver() error = %v", err)
+	}
+
+	id, err := resolver.Resolve(net.ParseIP("10.0.0.10"))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if id == nil || id.Name != "default/api" {
+		t.Fatalf("Resolve() identity = %#v, want default/api", id)
+	}
+	if got := counterValue(t, reg, "aegis_identity_overlaps_total", map[string]string{
+		"winner_provider": "cluster-a",
+		"winner_kind":     "kubernetes",
+		"shadow_provider": "production-ec2",
+		"shadow_kind":     "ec2",
+	}); got != 1 {
+		t.Fatalf("overlap metric = %v, want 1", got)
 	}
 }
 
