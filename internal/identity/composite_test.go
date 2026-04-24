@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
 	appmetrics "github.com/moolen/aegis/internal/metrics"
 )
@@ -36,7 +36,7 @@ func TestCompositeResolverReturnsFirstMatchingProvider(t *testing.T) {
 	if id == nil || id.Name != "ns-a/web" {
 		t.Fatalf("Resolve() identity = %#v, want ns-a/web", id)
 	}
-	if got := testutil.ToFloat64(m.IdentityOverlapsTotal.WithLabelValues("cluster-a", "kubernetes", "cluster-b", "kubernetes")); got != 1 {
+	if got := counterValue(t, m.IdentityOverlapsTotal.WithLabelValues("cluster-a", "kubernetes", "cluster-b", "kubernetes")); got != 1 {
 		t.Fatalf("overlap metric = %v, want 1", got)
 	}
 }
@@ -64,7 +64,7 @@ func TestCompositeResolverContinuesAfterProviderError(t *testing.T) {
 	if id == nil || id.Name != "ns-b/api" {
 		t.Fatalf("Resolve() identity = %#v, want ns-b/api", id)
 	}
-	if got := testutil.ToFloat64(m.IdentityResolutionsTotal.WithLabelValues("broken-a", "kubernetes", "error")); got != 1 {
+	if got := counterValue(t, m.IdentityResolutionsTotal.WithLabelValues("broken-a", "kubernetes", "error")); got != 1 {
 		t.Fatalf("error metric = %v, want 1", got)
 	}
 }
@@ -84,8 +84,32 @@ func TestCompositeResolverReturnsNilWhenAllProvidersMiss(t *testing.T) {
 	if id != nil {
 		t.Fatalf("Resolve() identity = %#v, want nil", id)
 	}
-	if got := testutil.ToFloat64(m.IdentityResolutionsTotal.WithLabelValues("cluster-b", "kubernetes", "miss")); got != 1 {
+	if got := counterValue(t, m.IdentityResolutionsTotal.WithLabelValues("cluster-b", "kubernetes", "miss")); got != 1 {
 		t.Fatalf("miss metric = %v, want 1", got)
+	}
+}
+
+func TestCompositeResolverContinuesAfterNilProviderResolver(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	resolver := NewCompositeResolver([]ProviderHandle{
+		{Name: "broken-a", Kind: "kubernetes"},
+		{
+			Name:     "cluster-b",
+			Kind:     "kubernetes",
+			Resolver: stubResolver{identity: &Identity{Name: "ns-b/api"}},
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), m)
+
+	id, err := resolver.Resolve(net.ParseIP("10.0.0.13"))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if id == nil || id.Name != "ns-b/api" {
+		t.Fatalf("Resolve() identity = %#v, want ns-b/api", id)
+	}
+	if got := counterValue(t, m.IdentityResolutionsTotal.WithLabelValues("broken-a", "kubernetes", "error")); got != 1 {
+		t.Fatalf("error metric = %v, want 1", got)
 	}
 }
 
@@ -99,4 +123,18 @@ func (r stubResolver) Resolve(net.IP) (*Identity, error) {
 		return nil, r.err
 	}
 	return r.identity, nil
+}
+
+func counterValue(t *testing.T, collector prometheus.Collector) float64 {
+	t.Helper()
+
+	metric := &dto.Metric{}
+	if err := collector.(prometheus.Metric).Write(metric); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if metric.Counter == nil {
+		t.Fatalf("metric counter = nil")
+	}
+
+	return metric.Counter.GetValue()
 }

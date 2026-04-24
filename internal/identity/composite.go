@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 
@@ -36,6 +37,15 @@ func (r *CompositeResolver) Resolve(ip net.IP) (*Identity, error) {
 	var winnerProvider ProviderHandle
 
 	for _, provider := range r.providers {
+		if provider.Resolver == nil {
+			err := errors.New("identity resolver is nil")
+			r.logger.Warn("identity resolve failed", "provider", provider.Name, "kind", provider.Kind, "ip", ip.String(), "error", err)
+			if r.metrics != nil {
+				r.metrics.IdentityResolutionsTotal.WithLabelValues(provider.Name, provider.Kind, "error").Inc()
+			}
+			continue
+		}
+
 		id, err := provider.Resolver.Resolve(ip)
 		if err != nil {
 			r.logger.Warn("identity resolve failed", "provider", provider.Name, "kind", provider.Kind, "ip", ip.String(), "error", err)
