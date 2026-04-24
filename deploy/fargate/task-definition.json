@@ -1,0 +1,53 @@
+{
+  "family": "aegis-bootstrap",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/aegisTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/aegisTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "aegis",
+      "image": "ghcr.io/moolen/aegis:bootstrap",
+      "essential": true,
+      "command": ["-config", "/etc/aegis/aegis.yaml"],
+      "portMappings": [
+        {
+          "containerPort": 3128,
+          "hostPort": 3128,
+          "protocol": "tcp"
+        },
+        {
+          "containerPort": 9090,
+          "hostPort": 9090,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aegis",
+          "awslogs-region": "eu-central-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "config",
+          "containerPath": "/etc/aegis",
+          "readOnly": true
+        }
+      ]
+    }
+  ],
+  "volumes": [
+    {
+      "name": "config",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-PLACEHOLDER",
+        "rootDirectory": "/aegis"
+      }
+    }
+  ]
+}

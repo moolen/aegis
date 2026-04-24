@@ -1,0 +1,5 @@
+.git
+.worktrees
+.cache
+bin
+dist

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aegis-config
+data:
+  aegis.yaml: |
+{{ toYaml .Values.config | indent 4 }}

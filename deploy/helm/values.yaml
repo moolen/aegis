@@ -1,0 +1,24 @@
+image:
+  repository: ghcr.io/moolen/aegis
+  tag: bootstrap
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  proxyPort: 3128
+  metricsPort: 9090
+
+resources: {}
+
+config:
+  proxy:
+    listen: ":3128"
+  metrics:
+    listen: ":9090"
+  dns:
+    cache_ttl: 30s
+    timeout: 5s
+    servers: []
+
+# Bootstrap status: this chart deploys the generic HTTP/CONNECT proxy only.
+# Identity-aware discovery, policy enforcement, and TLS inspection land later.

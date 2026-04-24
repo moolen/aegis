@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aegis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aegis
+    spec:
+      containers:
+        - name: aegis
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "-config"
+            - "/etc/aegis/aegis.yaml"
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.service.proxyPort }}
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/aegis
+              readOnly: true
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: aegis-config
