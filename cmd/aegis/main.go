@@ -146,6 +146,8 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 
 	active := make([]identity.ProviderHandle, 0, len(cfg.Kubernetes))
 	for _, kubeCfg := range cfg.Kubernetes {
+		logger.Info("starting discovery provider", "provider", kubeCfg.Name, "kind", "kubernetes")
+
 		handle, err := newKubernetesRuntimeProvider(kubeCfg, logger)
 		if err != nil {
 			logger.Warn("discovery provider build failed", "provider", kubeCfg.Name, "kind", "kubernetes", "error", err)
@@ -172,6 +174,7 @@ func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logg
 			Kind:     handle.Kind,
 			Resolver: handle.Provider,
 		})
+		logger.Info("discovery provider active", "provider", handle.Name, "kind", handle.Kind)
 	}
 
 	if len(active) == 0 {
