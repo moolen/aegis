@@ -10,7 +10,8 @@ config:
     timeout: 5s
     servers: []
     rebindingProtection:
-      allowedHostPatterns: []
+      allowedHostPatterns:
+        - "*.svc.cluster.local"
       allowedCIDRs: []
   discovery:
     kubernetes: []
@@ -22,6 +23,7 @@ config:
           - "127.0.0.0/8"
       egress:
         - fqdn: "example.com"
+        - fqdn: "echo-tls.aegis-perf.svc.cluster.local"
           ports: [443]
           tls:
             mode: passthrough

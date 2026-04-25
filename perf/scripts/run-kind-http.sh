@@ -13,6 +13,8 @@ require_tool kubectl
 
 SCENARIO="http"
 CLUSTER_NAME="${CLUSTER_NAME:-aegis-perf}"
+# Set KEEP_CLUSTER=1 to preserve a newly created Kind cluster after the run.
+KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 KUBE_CONTEXT="kind-${CLUSTER_NAME}"
 NAMESPACE="aegis-perf"
 RELEASE_NAME="aegis-perf"
@@ -24,6 +26,7 @@ K6_SCRIPT="perf/k6/http.js"
 PROXY_URL="http://127.0.0.1:3128"
 METRICS_URL="http://127.0.0.1:9090"
 TARGET_URL="http://echo.aegis-perf.svc.cluster.local/allowed"
+CLUSTER_CREATED=0
 
 kctl() {
   kubectl --context "$KUBE_CONTEXT" "$@"
@@ -37,6 +40,7 @@ ensure_kind_cluster() {
     cd "$REPO_ROOT"
     kind create cluster --name "$CLUSTER_NAME" --config hack/kind-config.yaml
   )
+  CLUSTER_CREATED=1
 }
 
 build_and_load_image() {
@@ -46,6 +50,37 @@ build_and_load_image() {
     kind load docker-image "$IMAGE_REF" --name "$CLUSTER_NAME"
   )
 }
+
+cleanup_kind() {
+  local status=$?
+  trap - EXIT INT TERM
+
+  local pid
+  for ((idx=${#CLEANUP_PIDS[@]}-1; idx>=0; idx--)); do
+    pid="${CLEANUP_PIDS[idx]}"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+
+  sleep 0.2
+
+  for ((idx=${#CLEANUP_PIDS[@]}-1; idx>=0; idx--)); do
+    pid="${CLEANUP_PIDS[idx]}"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+
+  if [ "$KEEP_CLUSTER" != "1" ] && [ "$CLUSTER_CREATED" = "1" ]; then
+    kind delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  fi
+
+  exit "$status"
+}
+
+trap cleanup_kind EXIT INT TERM
 
 apply_http_echo() {
   kctl create namespace "$NAMESPACE" --dry-run=client -o yaml | kctl apply -f -
@@ -143,6 +178,7 @@ RESULT_DIR=${RESULT_DIR}
 TARGET_URL=${TARGET_URL}
 PROXY_URL=${PROXY_URL}
 METRICS_URL=${METRICS_URL}
+KEEP_CLUSTER=${KEEP_CLUSTER}
 VUS=${VUS}
 DURATION=${DURATION}
 EXPECTED_STATUS=${EXPECTED_STATUS}
