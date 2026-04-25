@@ -443,6 +443,61 @@ users:
 	}
 }
 
+func TestBuildAKSRESTConfigUsesLegacyAzureAuthProviderWithAmbientTokenSource(t *testing.T) {
+	requestCtx := context.WithValue(context.Background(), struct{}{}, "ctx")
+	kubeconfig := []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YWtzLWNh
+    server: https://aks.example
+  name: cluster
+contexts:
+- context:
+    cluster: cluster
+    user: user
+  name: context
+current-context: context
+kind: Config
+users:
+- name: user
+  user:
+    auth-provider:
+      name: azure
+      config:
+        apiserver-id: server-app-id
+        tenant-id: tenant-a
+`)
+	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "azure-auth-provider-token"})
+
+	cfg, err := buildAKSRESTConfig(requestCtx, "sub-123", "rg-platform", "cluster-c", aksRESTConfigDeps{
+		loadKubeconfig: func(ctx context.Context, subscriptionID string, resourceGroup string, clusterName string) ([]byte, error) {
+			if ctx != requestCtx {
+				t.Fatal("loadKubeconfig context mismatch")
+			}
+			return kubeconfig, nil
+		},
+		tokenSource: func(ctx context.Context, rawKubeconfig []byte) (oauth2.TokenSource, error) {
+			if ctx != requestCtx {
+				t.Fatal("tokenSource context mismatch")
+			}
+			if string(rawKubeconfig) != string(kubeconfig) {
+				t.Fatal("tokenSource received unexpected kubeconfig")
+			}
+			return tokenSource, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildAKSRESTConfig() error = %v", err)
+	}
+	if cfg.AuthProvider != nil {
+		t.Fatalf("config AuthProvider = %#v, want nil", cfg.AuthProvider)
+	}
+	if authHeader := authorizationHeader(t, cfg); authHeader != "Bearer azure-auth-provider-token" {
+		t.Fatalf("authorization header = %q, want Bearer azure-auth-provider-token", authHeader)
+	}
+}
+
 func TestBuildAKSRESTConfigRejectsMalformedExecKubeconfig(t *testing.T) {
 	kubeconfig := []byte(`
 apiVersion: v1
@@ -480,6 +535,46 @@ users:
 	}
 	if !strings.Contains(err.Error(), "--server-id") {
 		t.Fatalf("error = %q, want missing server-id message", err)
+	}
+}
+
+func TestBuildAKSRESTConfigRejectsUnsupportedExecPlugin(t *testing.T) {
+	kubeconfig := []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YWtzLWNh
+    server: https://aks.example
+  name: cluster
+contexts:
+- context:
+    cluster: cluster
+    user: user
+  name: context
+current-context: context
+kind: Config
+users:
+- name: user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: custom-auth-plugin
+`)
+
+	_, err := buildAKSRESTConfig(context.Background(), "sub-123", "rg-platform", "cluster-c", aksRESTConfigDeps{
+		loadKubeconfig: func(context.Context, string, string, string) ([]byte, error) {
+			return kubeconfig, nil
+		},
+		tokenSource: func(context.Context, []byte) (oauth2.TokenSource, error) {
+			t.Fatal("tokenSource should not be called for unsupported exec plugin")
+			return nil, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected unsupported exec plugin error")
+	}
+	if !strings.Contains(err.Error(), `unsupported exec auth command "custom-auth-plugin"`) {
+		t.Fatalf("error = %q, want unsupported exec plugin message", err)
 	}
 }
 

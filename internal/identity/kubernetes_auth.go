@@ -191,7 +191,7 @@ func buildAKSRESTConfig(ctx context.Context, subscriptionID string, resourceGrou
 		return nil, err
 	}
 
-	_, _, requiresAmbientToken, err := aksExecAuthTokenRequestParameters(rawKubeconfig)
+	_, _, requiresAmbientToken, err := aksAmbientTokenRequestParameters(rawKubeconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -439,18 +439,18 @@ func gkeClusterResourceName(project string, location string, clusterName string)
 }
 
 func aksTokenRequestParameters(rawKubeconfig []byte) (string, string, error) {
-	serverID, tenantID, ok, err := aksExecAuthTokenRequestParameters(rawKubeconfig)
+	serverID, tenantID, ok, err := aksAmbientTokenRequestParameters(rawKubeconfig)
 	if err != nil {
 		return "", "", err
 	}
 	if !ok {
-		return "", "", fmt.Errorf("aks kubeconfig did not include exec auth configuration")
+		return "", "", fmt.Errorf("aks kubeconfig did not include ambient-token-compatible auth configuration")
 	}
 
 	return serverID, tenantID, nil
 }
 
-func aksExecAuthTokenRequestParameters(rawKubeconfig []byte) (string, string, bool, error) {
+func aksAmbientTokenRequestParameters(rawKubeconfig []byte) (string, string, bool, error) {
 	cfg, err := clientcmd.Load(rawKubeconfig)
 	if err != nil {
 		return "", "", false, err
@@ -470,19 +470,32 @@ func aksExecAuthTokenRequestParameters(rawKubeconfig []byte) (string, string, bo
 	if !ok || authInfo == nil {
 		return "", "", false, fmt.Errorf("aks kubeconfig did not include auth info for context %q", contextName)
 	}
-	if authInfo.Exec == nil {
-		return "", "", false, nil
-	}
-	if !isAKSKubeloginExec(authInfo.Exec.Command) {
-		return "", "", false, nil
+	if authInfo.Exec != nil {
+		if !isAKSKubeloginExec(authInfo.Exec.Command) {
+			return "", "", false, fmt.Errorf("aks kubeconfig uses unsupported exec auth command %q", authInfo.Exec.Command)
+		}
+
+		serverID := execArgValue(authInfo.Exec.Args, "--server-id")
+		if strings.TrimSpace(serverID) == "" {
+			return "", "", false, fmt.Errorf("aks kubeconfig did not include --server-id in exec args")
+		}
+
+		return serverID, execArgValue(authInfo.Exec.Args, "--tenant-id"), true, nil
 	}
 
-	serverID := execArgValue(authInfo.Exec.Args, "--server-id")
+	if authInfo.AuthProvider == nil {
+		return "", "", false, nil
+	}
+	if !strings.EqualFold(authInfo.AuthProvider.Name, "azure") {
+		return "", "", false, fmt.Errorf("aks kubeconfig uses unsupported auth-provider %q", authInfo.AuthProvider.Name)
+	}
+
+	serverID := authInfo.AuthProvider.Config["apiserver-id"]
 	if strings.TrimSpace(serverID) == "" {
-		return "", "", false, fmt.Errorf("aks kubeconfig did not include --server-id in exec args")
+		return "", "", false, fmt.Errorf("aks kubeconfig azure auth-provider did not include apiserver-id")
 	}
 
-	return serverID, execArgValue(authInfo.Exec.Args, "--tenant-id"), true, nil
+	return serverID, authInfo.AuthProvider.Config["tenant-id"], true, nil
 }
 
 func aksContextName(cfg *clientcmdapi.Config) (string, error) {
