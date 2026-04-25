@@ -37,7 +37,7 @@ export EXPECTED_STATUS="${EXPECTED_STATUS:-204}"
 export SLEEP_SECONDS="${SLEEP_SECONDS:-1}"
 
 start_aegis "$CONFIG_PATH" "$AEGIS_LOG"
-wait_for_http_ok "${METRICS_URL}/healthz"
+wait_for_http_ok_pid "$LAST_STARTED_PID" "${METRICS_URL}/healthz"
 capture_metrics "$METRICS_URL" "${RESULT_DIR}/metrics-before.txt"
 
 write_meta_env "${RESULT_DIR}/meta.env" <<EOF

@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 PERF_TMP_DIR="${PERF_TMP_DIR:-/tmp/aegis-perf}"
 GO_BIN="${GO_BIN:-}"
+LAST_STARTED_PID=""
 declare -a CLEANUP_PIDS=()
 
 log() {
@@ -107,6 +108,25 @@ wait_for_http_ok() {
   die "timed out waiting for ${url}"
 }
 
+wait_for_http_ok_pid() {
+  local pid="$1"
+  local url="$2"
+  local timeout_seconds="${3:-30}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      die "process ${pid} exited before ${url} became ready"
+    fi
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  die "timed out waiting for ${url}"
+}
+
 capture_metrics() {
   local url="$1"
   local out="$2"
@@ -183,6 +203,7 @@ start_aegis() {
   ) >"$log_file" 2>&1 &
   local pid=$!
   track_pid "$pid"
+  LAST_STARTED_PID="$pid"
 }
 
 write_meta_env() {
