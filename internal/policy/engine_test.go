@@ -2,6 +2,7 @@ package policy
 
 import (
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -10,6 +11,8 @@ import (
 )
 
 const testKubernetesNamespaceLabel = "kubernetes.io/namespace"
+
+var testSourceIP = netip.MustParseAddr("198.51.100.10")
 
 func kubernetesSubjects(discoveryNames []string, namespaces []string, matchLabels map[string]string) config.PolicySubjectsConfig {
 	return config.PolicySubjectsConfig{
@@ -26,6 +29,12 @@ func ec2Subjects(discoveryNames []string) config.PolicySubjectsConfig {
 		EC2: &config.EC2SubjectConfig{
 			DiscoveryNames: append([]string(nil), discoveryNames...),
 		},
+	}
+}
+
+func cidrSubjects(cidrs []string) config.PolicySubjectsConfig {
+	return config.PolicySubjectsConfig{
+		CIDRs: append([]string(nil), cidrs...),
 	}
 }
 
@@ -50,6 +59,10 @@ func ec2Identity(provider string) *identity.Identity {
 		Provider: provider,
 		Labels:   map[string]string{},
 	}
+}
+
+func mustAddr(value string) netip.Addr {
+	return netip.MustParseAddr(value)
 }
 
 func TestNewEngineRejectsMalformedPathPattern(t *testing.T) {
@@ -288,6 +301,110 @@ func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyMatchLabelKey(t *te
 	}
 }
 
+func TestEngineAllowsCIDRSubjectWithoutIdentity(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "cidr-egress",
+		Subjects: cidrSubjects([]string{" 10.20.0.0/16 "}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(nil, mustAddr("10.20.30.40"), "example.com", 443)
+	if !decision.Allowed {
+		t.Fatal("expected cidr subject to match without an identity")
+	}
+	if decision.Policy != "cidr-egress" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "cidr-egress")
+	}
+}
+
+func TestEngineUsesORAcrossSubjectKinds(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name: "hybrid-egress",
+		Subjects: config.PolicySubjectsConfig{
+			Kubernetes: &config.KubernetesSubjectConfig{
+				DiscoveryNames: []string{"cluster-a"},
+				Namespaces:     []string{"frontend"},
+				MatchLabels:    map[string]string{"app": "frontend"},
+			},
+			CIDRs: []string{"10.20.0.0/16"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-b", "frontend", map[string]string{"app": "frontend"}),
+		mustAddr("10.20.15.25"),
+		"example.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected source cidr match to allow even when kubernetes subject does not match")
+	}
+	if decision.Policy != "hybrid-egress" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "hybrid-egress")
+	}
+}
+
+func TestEngineDoesNotMatchOutsideCIDR(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "cidr-egress",
+		Subjects: cidrSubjects([]string{"10.20.0.0/16"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(nil, mustAddr("10.21.30.40"), "example.com", 443)
+	if decision.Allowed {
+		t.Fatal("expected source ip outside cidr not to match")
+	}
+	if decision.Policy != "" {
+		t.Fatalf("decision.Policy = %q, want empty", decision.Policy)
+	}
+}
+
+func TestEngineMatchesIPv6CIDRSubject(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "ipv6-egress",
+		Subjects: cidrSubjects([]string{"2001:db8:abcd::/48"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(nil, mustAddr("2001:db8:abcd::42"), "example.com", 443, http.MethodGet, "/")
+	if !decision.Allowed {
+		t.Fatal("expected ipv6 cidr subject to match")
+	}
+	if decision.Policy != "ipv6-egress" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "ipv6-egress")
+	}
+}
+
 func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:     "frontend-egress",
@@ -304,6 +421,7 @@ func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 
 	allowed := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		testSourceIP,
 		"api.stripe.com",
 		443,
 	)
@@ -313,6 +431,7 @@ func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 
 	denied := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-b", "frontend", map[string]string{"app": "frontend"}),
+		testSourceIP,
 		"api.stripe.com",
 		443,
 	)
@@ -337,6 +456,7 @@ func TestEvaluateMatchesKubernetesSubjectWithEmptyMatchLabels(t *testing.T) {
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "frontend", map[string]string{"any": "label"}),
+		testSourceIP,
 		"api.stripe.com",
 		443,
 	)
@@ -361,6 +481,7 @@ func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedNamespaceBinding(t 
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		testSourceIP,
 		"api.stripe.com",
 		443,
 	)
@@ -385,6 +506,7 @@ func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedMatchLabels(t *test
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		testSourceIP,
 		"api.stripe.com",
 		443,
 	)
@@ -409,6 +531,7 @@ func TestEvaluateMatchesWhitespacePaddedFQDNRule(t *testing.T) {
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		443,
 	)
@@ -437,6 +560,7 @@ func TestEvaluateMatchesWhitespacePaddedHTTPMethodAndPath(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -465,6 +589,7 @@ func TestEvaluateMatchesSharedKubernetesSelectorAcrossMultipleProviders(t *testi
 		t.Run(provider, func(t *testing.T) {
 			decision := engine.EvaluateConnect(
 				kubernetesIdentity(provider, "frontend", map[string]string{"app": "frontend"}),
+				testSourceIP,
 				"api.stripe.com",
 				443,
 			)
@@ -489,12 +614,12 @@ func TestEvaluateMatchesEC2ProviderBindingWithoutLabelSelector(t *testing.T) {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
 
-	allowed := engine.EvaluateConnect(ec2Identity("legacy-web"), "metadata.internal", 443)
+	allowed := engine.EvaluateConnect(ec2Identity("legacy-web"), testSourceIP, "metadata.internal", 443)
 	if !allowed.Allowed {
 		t.Fatal("expected ec2 identity bound to legacy-web provider to match")
 	}
 
-	denied := engine.EvaluateConnect(ec2Identity("batch-workers"), "metadata.internal", 443)
+	denied := engine.EvaluateConnect(ec2Identity("batch-workers"), testSourceIP, "metadata.internal", 443)
 	if denied.Allowed {
 		t.Fatal("expected ec2 identity bound to batch-workers not to match legacy-web policy")
 	}
@@ -516,6 +641,7 @@ func TestEvaluateSkipsPolicyWhenIdentitySourceHasNoMatchingSubject(t *testing.T)
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"metadata.internal",
 		443,
 	)
@@ -545,7 +671,7 @@ func TestEvaluateDoesNotMatchKubernetesSubjectWithoutNamespaceLabel(t *testing.T
 		Source:   "kubernetes",
 		Provider: "cluster-a",
 		Labels:   map[string]string{"app": "frontend"},
-	}, "api.stripe.com", 443)
+	}, testSourceIP, "api.stripe.com", 443)
 	if decision.Allowed {
 		t.Fatal("expected kubernetes identity without namespace label not to match")
 	}
@@ -569,7 +695,7 @@ func TestEvaluateDoesNotMatchKubernetesSubjectWithNilLabels(t *testing.T) {
 		Source:   "kubernetes",
 		Provider: "cluster-a",
 		Labels:   nil,
-	}, "api.stripe.com", 443)
+	}, testSourceIP, "api.stripe.com", 443)
 	if decision.Allowed {
 		t.Fatal("expected kubernetes identity with nil labels not to match")
 	}
@@ -595,6 +721,7 @@ func TestEvaluateAllowsMatchingRule(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -635,6 +762,7 @@ func TestEvaluateCarriesBypassPolicyState(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -668,6 +796,7 @@ func TestEvaluateCarriesPolicyLevelEnforcementState(t *testing.T) {
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "reporting"}),
+		testSourceIP,
 		"denied.example.com",
 		443,
 	)
@@ -695,6 +824,7 @@ func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -721,6 +851,7 @@ func TestEvaluateAllowsFQDNStarMatchCaseInsensitive(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"API.Example.COM",
 		443,
 		http.MethodGet,
@@ -750,6 +881,7 @@ func TestEvaluateDeniesWhenNoPolicyMatches(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "api"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -783,7 +915,7 @@ func TestEvaluateDeniesUnknownIdentity(t *testing.T) {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
 
-	decision := engine.Evaluate(nil, "example.com", 80, http.MethodGet, "/")
+	decision := engine.Evaluate(nil, testSourceIP, "example.com", 80, http.MethodGet, "/")
 	if decision.Allowed {
 		t.Fatalf("decision.Allowed = true, want false")
 	}
@@ -816,6 +948,7 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -856,6 +989,7 @@ func TestEvaluateConnectFirstMatchWins(t *testing.T) {
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		443,
 	)
@@ -883,6 +1017,7 @@ func TestEvaluateDeniesPortMismatch(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -915,6 +1050,7 @@ func TestEvaluateDeniesMethodMismatch(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodPost,
@@ -947,6 +1083,7 @@ func TestEvaluateDeniesPathMismatch(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		80,
 		http.MethodGet,
@@ -976,6 +1113,7 @@ func TestEvaluateMatchesFQDNGlob(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"api.example.com",
 		443,
 		http.MethodGet,
@@ -1008,6 +1146,7 @@ func TestEvaluateMatchesFQDNCaseInsensitively(t *testing.T) {
 
 	decision := engine.Evaluate(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"API.EXAMPLE.COM",
 		443,
 		http.MethodGet,
@@ -1034,6 +1173,7 @@ func TestEvaluateConnectMatchesPassthroughRuleWithoutHTTPInspection(t *testing.T
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		443,
 	)
@@ -1065,6 +1205,7 @@ func TestEvaluateConnectReturnsMITMDecisionWithoutHTTPMatch(t *testing.T) {
 
 	decision := engine.EvaluateConnect(
 		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		testSourceIP,
 		"example.com",
 		443,
 	)

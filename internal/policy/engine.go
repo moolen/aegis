@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/moolen/aegis/internal/config"
@@ -32,6 +33,7 @@ type Policy struct {
 type Subjects struct {
 	kubernetes *KubernetesSubject
 	ec2        *EC2Subject
+	cidrs      []netip.Prefix
 }
 
 type KubernetesSubject struct {
@@ -71,9 +73,9 @@ func NewEngine(cfgs []config.PolicyConfig) (*Engine, error) {
 	return &Engine{policies: policies}, nil
 }
 
-func (e *Engine) Evaluate(id *identity.Identity, fqdn string, port int, method string, reqPath string) *Decision {
+func (e *Engine) Evaluate(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *Decision {
 	for _, policy := range e.policies {
-		if !policy.matchesIdentity(id) {
+		if !policy.matches(id, sourceIP) {
 			continue
 		}
 
@@ -95,9 +97,9 @@ func (e *Engine) Evaluate(id *identity.Identity, fqdn string, port int, method s
 	return &Decision{}
 }
 
-func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *Decision {
+func (e *Engine) EvaluateConnect(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int) *Decision {
 	for _, policy := range e.policies {
-		if !policy.matchesIdentity(id) {
+		if !policy.matches(id, sourceIP) {
 			continue
 		}
 
@@ -177,7 +179,18 @@ func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 			discoveryNames: discoveryNames,
 		}
 	}
-	if subjects.kubernetes == nil && subjects.ec2 == nil {
+	if len(cfg.CIDRs) > 0 {
+		subjects.cidrs = make([]netip.Prefix, 0, len(cfg.CIDRs))
+		for _, cidr := range cfg.CIDRs {
+			cidr = strings.TrimSpace(cidr)
+			prefix, err := netip.ParsePrefix(cidr)
+			if err != nil {
+				return Subjects{}, fmt.Errorf("cidr subjects.cidrs %q: %w", cidr, err)
+			}
+			subjects.cidrs = append(subjects.cidrs, prefix)
+		}
+	}
+	if subjects.kubernetes == nil && subjects.ec2 == nil && len(subjects.cidrs) == 0 {
 		return Subjects{}, fmt.Errorf("policy subjects must not be empty")
 	}
 
@@ -231,23 +244,15 @@ func compileHTTPRule(cfg config.HTTPRuleConfig) (*HTTPRule, error) {
 	return httpRule, nil
 }
 
-func (p Policy) matchesIdentity(id *identity.Identity) bool {
-	if id == nil {
-		return false
-	}
-
-	switch id.Source {
-	case "kubernetes":
-		return p.subjects.matchesKubernetes(id)
-	case "ec2":
-		return p.subjects.matchesEC2(id)
-	default:
-		return false
-	}
+func (p Policy) matches(id *identity.Identity, sourceIP netip.Addr) bool {
+	return p.subjects.matchesKubernetes(id) || p.subjects.matchesEC2(id) || p.subjects.matchesCIDR(sourceIP)
 }
 
 func (s Subjects) matchesKubernetes(id *identity.Identity) bool {
 	if s.kubernetes == nil {
+		return false
+	}
+	if id == nil || id.Source != "kubernetes" {
 		return false
 	}
 	if !matchesStringSet(s.kubernetes.discoveryNames, id.Provider) {
@@ -265,8 +270,25 @@ func (s Subjects) matchesEC2(id *identity.Identity) bool {
 	if s.ec2 == nil {
 		return false
 	}
+	if id == nil || id.Source != "ec2" {
+		return false
+	}
 
 	return matchesStringSet(s.ec2.discoveryNames, id.Provider)
+}
+
+func (s Subjects) matchesCIDR(sourceIP netip.Addr) bool {
+	if !sourceIP.IsValid() {
+		return false
+	}
+
+	for _, prefix := range s.cidrs {
+		if prefix.Contains(sourceIP) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (r Rule) matches(fqdn string, port int, method string, reqPath string) bool {
