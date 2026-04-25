@@ -108,7 +108,7 @@ type KubernetesDiscoveryConfig struct {
 	Kubeconfig       string               `yaml:"-"`
 	Namespaces       []string             `yaml:"namespaces"`
 	ResyncPeriod     *time.Duration       `yaml:"resyncPeriod"`
-	LegacyKubeconfig string               `yaml:"kubeconfig,omitempty"`
+	LegacyKubeconfig legacyStringField    `yaml:"kubeconfig,omitempty"`
 }
 
 type EC2DiscoveryConfig struct {
@@ -152,6 +152,20 @@ type EC2SubjectConfig struct {
 	DiscoveryNames []string `yaml:"discoveryNames"`
 }
 
+type legacyStringField struct {
+	Value string
+	Set   bool
+}
+
+func (f *legacyStringField) UnmarshalYAML(value *yaml.Node) error {
+	f.Set = true
+	if value.Tag == "!!null" {
+		f.Value = ""
+		return nil
+	}
+	return value.Decode(&f.Value)
+}
+
 type EgressRuleConfig struct {
 	FQDN  string          `yaml:"fqdn"`
 	Ports []int           `yaml:"ports"`
@@ -190,6 +204,7 @@ func Load(r io.Reader) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	cfg.normalizeDiscoveryBindings()
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -367,15 +382,16 @@ func (c Config) Validate() error {
 	kubernetesDiscoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes))
 	ec2DiscoveryNames := make(map[string]struct{}, len(c.Discovery.EC2))
 	for i, discovery := range c.Discovery.Kubernetes {
-		if strings.TrimSpace(discovery.Name) == "" {
+		discoveryName := normalizeDiscoveryBindingName(discovery.Name)
+		if discoveryName == "" {
 			return fmt.Errorf("discovery.kubernetes[%d].name is required", i)
 		}
-		if _, exists := discoveryNames[discovery.Name]; exists {
-			return fmt.Errorf("discovery.kubernetes[%d].name %q must be unique across discovery providers", i, discovery.Name)
+		if _, exists := discoveryNames[discoveryName]; exists {
+			return fmt.Errorf("discovery.kubernetes[%d].name %q must be unique across discovery providers", i, discoveryName)
 		}
-		discoveryNames[discovery.Name] = struct{}{}
-		kubernetesDiscoveryNames[discovery.Name] = struct{}{}
-		if strings.TrimSpace(discovery.LegacyKubeconfig) != "" {
+		discoveryNames[discoveryName] = struct{}{}
+		kubernetesDiscoveryNames[discoveryName] = struct{}{}
+		if discovery.LegacyKubeconfig.Set {
 			return fmt.Errorf("discovery.kubernetes[%d].kubeconfig is no longer supported; use auth.provider: kubeconfig and auth.kubeconfig", i)
 		}
 		switch normalizeKubernetesAuthProvider(discovery.Auth.Provider) {
@@ -409,14 +425,15 @@ func (c Config) Validate() error {
 		}
 	}
 	for i, discovery := range c.Discovery.EC2 {
-		if strings.TrimSpace(discovery.Name) == "" {
+		discoveryName := normalizeDiscoveryBindingName(discovery.Name)
+		if discoveryName == "" {
 			return fmt.Errorf("discovery.ec2[%d].name is required", i)
 		}
-		if _, exists := discoveryNames[discovery.Name]; exists {
-			return fmt.Errorf("discovery.ec2[%d].name %q must be unique across discovery providers", i, discovery.Name)
+		if _, exists := discoveryNames[discoveryName]; exists {
+			return fmt.Errorf("discovery.ec2[%d].name %q must be unique across discovery providers", i, discoveryName)
 		}
-		discoveryNames[discovery.Name] = struct{}{}
-		ec2DiscoveryNames[discovery.Name] = struct{}{}
+		discoveryNames[discoveryName] = struct{}{}
+		ec2DiscoveryNames[discoveryName] = struct{}{}
 		if strings.TrimSpace(discovery.Region) == "" {
 			return fmt.Errorf("discovery.ec2[%d].region is required", i)
 		}
@@ -437,15 +454,17 @@ func (c Config) Validate() error {
 	for i, policy := range c.Policies {
 		if policy.Subjects.Kubernetes != nil {
 			for j, discoveryName := range policy.Subjects.Kubernetes.DiscoveryNames {
-				if _, exists := kubernetesDiscoveryNames[discoveryName]; !exists {
-					return fmt.Errorf("policies[%d].subjects.kubernetes.discoveryNames[%d] references unknown kubernetes discovery %q", i, j, discoveryName)
+				normalizedDiscoveryName := normalizeDiscoveryBindingName(discoveryName)
+				if _, exists := kubernetesDiscoveryNames[normalizedDiscoveryName]; !exists {
+					return fmt.Errorf("policies[%d].subjects.kubernetes.discoveryNames[%d] references unknown kubernetes discovery %q", i, j, normalizedDiscoveryName)
 				}
 			}
 		}
 		if policy.Subjects.EC2 != nil {
 			for j, discoveryName := range policy.Subjects.EC2.DiscoveryNames {
-				if _, exists := ec2DiscoveryNames[discoveryName]; !exists {
-					return fmt.Errorf("policies[%d].subjects.ec2.discoveryNames[%d] references unknown ec2 discovery %q", i, j, discoveryName)
+				normalizedDiscoveryName := normalizeDiscoveryBindingName(discoveryName)
+				if _, exists := ec2DiscoveryNames[normalizedDiscoveryName]; !exists {
+					return fmt.Errorf("policies[%d].subjects.ec2.discoveryNames[%d] references unknown ec2 discovery %q", i, j, normalizedDiscoveryName)
 				}
 			}
 		}
@@ -470,6 +489,31 @@ func NormalizeUnknownIdentityPolicy(policy string) string {
 
 func normalizeKubernetesAuthProvider(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func normalizeDiscoveryBindingName(name string) string {
+	return strings.TrimSpace(name)
+}
+
+func (c *Config) normalizeDiscoveryBindings() {
+	for i := range c.Discovery.Kubernetes {
+		c.Discovery.Kubernetes[i].Name = normalizeDiscoveryBindingName(c.Discovery.Kubernetes[i].Name)
+	}
+	for i := range c.Discovery.EC2 {
+		c.Discovery.EC2[i].Name = normalizeDiscoveryBindingName(c.Discovery.EC2[i].Name)
+	}
+	for i := range c.Policies {
+		if c.Policies[i].Subjects.Kubernetes != nil {
+			for j := range c.Policies[i].Subjects.Kubernetes.DiscoveryNames {
+				c.Policies[i].Subjects.Kubernetes.DiscoveryNames[j] = normalizeDiscoveryBindingName(c.Policies[i].Subjects.Kubernetes.DiscoveryNames[j])
+			}
+		}
+		if c.Policies[i].Subjects.EC2 != nil {
+			for j := range c.Policies[i].Subjects.EC2.DiscoveryNames {
+				c.Policies[i].Subjects.EC2.DiscoveryNames[j] = normalizeDiscoveryBindingName(c.Policies[i].Subjects.EC2.DiscoveryNames[j])
+			}
+		}
+	}
 }
 
 func (c *Config) hydrateCompatibilityFields() {

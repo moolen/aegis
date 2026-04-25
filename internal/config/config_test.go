@@ -962,6 +962,98 @@ policies:
 	}
 }
 
+func TestLoadRejectsLegacyKubernetesKubeconfigSchema(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "explicit path",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      kubeconfig: /tmp/legacy.kubeconfig
+      auth:
+        provider: inCluster
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "whitespace only",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      kubeconfig: "   "
+      auth:
+        provider: inCluster
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "empty string",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      kubeconfig: ""
+      auth:
+        provider: inCluster
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(bytes.NewReader([]byte(tt.yaml)))
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), "discovery.kubernetes[0].kubeconfig is no longer supported; use auth.provider: kubeconfig and auth.kubeconfig") {
+				t.Fatalf("unexpected error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsUnknownKubernetesDiscoveryReference(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"
@@ -1014,6 +1106,76 @@ policies:
 	}
 	if !strings.Contains(err.Error(), `policies[0].subjects.ec2.discoveryNames[0] references unknown ec2 discovery "staging-ec2"`) {
 		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsDuplicateDiscoveryNamesAfterTrimming(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: " cluster-a "
+      auth:
+        provider: inCluster
+  ec2:
+    - name: cluster-a
+      region: eu-central-1
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), `discovery.ec2[0].name "cluster-a" must be unique across discovery providers`) {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadNormalizesDiscoveryNamesAndSubjectReferences(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: " cluster-a "
+      auth:
+        provider: inCluster
+  ec2:
+    - name: production-ec2
+      region: eu-central-1
+policies:
+  - name: allow-kubernetes
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+  - name: allow-ec2
+    subjects:
+      ec2:
+        discoveryNames: [" production-ec2 "]
+    egress:
+      - fqdn: "example.org"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Discovery.Kubernetes[0].Name != "cluster-a" {
+		t.Fatalf("kubernetes discovery name = %q, want %q", cfg.Discovery.Kubernetes[0].Name, "cluster-a")
+	}
+	if cfg.Discovery.EC2[0].Name != "production-ec2" {
+		t.Fatalf("ec2 discovery name = %q, want %q", cfg.Discovery.EC2[0].Name, "production-ec2")
+	}
+	if cfg.Policies[0].Subjects.Kubernetes.DiscoveryNames[0] != "cluster-a" {
+		t.Fatalf("kubernetes subject discovery name = %q, want %q", cfg.Policies[0].Subjects.Kubernetes.DiscoveryNames[0], "cluster-a")
+	}
+	if cfg.Policies[1].Subjects.EC2.DiscoveryNames[0] != "production-ec2" {
+		t.Fatalf("ec2 subject discovery name = %q, want %q", cfg.Policies[1].Subjects.EC2.DiscoveryNames[0], "production-ec2")
 	}
 }
 
