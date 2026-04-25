@@ -373,7 +373,7 @@ func compileStringSet(values []string) map[string]struct{} {
 
 	compiled := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		compiled[value] = struct{}{}
+		compiled[strings.TrimSpace(value)] = struct{}{}
 	}
 
 	return compiled
