@@ -84,6 +84,26 @@ func TestKindPerfAssetsExist(t *testing.T) {
 	}
 }
 
+func TestMakefileIncludesPerfTargets(t *testing.T) {
+	content, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatalf("os.ReadFile(../../Makefile) error = %v", err)
+	}
+
+	for _, target := range []string{
+		"perf-local-http:",
+		"perf-local-connect:",
+		"perf-local-mitm:",
+		"perf-kind-http:",
+		"perf-kind-connect:",
+		"perf-kind-mitm:",
+	} {
+		if !strings.Contains(string(content), target) {
+			t.Fatalf("Makefile missing target %q", target)
+		}
+	}
+}
+
 func TestHTTPFixtureServesConfiguredPath(t *testing.T) {
 	srv := newHTTPFixture("/allowed", http.StatusNoContent)
 	req := httptest.NewRequest(http.MethodGet, "http://fixture/allowed", nil)
