@@ -252,6 +252,42 @@ func TestNewEngineRejectsPoliciesWithoutAnySubjects(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyMatchLabelValue(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "   "}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes matchLabels validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "matchLabels") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes matchLabels validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyMatchLabelKey(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"   ": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes matchLabels validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "matchLabels") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes matchLabels validation error", err)
+	}
+}
+
 func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:     "frontend-egress",

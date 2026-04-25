@@ -159,8 +159,13 @@ func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 		subjects.kubernetes = &KubernetesSubject{
 			discoveryNames: discoveryNames,
 			namespaces:     namespaces,
-			matchLabels:    compileLabelSelector(cfg.Kubernetes.MatchLabels),
+			matchLabels:    nil,
 		}
+		matchLabels, err := compileLabelSelector(cfg.Kubernetes.MatchLabels)
+		if err != nil {
+			return Subjects{}, fmt.Errorf("kubernetes subjects.matchLabels: %w", err)
+		}
+		subjects.kubernetes.matchLabels = matchLabels
 	}
 	if cfg.EC2 != nil {
 		discoveryNames := compileStringSet(cfg.EC2.DiscoveryNames)
@@ -370,26 +375,25 @@ func cloneStringMap(src map[string]string) map[string]string {
 	return dst
 }
 
-func compileLabelSelector(src map[string]string) map[string]string {
+func compileLabelSelector(src map[string]string) (map[string]string, error) {
 	if len(src) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	compiled := make(map[string]string, len(src))
 	for key, value := range src {
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" || value == "" {
-			continue
+		if key == "" {
+			return nil, fmt.Errorf("keys must not be empty")
+		}
+		if value == "" {
+			return nil, fmt.Errorf("values must not be empty")
 		}
 		compiled[key] = value
 	}
 
-	if len(compiled) == 0 {
-		return nil
-	}
-
-	return compiled
+	return compiled, nil
 }
 
 func compileStringSet(values []string) map[string]struct{} {
