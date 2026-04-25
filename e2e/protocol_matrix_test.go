@@ -169,7 +169,7 @@ func TestCONNECTAuditModeAllowsDeniedTargets(t *testing.T) {
 	if got := metricValue(t, metricsBody, "aegis_audit_decisions_total", map[string]string{
 		"protocol": "connect",
 		"action":   "would_deny",
-		"identity": "unknown",
+		"identity": "i-localhost",
 		"fqdn":     targetHost,
 		"policy":   "allow-other",
 		"reason":   "policy_denied",
@@ -359,7 +359,7 @@ func TestCONNECTBypassAllowsDeniedTargets(t *testing.T) {
 	if got := metricValue(t, metricsBody, "aegis_audit_decisions_total", map[string]string{
 		"protocol": "connect",
 		"action":   "would_deny",
-		"identity": "unknown",
+		"identity": "i-localhost",
 		"fqdn":     targetHost,
 		"policy":   "break-glass",
 		"reason":   "policy_denied",
@@ -778,6 +778,7 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 	fmt.Fprint(&b, "  rebindingProtection:\n")
 	fmt.Fprintf(&b, "    allowedHostPatterns: %s\n", yamlStringList(spec.AllowedHostPatterns))
 	fmt.Fprintf(&b, "    allowedCIDRs: %s\n", yamlStringList(spec.AllowedCIDRs))
+	fmt.Fprintf(&b, "discovery:\n  ec2:\n    - name: %s\n      region: us-east-1\n      tagFilters:\n        - key: %q\n          values: [%q]\n", defaultE2EEC2ProviderName, defaultE2EEC2TagKey, defaultE2EEC2TagValue)
 	fmt.Fprintf(&b, "policies:\n  - name: %s\n", spec.PolicyName)
 	if spec.PolicyEnforcement != "" {
 		fmt.Fprintf(&b, "    enforcement: %s\n", spec.PolicyEnforcement)
@@ -785,8 +786,8 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 	if spec.PolicyBypass {
 		fmt.Fprint(&b, "    bypass: true\n")
 	}
-	fmt.Fprintf(&b, "    identitySelector:\n      matchLabels: {}\n    egress:\n      - fqdn: %q\n        ports: [%d]\n        tls:\n          mode: %s\n",
-		spec.PolicyFQDN, spec.PolicyPort, spec.TLSMode)
+	fmt.Fprintf(&b, "    subjects:\n      ec2:\n        discoveryNames: [%q]\n    egress:\n      - fqdn: %q\n        ports: [%d]\n        tls:\n          mode: %s\n",
+		defaultE2EEC2ProviderName, spec.PolicyFQDN, spec.PolicyPort, spec.TLSMode)
 	if len(spec.AllowedMethods) > 0 || len(spec.AllowedPaths) > 0 {
 		fmt.Fprint(&b, "        http:\n")
 		fmt.Fprintf(&b, "          allowedMethods: %s\n", yamlStringList(spec.AllowedMethods))

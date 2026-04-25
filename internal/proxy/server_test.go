@@ -27,6 +27,11 @@ import (
 	"github.com/moolen/aegis/internal/policy"
 )
 
+const (
+	testPolicyDiscoveryName = "proxy-test"
+	testPolicyNamespace     = "default"
+)
+
 func TestProxyForwardsHTTPRequests(t *testing.T) {
 	var receivedHost string
 
@@ -1554,6 +1559,9 @@ func TestProxyConnectBlocksMissingSNI(t *testing.T) {
 				"tunnel.internal": {net.ParseIP("127.0.0.1")},
 			},
 		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
 		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
 			Name:             "allow-all",
 			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
@@ -1619,6 +1627,9 @@ func TestProxyConnectAuditModeBypassesMissingSNI(t *testing.T) {
 			},
 		},
 		EnforcementMode: "audit",
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
 		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
 			Name:             "allow-all",
 			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
@@ -1689,6 +1700,9 @@ func TestProxyConnectBlocksSNIMismatch(t *testing.T) {
 				"tunnel.internal": {net.ParseIP("127.0.0.1")},
 			},
 		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
 		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
 			Name:             "allow-all",
 			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
@@ -1729,6 +1743,9 @@ func TestProxyConnectBlocksResolvedPrivateAddress(t *testing.T) {
 			calls:  &dnsCalls,
 		},
 		DestinationGuard: mustDestinationGuard(t, nil, nil),
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
 		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
 			Name:             "allow-all",
 			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},
@@ -1794,7 +1811,32 @@ func (r staticIdentityResolver) Resolve(net.IP) (*identity.Identity, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	return r.identity, nil
+	if r.identity == nil {
+		return nil, nil
+	}
+
+	cloned := &identity.Identity{
+		Source:   r.identity.Source,
+		Provider: r.identity.Provider,
+		Name:     r.identity.Name,
+		Labels:   make(map[string]string, len(r.identity.Labels)),
+	}
+	for key, value := range r.identity.Labels {
+		cloned.Labels[key] = value
+	}
+	if strings.TrimSpace(cloned.Source) == "" {
+		cloned.Source = "kubernetes"
+	}
+	if cloned.Source == "kubernetes" {
+		if strings.TrimSpace(cloned.Provider) == "" {
+			cloned.Provider = testPolicyDiscoveryName
+		}
+		if _, ok := cloned.Labels["kubernetes.io/namespace"]; !ok {
+			cloned.Labels["kubernetes.io/namespace"] = testPolicyNamespace
+		}
+	}
+
+	return cloned, nil
 }
 
 type spyIdentityResolver struct {
@@ -1836,12 +1878,39 @@ func (p *policyEngineStub) EvaluateConnect(id *identity.Identity, fqdn string, p
 func mustPolicyEngine(t *testing.T, cfgs []config.PolicyConfig) *policy.Engine {
 	t.Helper()
 
-	engine, err := policy.NewEngine(cfgs)
+	normalized := make([]config.PolicyConfig, len(cfgs))
+	for i, cfg := range cfgs {
+		normalized[i] = cfg
+		if normalized[i].Subjects.Kubernetes != nil || normalized[i].Subjects.EC2 != nil {
+			continue
+		}
+		normalized[i].Subjects = config.PolicySubjectsConfig{
+			Kubernetes: &config.KubernetesSubjectConfig{
+				DiscoveryNames: []string{testPolicyDiscoveryName},
+				Namespaces:     []string{testPolicyNamespace},
+				MatchLabels:    cloneConfigLabels(cfg.IdentitySelector.MatchLabels),
+			},
+		}
+	}
+
+	engine, err := policy.NewEngine(normalized)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
 
 	return engine
+}
+
+func cloneConfigLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return map[string]string{}
+	}
+
+	cloned := make(map[string]string, len(labels))
+	for key, value := range labels {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func proxiedRequest(proxyAddr string, method string, targetURL string, body io.Reader) (*http.Response, error) {
