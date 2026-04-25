@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -163,6 +164,12 @@ func TestMITMEngineAlwaysIssuesWithPrimaryCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseMITMCA(primary) error = %v", err)
 	}
+	if err := cert.Leaf.CheckSignatureFrom(primaryLeaf); err != nil {
+		t.Fatalf("CheckSignatureFrom(primary) error = %v", err)
+	}
+	if err := cert.Leaf.CheckSignatureFrom(companion.leaf); err == nil {
+		t.Fatal("expected generated leaf to not verify against companion CA")
+	}
 	if got, want := string(cert.Leaf.AuthorityKeyId), string(primaryLeaf.SubjectKeyId); got != want {
 		t.Fatalf("AuthorityKeyId = %x, want %x", cert.Leaf.AuthorityKeyId, primaryLeaf.SubjectKeyId)
 	}
@@ -184,18 +191,31 @@ func TestMITMEngineReportsIssuerAndCompanionFingerprints(t *testing.T) {
 		t.Fatalf("AddAdditionalCA(companionB) error = %v", err)
 	}
 
+	_, primaryFingerprint, err := parseMITMCA(primary.certificate)
+	if err != nil {
+		t.Fatalf("parseMITMCA(primary) error = %v", err)
+	}
+	_, companionAFingerprint, err := parseMITMCA(companionA.certificate)
+	if err != nil {
+		t.Fatalf("parseMITMCA(companionA) error = %v", err)
+	}
+	_, companionBFingerprint, err := parseMITMCA(companionB.certificate)
+	if err != nil {
+		t.Fatalf("parseMITMCA(companionB) error = %v", err)
+	}
+	if primaryFingerprint == companionAFingerprint || primaryFingerprint == companionBFingerprint || companionAFingerprint == companionBFingerprint {
+		t.Fatalf("expected distinct fingerprints, got issuer=%q companionA=%q companionB=%q", primaryFingerprint, companionAFingerprint, companionBFingerprint)
+	}
+
 	status := engine.CAStatus()
-	if status.IssuerFingerprint == "" {
-		t.Fatal("expected issuer fingerprint")
+	if got, want := status.IssuerFingerprint, primaryFingerprint; got != want {
+		t.Fatalf("IssuerFingerprint = %q, want %q", got, want)
 	}
-	if len(status.CompanionFingerprints) != 2 {
-		t.Fatalf("CompanionFingerprints = %#v, want two companions", status.CompanionFingerprints)
+	if got, want := status.CompanionFingerprints, []string{companionAFingerprint, companionBFingerprint}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("CompanionFingerprints = %#v, want %#v", got, want)
 	}
-	if len(status.AllFingerprints) != 3 {
-		t.Fatalf("AllFingerprints = %#v, want issuer plus companions", status.AllFingerprints)
-	}
-	if status.AllFingerprints[0] != status.IssuerFingerprint {
-		t.Fatalf("AllFingerprints[0] = %q, want issuer %q", status.AllFingerprints[0], status.IssuerFingerprint)
+	if got, want := status.AllFingerprints, []string{primaryFingerprint, companionAFingerprint, companionBFingerprint}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("AllFingerprints = %#v, want %#v", got, want)
 	}
 }
 
