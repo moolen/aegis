@@ -309,7 +309,6 @@ policies:
   - name: bad-cidrs
     subjects:
       cidrs:
-        - " "
         - "not-a-cidr"
     egress:
       - fqdn: "example.com"
@@ -320,8 +319,30 @@ policies:
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	if !strings.Contains(err.Error(), "subjects.cidrs") {
-		t.Fatalf("error = %v, want subjects.cidrs validation error", err)
+	if !strings.Contains(err.Error(), "subjects.cidrs[0]") || !strings.Contains(err.Error(), "valid CIDR") {
+		t.Fatalf("error = %v, want malformed subjects.cidrs parse error", err)
+	}
+}
+
+func TestLoadRejectsBlankCIDRPolicySubjects(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: blank-cidrs
+    subjects:
+      cidrs:
+        - " "
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "subjects.cidrs[0]") || !strings.Contains(err.Error(), "valid CIDR") {
+		t.Fatalf("error = %v, want blank subjects.cidrs validation error", err)
 	}
 }
 
