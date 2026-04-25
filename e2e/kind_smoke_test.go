@@ -174,32 +174,32 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 
 	allowedPodIP := kindPodIP(t, repoRoot, kubeContext, kindAllowedPod)
 	deniedPodIP := kindPodIP(t, repoRoot, kubeContext, kindDeniedPod)
+	allowedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", allowedPodIP, kindEchoHostName)
+	deniedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", deniedPodIP, kindEchoHostName)
 
-	allowedSimulation := kubectlExecPod(
+	allowedSimulation := kubectlExecPodEventually(
 		t,
 		repoRoot,
+		30*time.Second,
 		kubeContext,
 		kindAllowedPod,
-		"curl",
-		"-fsS",
-		"-H",
-		"Authorization: Bearer "+kindAdminToken,
-		fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", allowedPodIP, kindEchoHostName),
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -fsS --max-time 10 -H 'Authorization: Bearer %s' '%s'", kindAdminToken, allowedSimulationURL),
 	)
 	if !strings.Contains(allowedSimulation, `"action":"allow"`) || !strings.Contains(allowedSimulation, `"policy":"allow-echo-from-allowed"`) {
 		t.Fatalf("allowed simulation = %s, want allow-echo-from-allowed allow", allowedSimulation)
 	}
 
-	deniedSimulation := kubectlExecPod(
+	deniedSimulation := kubectlExecPodEventually(
 		t,
 		repoRoot,
+		30*time.Second,
 		kubeContext,
 		kindAllowedPod,
-		"curl",
-		"-fsS",
-		"-H",
-		"Authorization: Bearer "+kindAdminToken,
-		fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", deniedPodIP, kindEchoHostName),
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -fsS --max-time 10 -H 'Authorization: Bearer %s' '%s'", kindAdminToken, deniedSimulationURL),
 	)
 	if !strings.Contains(deniedSimulation, `"action":"deny"`) || !strings.Contains(deniedSimulation, `"reason":"policy_denied"`) {
 		t.Fatalf("denied simulation = %s, want deny policy_denied", deniedSimulation)
@@ -317,6 +317,26 @@ func kubectlExec(t *testing.T, repoRoot string, kubeContext string, args ...stri
 	t.Helper()
 
 	return kubectlExecPod(t, repoRoot, kubeContext, kindCurlPodName, args...)
+}
+
+func kubectlExecPodEventually(t *testing.T, repoRoot string, timeout time.Duration, kubeContext string, podName string, args ...string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var lastOutput string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		output, err := tryKubectlExecPod(repoRoot, kubeContext, podName, args...)
+		if err == nil {
+			return output
+		}
+		lastOutput = output
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	t.Fatalf("kubectl exec %s did not succeed before timeout: %v\n%s", podName, lastErr, lastOutput)
+	return ""
 }
 
 func kubectlExecPod(t *testing.T, repoRoot string, kubeContext string, podName string, args ...string) string {
