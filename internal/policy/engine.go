@@ -25,8 +25,23 @@ type Policy struct {
 	name        string
 	enforcement string
 	bypass      bool
-	selector    map[string]string
+	subjects    Subjects
 	egress      []Rule
+}
+
+type Subjects struct {
+	kubernetes *KubernetesSubject
+	ec2        *EC2Subject
+}
+
+type KubernetesSubject struct {
+	discoveryNames map[string]struct{}
+	namespaces     map[string]struct{}
+	matchLabels    map[string]string
+}
+
+type EC2Subject struct {
+	discoveryNames map[string]struct{}
 }
 
 type Rule struct {
@@ -40,6 +55,8 @@ type HTTPRule struct {
 	allowedMethods map[string]struct{}
 	allowedPaths   []string
 }
+
+const kubernetesNamespaceLabel = "kubernetes.io/namespace"
 
 func NewEngine(cfgs []config.PolicyConfig) (*Engine, error) {
 	policies := make([]Policy, 0, len(cfgs))
@@ -107,7 +124,7 @@ func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 		name:        cfg.Name,
 		enforcement: config.NormalizeEnforcementMode(cfg.Enforcement),
 		bypass:      cfg.Bypass,
-		selector:    cloneStringMap(cfg.IdentitySelector.MatchLabels),
+		subjects:    compileSubjects(cfg.Subjects),
 		egress:      make([]Rule, 0, len(cfg.Egress)),
 	}
 
@@ -120,6 +137,24 @@ func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 	}
 
 	return policy, nil
+}
+
+func compileSubjects(cfg config.PolicySubjectsConfig) Subjects {
+	subjects := Subjects{}
+	if cfg.Kubernetes != nil {
+		subjects.kubernetes = &KubernetesSubject{
+			discoveryNames: compileStringSet(cfg.Kubernetes.DiscoveryNames),
+			namespaces:     compileStringSet(cfg.Kubernetes.Namespaces),
+			matchLabels:    cloneStringMap(cfg.Kubernetes.MatchLabels),
+		}
+	}
+	if cfg.EC2 != nil {
+		subjects.ec2 = &EC2Subject{
+			discoveryNames: compileStringSet(cfg.EC2.DiscoveryNames),
+		}
+	}
+
+	return subjects
 }
 
 func compileRule(cfg config.EgressRuleConfig) (Rule, error) {
@@ -169,18 +204,41 @@ func compileHTTPRule(cfg config.HTTPRuleConfig) (*HTTPRule, error) {
 }
 
 func (p Policy) matchesIdentity(id *identity.Identity) bool {
-	labels := map[string]string(nil)
-	if id != nil {
-		labels = id.Labels
+	if id == nil {
+		return false
 	}
 
-	for key, want := range p.selector {
-		if got, ok := labels[key]; !ok || got != want {
-			return false
-		}
+	switch id.Source {
+	case "kubernetes":
+		return p.subjects.matchesKubernetes(id)
+	case "ec2":
+		return p.subjects.matchesEC2(id)
+	default:
+		return false
+	}
+}
+
+func (s Subjects) matchesKubernetes(id *identity.Identity) bool {
+	if s.kubernetes == nil {
+		return false
+	}
+	if !matchesStringSet(s.kubernetes.discoveryNames, id.Provider) {
+		return false
+	}
+	namespace, ok := id.Labels[kubernetesNamespaceLabel]
+	if !ok || !matchesStringSet(s.kubernetes.namespaces, namespace) {
+		return false
 	}
 
-	return true
+	return matchesLabels(id.Labels, s.kubernetes.matchLabels)
+}
+
+func (s Subjects) matchesEC2(id *identity.Identity) bool {
+	if s.ec2 == nil {
+		return false
+	}
+
+	return matchesStringSet(s.ec2.discoveryNames, id.Provider)
 }
 
 func (r Rule) matches(fqdn string, port int, method string, reqPath string) bool {
@@ -287,4 +345,32 @@ func cloneStringMap(src map[string]string) map[string]string {
 	}
 
 	return dst
+}
+
+func compileStringSet(values []string) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+
+	compiled := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		compiled[value] = struct{}{}
+	}
+
+	return compiled
+}
+
+func matchesStringSet(values map[string]struct{}, want string) bool {
+	_, ok := values[want]
+	return ok
+}
+
+func matchesLabels(labels map[string]string, selector map[string]string) bool {
+	for key, want := range selector {
+		if got, ok := labels[key]; !ok || got != want {
+			return false
+		}
+	}
+
+	return true
 }
