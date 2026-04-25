@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,6 +143,59 @@ func TestTLSModesPublishVerifiableAddress(t *testing.T) {
 	}
 }
 
+func TestTLSModesEmitTrustMaterial(t *testing.T) {
+	for _, mode := range []string{"passthrough", "mitm"} {
+		t.Run(mode, func(t *testing.T) {
+			var stdout bytes.Buffer
+			fixture, err := startFixture(fixtureConfig{
+				Mode:   mode,
+				Listen: "127.0.0.1:0",
+				Path:   "/allowed",
+			}, &stdout)
+			if err != nil {
+				t.Fatalf("startFixture() error = %v", err)
+			}
+			defer stopFixture(t, fixture)
+
+			rootCAPEM := stdoutEnvValue(t, stdout.String(), "ROOT_CA_PEM_B64")
+			decodedPEM, err := base64.StdEncoding.DecodeString(rootCAPEM)
+			if err != nil {
+				t.Fatalf("DecodeString(ROOT_CA_PEM_B64) error = %v", err)
+			}
+
+			certPool := x509.NewCertPool()
+			if ok := certPool.AppendCertsFromPEM(decodedPEM); !ok {
+				t.Fatal("AppendCertsFromPEM(ROOT_CA_PEM_B64) = false, want true")
+			}
+
+			client := &http.Client{
+				Timeout: time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{RootCAs: certPool},
+				},
+			}
+			resp, err := client.Get("https://" + fixture.addr + "/allowed")
+			if err != nil {
+				t.Fatalf("HTTPS GET using emitted trust material error = %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+			}
+		})
+	}
+}
+
+func TestPublishableFixtureAddrPreservesLoopbackFamily(t *testing.T) {
+	if got := publishableFixtureAddr(&net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 3128}); got != "127.0.0.1:3128" {
+		t.Fatalf("publishableFixtureAddr(v4 unspecified) = %q, want %q", got, "127.0.0.1:3128")
+	}
+	if got := publishableFixtureAddr(&net.TCPAddr{IP: net.ParseIP("::"), Port: 3128}); got != "[::1]:3128" {
+		t.Fatalf("publishableFixtureAddr(v6 unspecified) = %q, want %q", got, "[::1]:3128")
+	}
+}
+
 func startTestFixture(t *testing.T, cfg fixtureConfig) (*runningFixture, func()) {
 	t.Helper()
 
@@ -150,23 +207,42 @@ func startTestFixture(t *testing.T, cfg fixtureConfig) (*runningFixture, func())
 
 	stop := func() {
 		t.Helper()
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		if err := fixture.shutdown(shutdownCtx); err != nil {
-			t.Fatalf("fixture.shutdown() error = %v", err)
-		}
-
-		select {
-		case err := <-fixture.errCh:
-			if !errors.Is(err, http.ErrServerClosed) && err != nil {
-				t.Fatalf("fixture serve error = %v", err)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for fixture shutdown")
-		}
+		stopFixture(t, fixture)
 	}
 
 	return fixture, stop
+}
+
+func stopFixture(t *testing.T, fixture *runningFixture) {
+	t.Helper()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := fixture.shutdown(shutdownCtx); err != nil {
+		t.Fatalf("fixture.shutdown() error = %v", err)
+	}
+
+	select {
+	case err := <-fixture.errCh:
+		if !errors.Is(err, http.ErrServerClosed) && err != nil {
+			t.Fatalf("fixture serve error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fixture shutdown")
+	}
+}
+
+func stdoutEnvValue(t *testing.T, stdout string, key string) string {
+	t.Helper()
+
+	prefix := key + "="
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+
+	t.Fatalf("stdout missing %s in %q", key, stdout)
+	return ""
 }

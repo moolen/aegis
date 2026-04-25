@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -28,10 +29,11 @@ type fixtureConfig struct {
 }
 
 type runningFixture struct {
-	addr     string
-	rootCAs  *x509.CertPool
-	shutdown func(context.Context) error
-	errCh    <-chan error
+	addr      string
+	rootCAs   *x509.CertPool
+	rootCAPEM []byte
+	shutdown  func(context.Context) error
+	errCh     <-chan error
 }
 
 func parseFixtureConfig(args []string) (fixtureConfig, error) {
@@ -80,18 +82,20 @@ func startFixture(cfg fixtureConfig, stdout io.Writer) (*runningFixture, error) 
 		return srv.Serve(ln)
 	}
 	var rootCAs *x509.CertPool
+	var rootCAPEM []byte
 	if cfg.Mode == "passthrough" || cfg.Mode == "mitm" {
 		serverName, err := fixtureServerNameForAddr(publishedAddr)
 		if err != nil {
 			_ = ln.Close()
 			return nil, err
 		}
-		tlsConfig, certPool, err := newFixtureTLSConfig(serverName)
+		tlsConfig, certPool, certPEM, err := newFixtureTLSConfig(serverName)
 		if err != nil {
 			_ = ln.Close()
 			return nil, err
 		}
 		rootCAs = certPool
+		rootCAPEM = certPEM
 		tlsListener := tls.NewListener(ln, tlsConfig)
 		serveFn = func() error {
 			return srv.Serve(tlsListener)
@@ -101,6 +105,12 @@ func startFixture(cfg fixtureConfig, stdout io.Writer) (*runningFixture, error) 
 		_ = ln.Close()
 		return nil, err
 	}
+	if len(rootCAPEM) > 0 {
+		if _, err := fmt.Fprintf(stdout, "ROOT_CA_PEM_B64=%s\n", base64.StdEncoding.EncodeToString(rootCAPEM)); err != nil {
+			_ = ln.Close()
+			return nil, err
+		}
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -108,10 +118,11 @@ func startFixture(cfg fixtureConfig, stdout io.Writer) (*runningFixture, error) 
 	}()
 
 	return &runningFixture{
-		addr:     publishedAddr,
-		rootCAs:  rootCAs,
-		shutdown: srv.Shutdown,
-		errCh:    errCh,
+		addr:      publishedAddr,
+		rootCAs:   rootCAs,
+		rootCAPEM: rootCAPEM,
+		shutdown:  srv.Shutdown,
+		errCh:     errCh,
 	}, nil
 }
 
@@ -140,6 +151,9 @@ func publishableFixtureAddr(addr net.Addr) string {
 	}
 
 	host := "127.0.0.1"
+	if tcpAddr.IP != nil && tcpAddr.IP.IsUnspecified() && tcpAddr.IP.To4() == nil {
+		host = "::1"
+	}
 	if tcpAddr.IP != nil && !tcpAddr.IP.IsUnspecified() {
 		host = tcpAddr.IP.String()
 	}
@@ -155,16 +169,16 @@ func fixtureServerNameForAddr(addr string) (string, error) {
 	return host, nil
 }
 
-func newFixtureTLSConfig(serverName string) (*tls.Config, *x509.CertPool, error) {
+func newFixtureTLSConfig(serverName string) (*tls.Config, *x509.CertPool, []byte, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	certificateTemplate := &x509.Certificate{
@@ -188,7 +202,7 @@ func newFixtureTLSConfig(serverName string) (*tls.Config, *x509.CertPool, error)
 
 	certificateDER, err := x509.CreateCertificate(rand.Reader, certificateTemplate, certificateTemplate, &privateKey.PublicKey, privateKey)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
@@ -196,17 +210,17 @@ func newFixtureTLSConfig(serverName string) (*tls.Config, *x509.CertPool, error)
 
 	certificate, err := tls.X509KeyPair(certificatePEM, privateKeyPEM)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	certPool := x509.NewCertPool()
 	if ok := certPool.AppendCertsFromPEM(certificatePEM); !ok {
-		return nil, nil, fmt.Errorf("append generated certificate to cert pool")
+		return nil, nil, nil, fmt.Errorf("append generated certificate to cert pool")
 	}
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS12,
-	}, certPool, nil
+	}, certPool, certificatePEM, nil
 }
 
 func main() {
