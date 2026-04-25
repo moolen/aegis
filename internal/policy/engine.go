@@ -147,26 +147,29 @@ func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 	subjects := Subjects{}
 	if cfg.Kubernetes != nil {
-		if len(cfg.Kubernetes.DiscoveryNames) == 0 {
+		discoveryNames := compileStringSet(cfg.Kubernetes.DiscoveryNames)
+		if len(discoveryNames) == 0 {
 			return Subjects{}, fmt.Errorf("kubernetes subjects.discoveryNames must not be empty")
 		}
-		if len(cfg.Kubernetes.Namespaces) == 0 {
+		namespaces := compileStringSet(cfg.Kubernetes.Namespaces)
+		if len(namespaces) == 0 {
 			return Subjects{}, fmt.Errorf("kubernetes subjects.namespaces must not be empty")
 		}
 
 		subjects.kubernetes = &KubernetesSubject{
-			discoveryNames: compileStringSet(cfg.Kubernetes.DiscoveryNames),
-			namespaces:     compileStringSet(cfg.Kubernetes.Namespaces),
+			discoveryNames: discoveryNames,
+			namespaces:     namespaces,
 			matchLabels:    cloneStringMap(cfg.Kubernetes.MatchLabels),
 		}
 	}
 	if cfg.EC2 != nil {
-		if len(cfg.EC2.DiscoveryNames) == 0 {
+		discoveryNames := compileStringSet(cfg.EC2.DiscoveryNames)
+		if len(discoveryNames) == 0 {
 			return Subjects{}, fmt.Errorf("ec2 subjects.discoveryNames must not be empty")
 		}
 
 		subjects.ec2 = &EC2Subject{
-			discoveryNames: compileStringSet(cfg.EC2.DiscoveryNames),
+			discoveryNames: discoveryNames,
 		}
 	}
 	if subjects.kubernetes == nil && subjects.ec2 == nil {
@@ -177,7 +180,7 @@ func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 }
 
 func compileRule(cfg config.EgressRuleConfig) (Rule, error) {
-	normalizedFQDN := strings.ToLower(cfg.FQDN)
+	normalizedFQDN := strings.ToLower(strings.TrimSpace(cfg.FQDN))
 	if err := validateFQDNPattern(normalizedFQDN); err != nil {
 		return Rule{}, err
 	}
@@ -209,10 +212,11 @@ func compileHTTPRule(cfg config.HTTPRuleConfig) (*HTTPRule, error) {
 	}
 
 	for _, method := range cfg.AllowedMethods {
-		httpRule.allowedMethods[strings.ToUpper(method)] = struct{}{}
+		httpRule.allowedMethods[strings.ToUpper(strings.TrimSpace(method))] = struct{}{}
 	}
 
 	for _, pattern := range cfg.AllowedPaths {
+		pattern = strings.TrimSpace(pattern)
 		if err := validatePathPattern(pattern); err != nil {
 			return nil, err
 		}
@@ -373,7 +377,15 @@ func compileStringSet(values []string) map[string]struct{} {
 
 	compiled := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		compiled[strings.TrimSpace(value)] = struct{}{}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		compiled[value] = struct{}{}
+	}
+
+	if len(compiled) == 0 {
+		return nil
 	}
 
 	return compiled

@@ -145,6 +145,24 @@ func TestNewEngineRejectsKubernetesSubjectsWithoutDiscoveryNames(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"   "}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes discoveryNames validation error", err)
+	}
+}
+
 func TestNewEngineRejectsKubernetesSubjectsWithoutNamespaces(t *testing.T) {
 	_, err := NewEngine([]config.PolicyConfig{{
 		Name:     "frontend-egress",
@@ -163,10 +181,46 @@ func TestNewEngineRejectsKubernetesSubjectsWithoutNamespaces(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyNamespaces(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"   "}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes namespaces validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "namespaces") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes namespaces validation error", err)
+	}
+}
+
 func TestNewEngineRejectsEC2SubjectsWithoutDiscoveryNames(t *testing.T) {
 	_, err := NewEngine([]config.PolicyConfig{{
 		Name:     "legacy-web-egress",
 		Subjects: ec2Subjects(nil),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "metadata.internal",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want ec2 discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "ec2") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want ec2 discoveryNames validation error", err)
+	}
+}
+
+func TestNewEngineRejectsEC2SubjectsWithWhitespaceOnlyDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "legacy-web-egress",
+		Subjects: ec2Subjects([]string{"   "}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "metadata.internal",
 			Ports: []int{443},
@@ -276,6 +330,60 @@ func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedNamespaceBinding(t 
 	)
 	if !decision.Allowed {
 		t.Fatal("expected whitespace-padded namespace binding to match runtime namespace label")
+	}
+}
+
+func TestEvaluateMatchesWhitespacePaddedFQDNRule(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "  Example.com  ",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"example.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded fqdn rule to match")
+	}
+}
+
+func TestEvaluateMatchesWhitespacePaddedHTTPMethodAndPath(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"  get  "},
+				AllowedPaths:   []string{"  /api/*  "},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"example.com",
+		80,
+		http.MethodGet,
+		"/api/users",
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded http method and path to match")
 	}
 }
 
