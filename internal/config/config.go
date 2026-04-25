@@ -22,6 +22,7 @@ const (
 
 type Config struct {
 	Proxy     ProxyConfig     `yaml:"proxy"`
+	Admin     AdminConfig     `yaml:"admin"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
 	DNS       DNSConfig       `yaml:"dns"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
@@ -53,6 +54,10 @@ type ConnectionLimitsConfig struct {
 
 type MetricsConfig struct {
 	Listen string `yaml:"listen"`
+}
+
+type AdminConfig struct {
+	Token string `yaml:"token"`
 }
 
 type ShutdownConfig struct {
@@ -181,6 +186,9 @@ func (c Config) Validate() error {
 	}
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")
+	}
+	if c.Admin.Token != "" && strings.TrimSpace(c.Admin.Token) == "" {
+		return fmt.Errorf("admin.token must not be empty when set")
 	}
 	if c.Shutdown.GracePeriod <= 0 {
 		return fmt.Errorf("shutdown.gracePeriod must be greater than zero")

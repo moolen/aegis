@@ -178,6 +178,86 @@ func TestCONNECTAuditModeAllowsDeniedTargets(t *testing.T) {
 	}
 }
 
+func TestCONNECTAdminEnforcementKillSwitchAllowsDeniedTargets(t *testing.T) {
+	const (
+		adminToken  = "test-admin-token"
+		allowedHost = "allowed.internal"
+		targetHost  = "switch-denied.internal"
+	)
+
+	tempDir := t.TempDir()
+	upstreamCA := newTestCA(t, tempDir, "upstream-switch-connect")
+	serverCert := issueServerCertificate(t, upstreamCA, targetHost)
+	upstream := startTLSServer(t, serverCert, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	dnsServer := startStaticDNSServer(t, map[string]net.IP{targetHost: net.ParseIP("127.0.0.1")})
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configPath := filepath.Join(tempDir, "aegis.yaml")
+	writeConfig(t, configPath, proxyConfigYAML(proxyConfigSpec{
+		ProxyAddr:           proxyAddr,
+		MetricsAddr:         metricsAddr,
+		AdminToken:          adminToken,
+		DNSServers:          []string{dnsServer},
+		AllowedHostPatterns: []string{"*.internal"},
+		PolicyName:          "allow-other",
+		PolicyFQDN:          allowedHost,
+		PolicyPort:          mustPort(t, upstream.Listener.Addr().String()),
+		TLSMode:             "passthrough",
+	}))
+
+	startAegis(t, configPath)
+
+	conn, reader, resp := openConnectTunnel(t, proxyAddr, fmt.Sprintf("%s:%d", targetHost, mustPort(t, upstream.Listener.Addr().String())))
+	resp.Body.Close()
+	reader.Reset(conn)
+	conn.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("initial CONNECT status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	adminResp, err := setAdminEnforcementMode("http://"+metricsAddr, adminToken, "audit")
+	if err != nil {
+		t.Fatalf("setAdminEnforcementMode(audit) error = %v", err)
+	}
+	adminResp.Body.Close()
+	if adminResp.StatusCode != http.StatusOK {
+		t.Fatalf("admin audit status = %d, want %d", adminResp.StatusCode, http.StatusOK)
+	}
+
+	client := httpsProxyClient(proxyAddr, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    upstreamCA.RootPool,
+	})
+	resp, err = client.Get(fmt.Sprintf("https://%s:%d/allowed", targetHost, mustPort(t, upstream.Listener.Addr().String())))
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("audit status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	adminResp, err = setAdminEnforcementMode("http://"+metricsAddr, adminToken, "config")
+	if err != nil {
+		t.Fatalf("setAdminEnforcementMode(config) error = %v", err)
+	}
+	adminResp.Body.Close()
+	if adminResp.StatusCode != http.StatusOK {
+		t.Fatalf("admin config status = %d, want %d", adminResp.StatusCode, http.StatusOK)
+	}
+
+	conn, reader, resp = openConnectTunnel(t, proxyAddr, fmt.Sprintf("%s:%d", targetHost, mustPort(t, upstream.Listener.Addr().String())))
+	resp.Body.Close()
+	reader.Reset(conn)
+	conn.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("restored CONNECT status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
 func TestCONNECTBypassAllowsDeniedTargets(t *testing.T) {
 	const (
 		allowedHost = "allowed.internal"
@@ -609,6 +689,7 @@ func TestMITMUpstreamCertValidated(t *testing.T) {
 type proxyConfigSpec struct {
 	ProxyAddr                string
 	MetricsAddr              string
+	AdminToken               string
 	DNSServers               []string
 	AllowedHostPatterns      []string
 	AllowedCIDRs             []string
@@ -636,6 +717,9 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 	}
 	if spec.ProxyCACertFile != "" || spec.ProxyCAKeyFile != "" {
 		fmt.Fprintf(&b, "  ca:\n    certFile: %q\n    keyFile: %q\n", spec.ProxyCACertFile, spec.ProxyCAKeyFile)
+	}
+	if spec.AdminToken != "" {
+		fmt.Fprintf(&b, "admin:\n  token: %q\n", spec.AdminToken)
 	}
 	fmt.Fprintf(&b, "metrics:\n  listen: %q\n", spec.MetricsAddr)
 	fmt.Fprint(&b, "shutdown:\n  gracePeriod: 10s\n")

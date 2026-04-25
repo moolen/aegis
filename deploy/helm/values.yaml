@@ -35,6 +35,9 @@ config:
     # ca:
     #   certFile: /etc/aegis/ca/ca.crt
     #   keyFile: /etc/aegis/ca/ca.key
+  admin: {}
+  # admin:
+  #   token: replace-me
   metrics:
     listen: ":9090"
   shutdown:
@@ -68,6 +71,8 @@ config:
 # Set config.proxy.enforcement: audit to shadow policy decisions without
 # blocking traffic during migration. In audit mode, CONNECT stays transparent
 # passthrough, so inner HTTPS method/path rules are not actively inspected.
+# Set config.admin.token to enable POST /admin/enforcement?mode=audit|enforce|config
+# on the metrics port as a protected global kill switch.
 # Set config.policies[].bypass: true for a narrower per-policy shadow mode with
 # the same transparent CONNECT behavior.
 # Set config.proxy.connectionLimits.maxConcurrentPerIdentity for a simple

@@ -76,7 +76,7 @@ func run() int {
 		return 1
 	}
 
-	proxySrv, metricsSrv := newHTTPServers(cfg, reloadableHandler, appmetrics.NewServer(cfg.Metrics.Listen, registry, runtime).Handler())
+	proxySrv, metricsSrv := newHTTPServers(cfg, reloadableHandler, appmetrics.NewServer(cfg.Metrics.Listen, registry, runtime, runtime).Handler())
 	proxyListener, metricsListener, err := buildListeners(cfg, logger, m)
 	if err != nil {
 		logger.Error("build listeners failed", "error", err)
@@ -154,19 +154,20 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
 	connectionLimiter := proxy.NewConnectionLimiter(logger, m)
-	deps, err := buildProxyDependencies(ctx, cfg, logger, m, proxy.NewDrainTracker(logger, m), connectionLimiter)
+	enforcement := proxy.NewEnforcementOverrideController(logger)
+	deps, err := buildProxyDependencies(ctx, cfg, logger, m, proxy.NewDrainTracker(logger, m), connectionLimiter, enforcement)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	connectionLimiter.UpdateLimit(cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
 	proxyHandler := newProxyServer(deps)
-	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry, nil)
+	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry, nil, nil)
 
 	proxySrv, metricsSrv := newHTTPServers(cfg, proxyHandler.Handler(), metricsHandler.Handler())
 	return proxySrv, metricsSrv, m, nil
 }
 
-func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics, drainTracker *proxy.DrainTracker, connectionLimiter *proxy.ConnectionLimiter) (proxy.Dependencies, error) {
+func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics, drainTracker *proxy.DrainTracker, connectionLimiter *proxy.ConnectionLimiter, enforcement *proxy.EnforcementOverrideController) (proxy.Dependencies, error) {
 	resolver := dns.NewResolver(dns.Config{
 		CacheTTL: cfg.DNS.CacheTTL,
 		Timeout:  cfg.DNS.Timeout,
@@ -202,7 +203,8 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		DestinationGuard:  destinationGuard,
 		DrainTracker:      drainTracker,
 		ConnectionLimiter: connectionLimiter,
-		AuditMode:         config.NormalizeEnforcementMode(cfg.Proxy.Enforcement) == config.EnforcementAudit,
+		EnforcementMode:   cfg.Proxy.Enforcement,
+		Enforcement:       enforcement,
 		IdentityResolver:  identityResolver,
 		PolicyEngine:      engine,
 		MITM:              mitmEngine,

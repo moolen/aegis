@@ -596,6 +596,52 @@ func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerEnforcementOverridePersistsAcrossReload(t *testing.T) {
+	configPath := writeRuntimeConfig(t, runtimeConfigYAML("policy-a", ":3128", ":9090", false, ""))
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	handler := &reloadableProxyHandler{}
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, configPath, handler, nil)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	status, err := manager.SetEnforcementMode("audit")
+	if err != nil {
+		t.Fatalf("SetEnforcementMode() error = %v", err)
+	}
+	if status.Override != "audit" || status.Effective != "audit" {
+		t.Fatalf("status = %#v, want override and effective audit", status)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAML("policy-b", ":3128", ":9090", false, ""))
+	if err := manager.ReloadFromFile(); err != nil {
+		t.Fatalf("ReloadFromFile() error = %v", err)
+	}
+
+	status = manager.EnforcementStatus()
+	if status.Configured != config.EnforcementEnforce || status.Override != "audit" || status.Effective != "audit" {
+		t.Fatalf("status after reload = %#v, want configured enforce and override/effective audit", status)
+	}
+	if got := mustFindMetric(t, reg, "aegis_enforcement_mode", map[string]string{"scope": "override", "mode": "audit"}).GetGauge().GetValue(); got != 1 {
+		t.Fatalf("override mode gauge = %v, want 1", got)
+	}
+
+	status, err = manager.SetEnforcementMode("config")
+	if err != nil {
+		t.Fatalf("SetEnforcementMode(config) error = %v", err)
+	}
+	if status.Override != "" || status.Effective != config.EnforcementEnforce {
+		t.Fatalf("status after clear = %#v, want configured-only enforce", status)
+	}
+}
+
 func TestBuildIdentityResolverUsesHealthyEC2Provider(t *testing.T) {
 	restoreKubernetes := newKubernetesRuntimeProvider
 	restoreEC2 := newEC2RuntimeProvider

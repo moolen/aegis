@@ -19,6 +19,7 @@ type Metrics struct {
 	IdentityMapEntries                     *prometheus.GaugeVec
 	IdentityResolutionsTotal               *prometheus.CounterVec
 	IdentityOverlapsTotal                  *prometheus.CounterVec
+	EnforcementMode                        *prometheus.GaugeVec
 	IdentityConnectionLimit                prometheus.Gauge
 	IdentityConnectionsActive              *prometheus.GaugeVec
 	IdentityConnectionLimitRejectionsTotal *prometheus.CounterVec
@@ -152,6 +153,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"winner_provider", "winner_kind", "shadow_provider", "shadow_kind"},
 		),
+		EnforcementMode: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_enforcement_mode",
+				Help: "Current configured, override, and effective enforcement modes.",
+			},
+			[]string{"scope", "mode"},
+		),
 		IdentityConnectionLimit: prometheus.NewGauge(
 			prometheus.GaugeOpts{
 				Name: "aegis_identity_connection_limit",
@@ -280,6 +288,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.IdentityMapEntries,
 		m.IdentityResolutionsTotal,
 		m.IdentityOverlapsTotal,
+		m.EnforcementMode,
 		m.IdentityConnectionLimit,
 		m.IdentityConnectionsActive,
 		m.IdentityConnectionLimitRejectionsTotal,

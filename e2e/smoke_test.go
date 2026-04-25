@@ -222,6 +222,81 @@ func TestPolicyBypassAllowsDeniedHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestAdminEnforcementKillSwitchFlipsHTTPTrafficWithoutReload(t *testing.T) {
+	const adminToken = "test-admin-token"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/allowed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "aegis.yaml")
+
+	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/other", policyConfigOptions{AdminToken: adminToken}))
+	startAegis(t, configPath)
+
+	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+	if err != nil {
+		t.Fatalf("proxiedRequest() initial error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("initial status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	adminResp, err := setAdminEnforcementMode("http://"+metricsAddr, adminToken, "audit")
+	if err != nil {
+		t.Fatalf("setAdminEnforcementMode(audit) error = %v", err)
+	}
+	adminResp.Body.Close()
+	if adminResp.StatusCode != http.StatusOK {
+		t.Fatalf("admin audit status = %d, want %d", adminResp.StatusCode, http.StatusOK)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		auditResp, auditErr := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+		if auditErr != nil {
+			return false
+		}
+		defer auditResp.Body.Close()
+		return auditResp.StatusCode == http.StatusNoContent
+	})
+
+	metricsBody := fetchMetrics(t, "http://"+metricsAddr)
+	if got := metricValue(t, metricsBody, "aegis_enforcement_mode", map[string]string{"scope": "effective", "mode": "audit"}); got != 1 {
+		t.Fatalf("effective audit mode gauge = %v, want 1", got)
+	}
+
+	adminResp, err = setAdminEnforcementMode("http://"+metricsAddr, adminToken, "config")
+	if err != nil {
+		t.Fatalf("setAdminEnforcementMode(config) error = %v", err)
+	}
+	adminResp.Body.Close()
+	if adminResp.StatusCode != http.StatusOK {
+		t.Fatalf("admin config status = %d, want %d", adminResp.StatusCode, http.StatusOK)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		enforceResp, enforceErr := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+		if enforceErr != nil {
+			return false
+		}
+		defer enforceResp.Body.Close()
+		return enforceResp.StatusCode == http.StatusForbidden
+	})
+}
+
 func TestHTTPConnectionLimitRejectsSecondConcurrentRequest(t *testing.T) {
 	upstreamStarted := make(chan struct{}, 1)
 	releaseUpstream := make(chan struct{})
@@ -492,6 +567,15 @@ func fetchMetrics(t *testing.T, baseURL string) string {
 	return string(body)
 }
 
+func setAdminEnforcementMode(baseURL string, token string, mode string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/admin/enforcement?mode="+mode, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return http.DefaultClient.Do(req)
+}
+
 func writeConfig(t *testing.T, path string, contents string) {
 	t.Helper()
 
@@ -511,6 +595,7 @@ func policyConfigYAMLWithEnforcement(proxyAddr string, metricsAddr string, host 
 type policyConfigOptions struct {
 	Enforcement              string
 	Bypass                   bool
+	AdminToken               string
 	MaxConcurrentPerIdentity int
 }
 
@@ -527,12 +612,16 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
 	if opts.Bypass {
 		bypassBlock = "    bypass: true\n"
 	}
+	adminBlock := ""
+	if opts.AdminToken != "" {
+		adminBlock = fmt.Sprintf("admin:\n  token: %q\n", opts.AdminToken)
+	}
 
 	return fmt.Sprintf(`proxy:
   listen: "%s"
 %s%smetrics:
   listen: "%s"
-dns:
+%sdns:
   cache_ttl: 30s
   timeout: 5s
   servers: []
@@ -550,7 +639,7 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["%s"]
-`, proxyAddr, enforcementBlock, connectionLimitBlock, metricsAddr, bypassBlock, host, port, allowedPath)
+`, proxyAddr, enforcementBlock, connectionLimitBlock, metricsAddr, adminBlock, bypassBlock, host, port, allowedPath)
 }
 
 func mitmConfigYAML(proxyAddr string, metricsAddr string, certFile string, keyFile string) string {

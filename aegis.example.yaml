@@ -13,6 +13,8 @@ proxy:
   # ca:
   #   certFile: /etc/aegis/ca/ca.crt
   #   keyFile: /etc/aegis/ca/ca.key
+admin:
+  # token: "replace-me"   # enables the metrics-port admin kill switch
 metrics:
   listen: ":9090"
 shutdown:

@@ -24,6 +24,8 @@ Implemented in this bootstrap:
 - Live `SIGHUP` config reload for policy, DNS, discovery, and MITM CA changes.
 - Global `proxy.enforcement: audit` mode for migration, with would-allow /
   would-deny metrics and logs while traffic keeps flowing.
+- Token-protected `POST /admin/enforcement?mode=audit|enforce|config` on the
+  metrics port for an immediate global audit/enforce override without reload.
 - Per-policy `bypass: true` shadowing so a matching policy can emit would-allow
   / would-deny signals without blocking traffic.
 - Optional per-identity concurrent connection limits across plain HTTP requests
@@ -63,6 +65,13 @@ Current runtime behavior:
   emits audit metrics/logs, but it does not block policy-denied traffic. To
   keep migration traffic transparent, audit-mode `CONNECT` stays in raw
   passthrough rather than active MITM inspection.
+- When `admin.token` is configured, the metrics port also exposes a protected
+  enforcement admin endpoint. `POST /admin/enforcement?mode=audit` forces
+  global audit mode immediately, `mode=enforce` forces blocking immediately,
+  and `mode=config` clears the override and returns to the configured
+  `proxy.enforcement` value. `GET /admin/enforcement` reports the configured,
+  override, and effective modes, and `aegis_enforcement_mode` exposes them in
+  Prometheus.
 - When a matching policy sets `bypass: true`, that policy behaves like a
   scoped shadow rule: Aegis records would-allow / would-deny outcomes for the
   match but still forwards the traffic. As with global audit mode, bypassed
@@ -106,7 +115,8 @@ the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
 discovery changes without restarting the process, send `SIGHUP` to Aegis.
 For migration, set `proxy.enforcement: audit` to shadow policy decisions
 without blocking traffic. For a narrower escape hatch, set `bypass: true` on a
-specific policy instead.
+specific policy instead. To enable the global kill switch, set `admin.token`
+and call the metrics-port admin endpoint with `Authorization: Bearer <token>`.
 By default, Aegis also blocks loopback, private, and link-local upstream
 addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
 `dns.rebindingProtection.allowedHostPatterns` or
@@ -129,6 +139,8 @@ Inspect metrics:
 curl http://127.0.0.1:9090/healthz
 curl http://127.0.0.1:9090/readyz
 curl http://127.0.0.1:9090/metrics
+curl -H 'Authorization: Bearer replace-me' \
+  -X POST 'http://127.0.0.1:9090/admin/enforcement?mode=audit'
 ```
 
 ## Development
@@ -182,8 +194,9 @@ optional `proxyCA.existingSecret` mount for the CA files referenced by
 in-cluster Kubernetes discovery can watch pods when you enable
 `config.discovery.kubernetes`. Both `config.proxy.enforcement: audit` and
 per-policy `config.policies[].bypass: true` are supported for migration
-rollouts, and `config.proxy.connectionLimits.maxConcurrentPerIdentity` can be
-used as a simple abuse-control guardrail. The Fargate scaffold also exposes an
+rollouts, `config.admin.token` enables the metrics-port global kill switch,
+and `config.proxy.connectionLimits.maxConcurrentPerIdentity` can be used as a
+simple abuse-control guardrail. The Fargate scaffold also exposes an
 `enable_proxy_protocol_v2` switch on the NLB target group so source IP
 preservation can be paired with `config.proxy.proxyProtocol.enabled`.
 

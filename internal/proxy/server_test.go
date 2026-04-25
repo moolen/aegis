@@ -421,7 +421,7 @@ func TestProxyAuditModeAllowsDeniedHTTPRequestsAndRecordsWouldDeny(t *testing.T)
 		Resolver: staticResolver{
 			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
 		},
-		AuditMode: true,
+		EnforcementMode: "audit",
 		IdentityResolver: staticIdentityResolver{
 			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
 		},
@@ -1267,7 +1267,7 @@ func TestProxyConnectAuditModeAllowsDeniedTargetsAndRecordsWouldDeny(t *testing.
 				"tunnel.internal": {net.ParseIP("127.0.0.1")},
 			},
 		},
-		AuditMode: true,
+		EnforcementMode: "audit",
 		IdentityResolver: staticIdentityResolver{
 			identity: &identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
 		},
@@ -1511,7 +1511,7 @@ func TestProxyConnectAuditModeBypassesMissingSNI(t *testing.T) {
 				"tunnel.internal": {net.ParseIP("127.0.0.1")},
 			},
 		},
-		AuditMode: true,
+		EnforcementMode: "audit",
 		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
 			Name:             "allow-all",
 			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{}},

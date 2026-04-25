@@ -32,13 +32,14 @@ func (h *reloadableProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 }
 
 type runtimeManager struct {
-	rootCtx    context.Context
-	logger     *slog.Logger
-	metrics    *appmetrics.Metrics
-	configPath string
-	handler    *reloadableProxyHandler
-	drain      *proxy.DrainTracker
-	limiter    *proxy.ConnectionLimiter
+	rootCtx     context.Context
+	logger      *slog.Logger
+	metrics     *appmetrics.Metrics
+	configPath  string
+	handler     *reloadableProxyHandler
+	drain       *proxy.DrainTracker
+	limiter     *proxy.ConnectionLimiter
+	enforcement *proxy.EnforcementOverrideController
 
 	mu      sync.RWMutex
 	current runtimeGeneration
@@ -56,13 +57,14 @@ func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *ap
 		drain = proxy.NewDrainTracker(logger, metrics)
 	}
 	return &runtimeManager{
-		rootCtx:    rootCtx,
-		logger:     logger,
-		metrics:    metrics,
-		configPath: configPath,
-		handler:    handler,
-		drain:      drain,
-		limiter:    proxy.NewConnectionLimiter(logger, metrics),
+		rootCtx:     rootCtx,
+		logger:      logger,
+		metrics:     metrics,
+		configPath:  configPath,
+		handler:     handler,
+		drain:       drain,
+		limiter:     proxy.NewConnectionLimiter(logger, metrics),
+		enforcement: proxy.NewEnforcementOverrideController(logger),
 	}
 }
 
@@ -102,17 +104,17 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if enforceImmutable {
 		if err := validateReloadableConfig(m.current.cfg, cfg); err != nil {
+			m.mu.Unlock()
 			return err
 		}
 	}
 
 	generationCtx, cancel := context.WithCancel(m.rootCtx)
-	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics, m.drain, m.limiter)
+	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics, m.drain, m.limiter, m.enforcement)
 	if err != nil {
+		m.mu.Unlock()
 		cancel()
 		return err
 	}
@@ -134,6 +136,8 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	if checker, ok := deps.IdentityResolver.(appmetrics.ReadyChecker); ok {
 		m.current.readyChecker = checker
 	}
+	m.mu.Unlock()
+	m.recordEnforcementStatus()
 
 	return nil
 }
@@ -159,11 +163,72 @@ func (m *runtimeManager) CheckReadiness() error {
 	return checker.CheckReadiness()
 }
 
+func (m *runtimeManager) AdminToken() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.current.cfg.Admin.Token
+}
+
+func (m *runtimeManager) EnforcementStatus() appmetrics.EnforcementStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return enforcementStatusForConfig(m.current.cfg, m.enforcement)
+}
+
+func (m *runtimeManager) SetEnforcementMode(mode string) (appmetrics.EnforcementStatus, error) {
+	normalized := config.NormalizeEnforcementMode(mode)
+	switch normalized {
+	case "config":
+		m.enforcement.ClearOverride()
+	case config.EnforcementAudit, config.EnforcementEnforce:
+		if err := m.enforcement.SetOverride(normalized); err != nil {
+			return appmetrics.EnforcementStatus{}, err
+		}
+	default:
+		return appmetrics.EnforcementStatus{}, fmt.Errorf("mode must be audit, enforce, or config")
+	}
+
+	status := m.EnforcementStatus()
+	m.recordEnforcementStatus()
+	m.logger.Warn("global enforcement mode changed", "configured_mode", status.Configured, "override_mode", normalizeOverrideMode(status.Override), "effective_mode", status.Effective)
+	return status, nil
+}
+
 func (m *runtimeManager) recordReloadResult(result string) {
 	if m.metrics == nil {
 		return
 	}
 	m.metrics.ConfigReloadsTotal.WithLabelValues(result).Inc()
+}
+
+func (m *runtimeManager) recordEnforcementStatus() {
+	if m.metrics == nil {
+		return
+	}
+
+	status := m.EnforcementStatus()
+	for _, mode := range []string{config.EnforcementEnforce, config.EnforcementAudit} {
+		value := 0.0
+		if status.Configured == mode {
+			value = 1
+		}
+		m.metrics.EnforcementMode.WithLabelValues("configured", mode).Set(value)
+
+		value = 0.0
+		if status.Effective == mode {
+			value = 1
+		}
+		m.metrics.EnforcementMode.WithLabelValues("effective", mode).Set(value)
+	}
+	for _, mode := range []string{"none", config.EnforcementEnforce, config.EnforcementAudit} {
+		value := 0.0
+		if normalizeOverrideMode(status.Override) == mode {
+			value = 1
+		}
+		m.metrics.EnforcementMode.WithLabelValues("override", mode).Set(value)
+	}
 }
 
 func (m *runtimeManager) recordMITMLifecycle(previous *proxy.MITMEngine, next *proxy.MITMEngine, isReload bool) {
@@ -256,4 +321,23 @@ func proxyProtocolTimeoutForConfig(cfg config.ProxyProtocolConfig) int64 {
 		return proxyProtocolHeaderTimeout.Nanoseconds()
 	}
 	return cfg.HeaderTimeout.Nanoseconds()
+}
+
+func enforcementStatusForConfig(cfg config.Config, controller *proxy.EnforcementOverrideController) appmetrics.EnforcementStatus {
+	configured := config.NormalizeEnforcementMode(cfg.Proxy.Enforcement)
+	status := appmetrics.EnforcementStatus{
+		Configured: configured,
+		Effective:  proxy.EffectiveEnforcementMode(configured, controller),
+	}
+	if override, ok := controller.OverrideMode(); ok {
+		status.Override = override
+	}
+	return status
+}
+
+func normalizeOverrideMode(mode string) string {
+	if mode == "" {
+		return "none"
+	}
+	return mode
 }

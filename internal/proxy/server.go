@@ -39,7 +39,8 @@ type Dependencies struct {
 	DestinationGuard  *DestinationGuard
 	DrainTracker      *DrainTracker
 	ConnectionLimiter *ConnectionLimiter
-	AuditMode         bool
+	EnforcementMode   string
+	Enforcement       *EnforcementOverrideController
 	IdentityResolver  IdentityResolver
 	PolicyEngine      PolicyEngine
 	MITM              *MITMEngine
@@ -867,7 +868,7 @@ func normalizeIdentityName(id *identity.Identity) string {
 }
 
 func (s *Server) auditMode() bool {
-	return s.deps.AuditMode
+	return IsAuditMode(s.deps.EnforcementMode, s.deps.Enforcement)
 }
 
 func (s *Server) shadowMode(decision *policy.Decision) bool {

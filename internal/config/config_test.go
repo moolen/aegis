@@ -104,6 +104,27 @@ func TestLoadDefaultsProxyEnforcementToEnforce(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsAdminToken(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+admin:
+  token: secret-token
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Admin.Token != "secret-token" {
+		t.Fatalf("admin token = %q, want %q", cfg.Admin.Token, "secret-token")
+	}
+}
+
+func TestLoadRejectsWhitespaceOnlyAdminToken(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte("proxy:\n  listen: \":3128\"\nadmin:\n  token: \"   \"\n")))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestLoadRejectsInvalidProxyEnforcementMode(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"
