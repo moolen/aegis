@@ -41,7 +41,10 @@ discovery:
   kubernetes: []
   # kubernetes:
   #   - name: cluster-a
-  #     kubeconfig: /path/to/kubeconfig
+  #     auth:
+  #       provider: kubeconfig
+  #       kubeconfig: /path/to/kubeconfig
+  #       context: dev
   #     namespaces: ["default"]
   #     resyncPeriod: 30s
   ec2: []
@@ -52,17 +55,20 @@ discovery:
   #       - key: "aegis-managed"
   #         values: ["true"]
   #     pollInterval: 30s
-policies:
-  - name: allow-example
-    # enforcement: audit   # policy-level audit | enforce
-    # bypass: true   # shadow this policy without blocking matching traffic
-    identitySelector:
-      matchLabels: {}
-    egress:
-      - fqdn: "example.com"
-        ports: [80]
-        tls:
-          mode: mitm
-        http:
-          allowedMethods: ["GET"]
-          allowedPaths: ["/*"]
+policies: []
+# - name: allow-example
+#   # enforcement: audit   # policy-level audit | enforce
+#   # bypass: true   # shadow this policy without blocking matching traffic
+#   subjects:
+#     kubernetes:
+#       discoveryNames: ["cluster-a"]
+#       namespaces: ["default"]
+#       matchLabels: {}
+#   egress:
+#     - fqdn: "example.com"
+#       ports: [80]
+#       tls:
+#         mode: mitm
+#       http:
+#         allowedMethods: ["GET"]
+#         allowedPaths: ["/*"]

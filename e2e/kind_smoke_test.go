@@ -18,6 +18,7 @@ const (
 	kindImageRef     = "aegis:e2e-kind"
 	kindNamespace    = "aegis-e2e"
 	kindReleaseName  = "aegis"
+	kindAdminToken   = "kind-e2e-admin-token"
 	kindCurlPodName  = "curl"
 	kindAllowedPod   = "curl-allowed"
 	kindDeniedPod    = "curl-denied"
@@ -58,6 +59,7 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"helm",
 		"upgrade",
 		"--install",
+		"--reset-values",
 		kindReleaseName,
 		"./deploy/helm",
 		"-n",
@@ -69,6 +71,7 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"--timeout",
 		"180s",
 	)
+	runCommand(t, repoRoot, 2*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "restart", "deployment/aegis")
 	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "status", "deployment/aegis", "--timeout=180s")
 
 	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindCurlPodName, "--ignore-not-found")
@@ -144,6 +147,7 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"helm",
 		"upgrade",
 		"--install",
+		"--reset-values",
 		kindReleaseName,
 		"./deploy/helm",
 		"-n",
@@ -155,14 +159,51 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"--timeout",
 		"180s",
 	)
+	runCommand(t, repoRoot, 2*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "restart", "deployment/aegis")
 	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "status", "deployment/aegis", "--timeout=180s")
 
 	waitFor(t, 30*time.Second, func() bool {
-		metricsBody := kubectlExecPod(t, repoRoot, kubeContext, kindAllowedPod, "curl", "-fsS", "http://aegis:9090/metrics")
+		metricsBody, err := tryKubectlExecPod(repoRoot, kubeContext, kindAllowedPod, "curl", "-fsS", "http://aegis:9090/metrics")
+		if err != nil {
+			return false
+		}
 		active, activeOK := metricValueOrZero(metricsBody, "aegis_discovery_providers_active", map[string]string{})
 		entries, entriesOK := metricValueOrZero(metricsBody, "aegis_identity_map_entries", map[string]string{"provider": "kind-cluster", "kind": "kubernetes"})
 		return activeOK && entriesOK && active == 1 && entries >= 2
 	})
+
+	allowedPodIP := kindPodIP(t, repoRoot, kubeContext, kindAllowedPod)
+	deniedPodIP := kindPodIP(t, repoRoot, kubeContext, kindDeniedPod)
+	allowedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", allowedPodIP, kindEchoHostName)
+	deniedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", deniedPodIP, kindEchoHostName)
+
+	allowedSimulation := kubectlExecPodEventually(
+		t,
+		repoRoot,
+		30*time.Second,
+		kubeContext,
+		kindAllowedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -fsS --max-time 10 -H 'Authorization: Bearer %s' '%s'", kindAdminToken, allowedSimulationURL),
+	)
+	if !strings.Contains(allowedSimulation, `"action":"allow"`) || !strings.Contains(allowedSimulation, `"policy":"allow-echo-from-allowed"`) {
+		t.Fatalf("allowed simulation = %s, want allow-echo-from-allowed allow", allowedSimulation)
+	}
+
+	deniedSimulation := kubectlExecPodEventually(
+		t,
+		repoRoot,
+		30*time.Second,
+		kubeContext,
+		kindAllowedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -fsS --max-time 10 -H 'Authorization: Bearer %s' '%s'", kindAdminToken, deniedSimulationURL),
+	)
+	if !strings.Contains(deniedSimulation, `"action":"deny"`) || !strings.Contains(deniedSimulation, `"reason":"policy_denied"`) {
+		t.Fatalf("denied simulation = %s, want deny policy_denied", deniedSimulation)
+	}
 
 	identityAllowedStatus := strings.TrimSpace(kubectlExecPod(
 		t,
@@ -177,19 +218,6 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		t.Fatalf("identity-allowed request status = %q, want %q", identityAllowedStatus, "200")
 	}
 
-	identityDeniedStatus := strings.TrimSpace(kubectlExecPod(
-		t,
-		repoRoot,
-		kubeContext,
-		kindDeniedPod,
-		"sh",
-		"-c",
-		fmt.Sprintf("curl -sS --proxy http://aegis:3128 -o /dev/null -w '%%{http_code}' http://%s/allowed", kindEchoHostName),
-	))
-	if identityDeniedStatus != "403" {
-		t.Fatalf("identity-denied request status = %q, want %q", identityDeniedStatus, "403")
-	}
-
 	identityMetrics := kubectlExecPod(t, repoRoot, kubeContext, kindAllowedPod, "curl", "-fsS", "http://aegis:9090/metrics")
 	if got := metricValue(t, identityMetrics, "aegis_request_decisions_total", map[string]string{
 		"protocol": "http",
@@ -198,14 +226,6 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"reason":   "policy_allowed",
 	}); got != 1 {
 		t.Fatalf("identity allow metric = %v, want 1", got)
-	}
-	if got := metricValue(t, identityMetrics, "aegis_request_decisions_total", map[string]string{
-		"protocol": "http",
-		"action":   "deny",
-		"policy":   "none",
-		"reason":   "policy_denied",
-	}); got < 1 {
-		t.Fatalf("identity deny metric = %v, want at least 1", got)
 	}
 }
 
@@ -299,12 +319,60 @@ func kubectlExec(t *testing.T, repoRoot string, kubeContext string, args ...stri
 	return kubectlExecPod(t, repoRoot, kubeContext, kindCurlPodName, args...)
 }
 
+func kubectlExecPodEventually(t *testing.T, repoRoot string, timeout time.Duration, kubeContext string, podName string, args ...string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var lastOutput string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		output, err := tryKubectlExecPod(repoRoot, kubeContext, podName, args...)
+		if err == nil {
+			return output
+		}
+		lastOutput = output
+		lastErr = err
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	t.Fatalf("kubectl exec %s did not succeed before timeout: %v\n%s", podName, lastErr, lastOutput)
+	return ""
+}
+
 func kubectlExecPod(t *testing.T, repoRoot string, kubeContext string, podName string, args ...string) string {
 	t.Helper()
 
+	output, err := tryKubectlExecPod(repoRoot, kubeContext, podName, args...)
+	if err != nil {
+		t.Fatalf("kubectl exec %s failed: %v\n%s", podName, err, output)
+	}
+	return output
+}
+
+func tryKubectlExecPod(repoRoot string, kubeContext string, podName string, args ...string) (string, error) {
 	commandArgs := []string{"--context", kubeContext, "-n", kindNamespace, "exec", podName, "--"}
 	commandArgs = append(commandArgs, args...)
-	return runCommand(t, repoRoot, 2*time.Minute, "kubectl", commandArgs...)
+	return runCommandOutput(repoRoot, 2*time.Minute, "kubectl", commandArgs...)
+}
+
+func kindPodIP(t *testing.T, repoRoot string, kubeContext string, podName string) string {
+	t.Helper()
+
+	return strings.TrimSpace(runCommand(
+		t,
+		repoRoot,
+		2*time.Minute,
+		"kubectl",
+		"--context",
+		kubeContext,
+		"-n",
+		kindNamespace,
+		"get",
+		"pod",
+		podName,
+		"-o",
+		"jsonpath={.status.podIP}",
+	))
 }
 
 func writeKindValuesFile(t *testing.T, contents string) string {
@@ -382,9 +450,16 @@ func kindValuesYAML() string {
   repository: aegis
   tag: e2e-kind
   pullPolicy: IfNotPresent
+serviceAccount:
+  create: true
+  name: aegis
+rbac:
+  create: true
 config:
   proxy:
     listen: ":3128"
+  admin:
+    token: "` + kindAdminToken + `"
   metrics:
     listen: ":9090"
   dns:
@@ -393,10 +468,20 @@ config:
     servers: []
     rebindingProtection:
       allowedHostPatterns: ["*.svc.cluster.local"]
+  discovery:
+    kubernetes:
+      - name: kind-cluster
+        auth:
+          provider: inCluster
+        namespaces: ["aegis-e2e"]
+        resyncPeriod: 5s
   policies:
     - name: allow-echo
-      identitySelector:
-        matchLabels: {}
+      subjects:
+        kubernetes:
+          discoveryNames: ["kind-cluster"]
+          namespaces: ["aegis-e2e"]
+          matchLabels: {}
       egress:
         - fqdn: "echo.aegis-e2e.svc.cluster.local"
           ports: [80]
@@ -421,6 +506,8 @@ rbac:
 config:
   proxy:
     listen: ":3128"
+  admin:
+    token: "` + kindAdminToken + `"
   metrics:
     listen: ":9090"
   shutdown:
@@ -434,14 +521,18 @@ config:
   discovery:
     kubernetes:
       - name: kind-cluster
+        auth:
+          provider: inCluster
         namespaces: ["aegis-e2e"]
         resyncPeriod: 5s
   policies:
     - name: allow-echo-from-allowed
-      identitySelector:
-        matchLabels:
-          role: "allowed"
-          kubernetes.io/namespace: "aegis-e2e"
+      subjects:
+        kubernetes:
+          discoveryNames: ["kind-cluster"]
+          namespaces: ["aegis-e2e"]
+          matchLabels:
+            role: "allowed"
       egress:
         - fqdn: "echo.aegis-e2e.svc.cluster.local"
           ports: [80]

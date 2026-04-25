@@ -9,12 +9,53 @@ import (
 	"github.com/moolen/aegis/internal/identity"
 )
 
+const testKubernetesNamespaceLabel = "kubernetes.io/namespace"
+
+func kubernetesSubjects(discoveryNames []string, namespaces []string, matchLabels map[string]string) config.PolicySubjectsConfig {
+	return config.PolicySubjectsConfig{
+		Kubernetes: &config.KubernetesSubjectConfig{
+			DiscoveryNames: append([]string(nil), discoveryNames...),
+			Namespaces:     append([]string(nil), namespaces...),
+			MatchLabels:    cloneStringMap(matchLabels),
+		},
+	}
+}
+
+func ec2Subjects(discoveryNames []string) config.PolicySubjectsConfig {
+	return config.PolicySubjectsConfig{
+		EC2: &config.EC2SubjectConfig{
+			DiscoveryNames: append([]string(nil), discoveryNames...),
+		},
+	}
+}
+
+func kubernetesIdentity(provider string, namespace string, labels map[string]string) *identity.Identity {
+	identityLabels := map[string]string{
+		testKubernetesNamespaceLabel: namespace,
+	}
+	for key, value := range labels {
+		identityLabels[key] = value
+	}
+
+	return &identity.Identity{
+		Source:   "kubernetes",
+		Provider: provider,
+		Labels:   identityLabels,
+	}
+}
+
+func ec2Identity(provider string) *identity.Identity {
+	return &identity.Identity{
+		Source:   "ec2",
+		Provider: provider,
+		Labels:   map[string]string{},
+	}
+}
+
 func TestNewEngineRejectsMalformedPathPattern(t *testing.T) {
 	_, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -34,10 +75,8 @@ func TestNewEngineRejectsMalformedPathPattern(t *testing.T) {
 
 func TestNewEngineRejectsUnsupportedPathMetacharacters(t *testing.T) {
 	_, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -67,10 +106,8 @@ func TestNewEngineRejectsUnsupportedFQDNMetacharacters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := NewEngine([]config.PolicyConfig{{
-				Name: "allow-web",
-				IdentitySelector: config.IdentitySelectorConfig{
-					MatchLabels: map[string]string{"app": "web"},
-				},
+				Name:     "allow-web",
+				Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 				Egress: []config.EgressRuleConfig{{
 					FQDN:  tt.pattern,
 					Ports: []int{80},
@@ -90,12 +127,458 @@ func TestNewEngineRejectsUnsupportedFQDNMetacharacters(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsKubernetesSubjectsWithoutDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects(nil, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes discoveryNames validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"   "}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes discoveryNames validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithoutNamespaces(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, nil, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes namespaces validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "namespaces") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes namespaces validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyNamespaces(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"   "}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes namespaces validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "namespaces") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes namespaces validation error", err)
+	}
+}
+
+func TestNewEngineRejectsEC2SubjectsWithoutDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "legacy-web-egress",
+		Subjects: ec2Subjects(nil),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "metadata.internal",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want ec2 discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "ec2") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want ec2 discoveryNames validation error", err)
+	}
+}
+
+func TestNewEngineRejectsEC2SubjectsWithWhitespaceOnlyDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "legacy-web-egress",
+		Subjects: ec2Subjects([]string{"   "}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "metadata.internal",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want ec2 discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "ec2") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want ec2 discoveryNames validation error", err)
+	}
+}
+
+func TestNewEngineRejectsPoliciesWithoutAnySubjects(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name: "orphan-policy",
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want empty subjects validation error")
+	}
+	if !strings.Contains(err.Error(), "subjects") {
+		t.Fatalf("NewEngine() error = %q, want subjects validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyMatchLabelValue(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "   "}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes matchLabels validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "matchLabels") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes matchLabels validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyMatchLabelKey(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"   ": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes matchLabels validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "matchLabels") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes matchLabels validation error", err)
+	}
+}
+
+func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	allowed := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		"api.stripe.com",
+		443,
+	)
+	if !allowed.Allowed {
+		t.Fatal("expected cluster-a identity to match")
+	}
+
+	denied := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-b", "frontend", map[string]string{"app": "frontend"}),
+		"api.stripe.com",
+		443,
+	)
+	if denied.Allowed {
+		t.Fatal("expected cluster-b identity not to match cluster-a-scoped policy")
+	}
+}
+
+func TestEvaluateMatchesKubernetesSubjectWithEmptyMatchLabels(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, nil),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "frontend", map[string]string{"any": "label"}),
+		"api.stripe.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected empty kubernetes matchLabels to behave as a label wildcard")
+	}
+}
+
+func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedNamespaceBinding(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{" frontend "}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		"api.stripe.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded namespace binding to match runtime namespace label")
+	}
+}
+
+func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedMatchLabels(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{" app ": " frontend "}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		"api.stripe.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded matchLabels to match runtime labels")
+	}
+}
+
+func TestEvaluateMatchesWhitespacePaddedFQDNRule(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "  Example.com  ",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"example.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded fqdn rule to match")
+	}
+}
+
+func TestEvaluateMatchesWhitespacePaddedHTTPMethodAndPath(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"  get  "},
+				AllowedPaths:   []string{"  /api/*  "},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"example.com",
+		80,
+		http.MethodGet,
+		"/api/users",
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded http method and path to match")
+	}
+}
+
+func TestEvaluateMatchesSharedKubernetesSelectorAcrossMultipleProviders(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a", "cluster-b"}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	for _, provider := range []string{"cluster-a", "cluster-b"} {
+		t.Run(provider, func(t *testing.T) {
+			decision := engine.EvaluateConnect(
+				kubernetesIdentity(provider, "frontend", map[string]string{"app": "frontend"}),
+				"api.stripe.com",
+				443,
+			)
+			if !decision.Allowed {
+				t.Fatalf("expected provider %q to match shared kubernetes subject", provider)
+			}
+		})
+	}
+}
+
+func TestEvaluateMatchesEC2ProviderBindingWithoutLabelSelector(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "legacy-web-egress",
+		Subjects: ec2Subjects([]string{"legacy-web"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "metadata.internal",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	allowed := engine.EvaluateConnect(ec2Identity("legacy-web"), "metadata.internal", 443)
+	if !allowed.Allowed {
+		t.Fatal("expected ec2 identity bound to legacy-web provider to match")
+	}
+
+	denied := engine.EvaluateConnect(ec2Identity("batch-workers"), "metadata.internal", 443)
+	if denied.Allowed {
+		t.Fatal("expected ec2 identity bound to batch-workers not to match legacy-web policy")
+	}
+}
+
+func TestEvaluateSkipsPolicyWhenIdentitySourceHasNoMatchingSubject(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "legacy-web-egress",
+		Subjects: ec2Subjects([]string{"legacy-web"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "metadata.internal",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"metadata.internal",
+		443,
+	)
+	if decision.Allowed {
+		t.Fatal("expected kubernetes identity not to match ec2-only policy")
+	}
+	if decision.Policy != "" {
+		t.Fatalf("decision.Policy = %q, want empty", decision.Policy)
+	}
+}
+
+func TestEvaluateDoesNotMatchKubernetesSubjectWithoutNamespaceLabel(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(&identity.Identity{
+		Source:   "kubernetes",
+		Provider: "cluster-a",
+		Labels:   map[string]string{"app": "frontend"},
+	}, "api.stripe.com", 443)
+	if decision.Allowed {
+		t.Fatal("expected kubernetes identity without namespace label not to match")
+	}
+}
+
+func TestEvaluateDoesNotMatchKubernetesSubjectWithNilLabels(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(&identity.Identity{
+		Source:   "kubernetes",
+		Provider: "cluster-a",
+		Labels:   nil,
+	}, "api.stripe.com", 443)
+	if decision.Allowed {
+		t.Fatal("expected kubernetes identity with nil labels not to match")
+	}
+}
+
 func TestEvaluateAllowsMatchingRule(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -111,7 +594,7 @@ func TestEvaluateAllowsMatchingRule(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -133,11 +616,9 @@ func TestEvaluateAllowsMatchingRule(t *testing.T) {
 
 func TestEvaluateCarriesBypassPolicyState(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name:   "break-glass",
-		Bypass: true,
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "break-glass",
+		Bypass:   true,
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -153,7 +634,7 @@ func TestEvaluateCarriesBypassPolicyState(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -174,9 +655,7 @@ func TestEvaluateCarriesPolicyLevelEnforcementState(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:        "legacy-reporting",
 		Enforcement: "audit",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "reporting"},
-		},
+		Subjects:    kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "reporting"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "reports.example.com",
 			Ports: []int{443},
@@ -188,7 +667,7 @@ func TestEvaluateCarriesPolicyLevelEnforcementState(t *testing.T) {
 	}
 
 	decision := engine.EvaluateConnect(
-		&identity.Identity{Labels: map[string]string{"app": "reporting"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "reporting"}),
 		"denied.example.com",
 		443,
 	)
@@ -199,10 +678,8 @@ func TestEvaluateCarriesPolicyLevelEnforcementState(t *testing.T) {
 
 func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -217,7 +694,7 @@ func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -230,10 +707,8 @@ func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 
 func TestEvaluateAllowsFQDNStarMatchCaseInsensitive(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "*.example.com",
 			Ports: []int{443},
@@ -245,7 +720,7 @@ func TestEvaluateAllowsFQDNStarMatchCaseInsensitive(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"API.Example.COM",
 		443,
 		http.MethodGet,
@@ -261,10 +736,8 @@ func TestEvaluateAllowsFQDNStarMatchCaseInsensitive(t *testing.T) {
 
 func TestEvaluateDeniesWhenNoPolicyMatches(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -276,7 +749,7 @@ func TestEvaluateDeniesWhenNoPolicyMatches(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "api"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "api"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -298,10 +771,8 @@ func TestEvaluateDeniesWhenNoPolicyMatches(t *testing.T) {
 
 func TestEvaluateDeniesUnknownIdentity(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -321,10 +792,8 @@ func TestEvaluateDeniesUnknownIdentity(t *testing.T) {
 func TestEvaluateFirstMatchWins(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{
 		{
-			Name: "deny-first",
-			IdentitySelector: config.IdentitySelectorConfig{
-				MatchLabels: map[string]string{"app": "web"},
-			},
+			Name:     "deny-first",
+			Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 			Egress: []config.EgressRuleConfig{{
 				FQDN:  "internal.example.com",
 				Ports: []int{443},
@@ -332,10 +801,8 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 			}},
 		},
 		{
-			Name: "allow-second",
-			IdentitySelector: config.IdentitySelectorConfig{
-				MatchLabels: map[string]string{"app": "web"},
-			},
+			Name:     "allow-second",
+			Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 			Egress: []config.EgressRuleConfig{{
 				FQDN:  "example.com",
 				Ports: []int{80},
@@ -348,7 +815,7 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -362,12 +829,48 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 	}
 }
 
+func TestEvaluateConnectFirstMatchWins(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{
+		{
+			Name:     "deny-first",
+			Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "internal.example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			}},
+		},
+		{
+			Name:     "allow-second",
+			Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"example.com",
+		443,
+	)
+	if decision.Allowed {
+		t.Fatalf("decision.Allowed = true, want false")
+	}
+	if decision.Policy != "deny-first" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "deny-first")
+	}
+}
+
 func TestEvaluateDeniesPortMismatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{443},
@@ -379,7 +882,7 @@ func TestEvaluateDeniesPortMismatch(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -395,10 +898,8 @@ func TestEvaluateDeniesPortMismatch(t *testing.T) {
 
 func TestEvaluateDeniesMethodMismatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -413,7 +914,7 @@ func TestEvaluateDeniesMethodMismatch(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodPost,
@@ -429,10 +930,8 @@ func TestEvaluateDeniesMethodMismatch(t *testing.T) {
 
 func TestEvaluateDeniesPathMismatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -447,7 +946,7 @@ func TestEvaluateDeniesPathMismatch(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		80,
 		http.MethodGet,
@@ -463,10 +962,8 @@ func TestEvaluateDeniesPathMismatch(t *testing.T) {
 
 func TestEvaluateMatchesFQDNGlob(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "*.example.com",
 			Ports: []int{443},
@@ -478,7 +975,7 @@ func TestEvaluateMatchesFQDNGlob(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"api.example.com",
 		443,
 		http.MethodGet,
@@ -497,10 +994,8 @@ func TestEvaluateMatchesFQDNGlob(t *testing.T) {
 
 func TestEvaluateMatchesFQDNCaseInsensitively(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "*.example.com",
 			Ports: []int{443},
@@ -512,7 +1007,7 @@ func TestEvaluateMatchesFQDNCaseInsensitively(t *testing.T) {
 	}
 
 	decision := engine.Evaluate(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"API.EXAMPLE.COM",
 		443,
 		http.MethodGet,
@@ -525,10 +1020,8 @@ func TestEvaluateMatchesFQDNCaseInsensitively(t *testing.T) {
 
 func TestEvaluateConnectMatchesPassthroughRuleWithoutHTTPInspection(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{443},
@@ -540,7 +1033,7 @@ func TestEvaluateConnectMatchesPassthroughRuleWithoutHTTPInspection(t *testing.T
 	}
 
 	decision := engine.EvaluateConnect(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		443,
 	)
@@ -554,10 +1047,8 @@ func TestEvaluateConnectMatchesPassthroughRuleWithoutHTTPInspection(t *testing.T
 
 func TestEvaluateConnectReturnsMITMDecisionWithoutHTTPMatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
-		Name: "allow-web",
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Name:     "allow-web",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{443},
@@ -573,7 +1064,7 @@ func TestEvaluateConnectReturnsMITMDecisionWithoutHTTPMatch(t *testing.T) {
 	}
 
 	decision := engine.EvaluateConnect(
-		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
 		"example.com",
 		443,
 	)

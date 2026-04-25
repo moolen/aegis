@@ -68,8 +68,9 @@ func (r *CompositeResolver) Resolve(ip net.IP) (*Identity, error) {
 			r.metrics.IdentityResolutionsTotal.WithLabelValues(provider.Name, provider.Kind, "hit").Inc()
 		}
 
+		boundIdentity := bindIdentityToProvider(id, provider)
 		if winner == nil {
-			winner = id
+			winner = boundIdentity
 			winnerProvider = provider
 			continue
 		}
@@ -93,6 +94,29 @@ func (r *CompositeResolver) Resolve(ip net.IP) (*Identity, error) {
 	}
 
 	return winner, nil
+}
+
+func bindIdentityToProvider(id *Identity, provider ProviderHandle) *Identity {
+	if id == nil {
+		return nil
+	}
+
+	bound := cloneIdentity(id)
+	if provider.Name != "" {
+		bound.Provider = provider.Name
+	}
+	if provider.Kind != "" {
+		bound.Source = provider.Kind
+	}
+
+	return bound
+}
+
+func bindMappingToProvider(mapping Mapping, provider ProviderHandle) Mapping {
+	mapping.Provider = provider.Name
+	mapping.Kind = provider.Kind
+	mapping.Identity = bindIdentityToProvider(mapping.Identity, provider)
+	return mapping
 }
 
 func (r *CompositeResolver) ProviderStatuses() []ProviderStatus {
@@ -143,8 +167,7 @@ func (r *CompositeResolver) IdentityDump() []DumpEntry {
 			continue
 		}
 		for _, mapping := range snapshotter.IdentityMappings() {
-			mapping.Provider = provider.Name
-			mapping.Kind = provider.Kind
+			mapping = bindMappingToProvider(mapping, provider)
 
 			entry := byIP[mapping.IP]
 			if entry == nil {

@@ -20,12 +20,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	configpkg "github.com/moolen/aegis/internal/config"
+	appmetrics "github.com/moolen/aegis/internal/metrics"
 )
 
 var (
@@ -130,7 +132,7 @@ func TestPolicyAuditModeAllowsDeniedHTTPRequests(t *testing.T) {
 	if got := metricValue(t, metricsBody, "aegis_audit_decisions_total", map[string]string{
 		"protocol": "http",
 		"action":   "would_deny",
-		"identity": "unknown",
+		"identity": "i-localhost",
 		"fqdn":     "127.0.0.1",
 		"policy":   "allow-http",
 		"reason":   "policy_denied",
@@ -246,7 +248,7 @@ func TestPolicyBypassAllowsDeniedHTTPRequests(t *testing.T) {
 	if got := metricValue(t, metricsBody, "aegis_audit_decisions_total", map[string]string{
 		"protocol": "http",
 		"action":   "would_deny",
-		"identity": "unknown",
+		"identity": "i-localhost",
 		"fqdn":     "127.0.0.1",
 		"policy":   "allow-http",
 		"reason":   "policy_denied",
@@ -346,7 +348,10 @@ func TestUnknownIdentityDenyBlocksHTTPRequests(t *testing.T) {
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "aegis.yaml")
 
-	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", policyConfigOptions{UnknownIdentityPolicy: "deny"}))
+	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", policyConfigOptions{
+		UnknownIdentityPolicy: "deny",
+		DiscoveryTagValues:    []string{"missing"},
+	}))
 	startAegis(t, configPath)
 
 	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
@@ -357,6 +362,191 @@ func TestUnknownIdentityDenyBlocksHTTPRequests(t *testing.T) {
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestPolicySubjectBindsToConfiguredKubernetesProviderName(t *testing.T) {
+	const adminToken = "policy-subject-kubernetes"
+
+	clusterA := startFakeKubernetesAPIServer(t, []fakeKubernetesPod{{
+		Namespace: "default",
+		Name:      "web-a",
+		IP:        "10.10.0.10",
+		Labels: map[string]string{
+			"app": "web",
+		},
+	}})
+	clusterB := startFakeKubernetesAPIServer(t, []fakeKubernetesPod{{
+		Namespace: "default",
+		Name:      "web-b",
+		IP:        "10.10.0.11",
+		Labels: map[string]string{
+			"app": "web",
+		},
+	}})
+
+	configPath := filepath.Join(t.TempDir(), "aegis.yaml")
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	clusterAKubeconfig := writeKubeconfig(t, clusterA.URL)
+	clusterBKubeconfig := writeKubeconfig(t, clusterB.URL)
+
+	writeConfig(t, configPath, fmt.Sprintf(`proxy:
+  listen: %q
+admin:
+  token: %q
+metrics:
+  listen: %q
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  servers: []
+  rebindingProtection:
+    allowedCIDRs: ["127.0.0.0/8"]
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: kubeconfig
+        kubeconfig: %q
+      namespaces: ["default"]
+    - name: cluster-b
+      auth:
+        provider: kubeconfig
+        kubeconfig: %q
+      namespaces: ["default"]
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels:
+          app: "web"
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`, proxyAddr, adminToken, metricsAddr, clusterAKubeconfig, clusterBKubeconfig))
+
+	startAegis(t, configPath)
+	waitForIdentityProviders(t, "http://"+metricsAddr, adminToken, "cluster-a", "cluster-b")
+
+	allowed := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+		SourceIP: "10.10.0.10",
+		FQDN:     "example.com",
+		Port:     443,
+		Protocol: "connect",
+	})
+	if allowed.Identity == nil || allowed.Identity.Provider != "cluster-a" {
+		t.Fatalf("allowed identity = %#v, want provider cluster-a", allowed.Identity)
+	}
+	if allowed.Action != "allow" || allowed.Reason != "policy_allowed" {
+		t.Fatalf("allowed response = %#v, want allow policy_allowed", allowed)
+	}
+
+	denied := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+		SourceIP: "10.10.0.11",
+		FQDN:     "example.com",
+		Port:     443,
+		Protocol: "connect",
+	})
+	if denied.Identity == nil || denied.Identity.Provider != "cluster-b" {
+		t.Fatalf("denied identity = %#v, want provider cluster-b", denied.Identity)
+	}
+	if denied.Action != "deny" || denied.Reason != "policy_denied" {
+		t.Fatalf("denied response = %#v, want deny policy_denied", denied)
+	}
+}
+
+func TestPolicySubjectBindsToConfiguredEC2ProviderName(t *testing.T) {
+	const adminToken = "policy-subject-ec2"
+
+	ec2Server := startFakeEC2APIServer(t, []fakeEC2Instance{
+		{
+			InstanceID: "i-blue",
+			PrivateIP:  "10.20.0.10",
+			Tags: map[string]string{
+				defaultE2EEC2TagKey: "blue",
+			},
+		},
+		{
+			InstanceID: "i-green",
+			PrivateIP:  "10.20.0.11",
+			Tags: map[string]string{
+				defaultE2EEC2TagKey: "green",
+			},
+		},
+	})
+
+	configPath := filepath.Join(t.TempDir(), "aegis.yaml")
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+
+	writeConfig(t, configPath, fmt.Sprintf(`proxy:
+  listen: %q
+admin:
+  token: %q
+metrics:
+  listen: %q
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  servers: []
+  rebindingProtection:
+    allowedCIDRs: ["127.0.0.0/8"]
+discovery:
+  ec2:
+    - name: blue-ec2
+      region: us-east-1
+      tagFilters:
+        - key: %q
+          values: ["blue"]
+    - name: green-ec2
+      region: us-east-1
+      tagFilters:
+        - key: %q
+          values: ["green"]
+policies:
+  - name: allow-blue
+    subjects:
+      ec2:
+        discoveryNames: ["blue-ec2"]
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`, proxyAddr, adminToken, metricsAddr, defaultE2EEC2TagKey, defaultE2EEC2TagKey))
+
+	startAegisWithEnv(t, configPath, fakeEC2Env(ec2Server.URL))
+	waitForIdentityProviders(t, "http://"+metricsAddr, adminToken, "blue-ec2", "green-ec2")
+
+	allowed := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+		SourceIP: "10.20.0.10",
+		FQDN:     "example.com",
+		Port:     443,
+		Protocol: "connect",
+	})
+	if allowed.Identity == nil || allowed.Identity.Provider != "blue-ec2" {
+		t.Fatalf("allowed identity = %#v, want provider blue-ec2", allowed.Identity)
+	}
+	if allowed.Action != "allow" || allowed.Reason != "policy_allowed" {
+		t.Fatalf("allowed response = %#v, want allow policy_allowed", allowed)
+	}
+
+	denied := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+		SourceIP: "10.20.0.11",
+		FQDN:     "example.com",
+		Port:     443,
+		Protocol: "connect",
+	})
+	if denied.Identity == nil || denied.Identity.Provider != "green-ec2" {
+		t.Fatalf("denied identity = %#v, want provider green-ec2", denied.Identity)
+	}
+	if denied.Action != "deny" || denied.Reason != "policy_denied" {
+		t.Fatalf("denied response = %#v, want deny policy_denied", denied)
 	}
 }
 
@@ -493,7 +683,7 @@ func startAegisWithEnv(t *testing.T, configPath string, extraEnv []string) *aegi
 	binary, repoRoot := ensureBinaryBuilt(t)
 	cmd := exec.Command(binary, "-config", configPath)
 	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = mergeEnvVars(os.Environ(), defaultFakeEC2Env(t), extraEnv)
 	var logBuf bytes.Buffer
 	cmd.Stdout = &logBuf
 	cmd.Stderr = &logBuf
@@ -569,7 +759,7 @@ func ensureBinaryBuilt(t *testing.T) (string, string) {
 			return
 		}
 		buildBinary = filepath.Join(tempDir, "aegis")
-		cmd := exec.Command("go", "build", "-o", buildBinary, "./cmd/aegis")
+		cmd := exec.Command("/usr/local/go/bin/go", "build", "-o", buildBinary, "./cmd/aegis")
 		cmd.Dir = buildRepoRoot
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -662,6 +852,7 @@ type policyConfigOptions struct {
 	AdminToken               string
 	UnknownIdentityPolicy    string
 	MaxConcurrentPerIdentity int
+	DiscoveryTagValues       []string
 }
 
 func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host string, port int, allowedPath string, opts policyConfigOptions) string {
@@ -689,6 +880,10 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
 	if opts.AdminToken != "" {
 		adminBlock = fmt.Sprintf("admin:\n  token: %q\n", opts.AdminToken)
 	}
+	discoveryTagValues := opts.DiscoveryTagValues
+	if len(discoveryTagValues) == 0 {
+		discoveryTagValues = []string{defaultE2EEC2TagValue}
+	}
 
 	return fmt.Sprintf(`proxy:
   listen: "%s"
@@ -700,10 +895,18 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
   servers: []
   rebindingProtection:
     allowedCIDRs: ["127.0.0.0/8"]
+discovery:
+  ec2:
+    - name: %s
+      region: us-east-1
+      tagFilters:
+        - key: %q
+          values: %s
 policies:
   - name: allow-http
-%s%s    identitySelector:
-      matchLabels: {}
+%s%s    subjects:
+      ec2:
+        discoveryNames: [%q]
     egress:
       - fqdn: "%s"
         ports: [%d]
@@ -712,7 +915,7 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["%s"]
-`, proxyAddr, enforcementBlock, unknownIdentityBlock, connectionLimitBlock, metricsAddr, adminBlock, bypassBlock, policyEnforcementBlock, host, port, allowedPath)
+`, proxyAddr, enforcementBlock, unknownIdentityBlock, connectionLimitBlock, metricsAddr, adminBlock, defaultE2EEC2ProviderName, defaultE2EEC2TagKey, quotedYAMLList(discoveryTagValues), bypassBlock, policyEnforcementBlock, defaultE2EEC2ProviderName, host, port, allowedPath)
 }
 
 func mitmConfigYAML(proxyAddr string, metricsAddr string, certFile string, keyFile string) string {
@@ -729,10 +932,18 @@ dns:
   servers: []
   rebindingProtection:
     allowedCIDRs: ["127.0.0.0/8"]
+discovery:
+  ec2:
+    - name: %s
+      region: us-east-1
+      tagFilters:
+        - key: %q
+          values: [%q]
 policies:
   - name: allow-mitm
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: [%q]
     egress:
       - fqdn: "example.com"
         ports: [443]
@@ -741,7 +952,18 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["/*"]
-`, proxyAddr, certFile, keyFile, metricsAddr)
+`, proxyAddr, certFile, keyFile, metricsAddr, defaultE2EEC2ProviderName, defaultE2EEC2TagKey, defaultE2EEC2TagValue, defaultE2EEC2ProviderName)
+}
+
+func quotedYAMLList(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, fmt.Sprintf("%q", value))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func writeTestCAFiles(t *testing.T, dir string, commonName string) (string, string) {

@@ -130,6 +130,32 @@ func TestCompositeResolverContinuesAfterNilProviderResolver(t *testing.T) {
 	}
 }
 
+func TestCompositeResolverRebindsWinnerIdentityToAuthoritativeProviderAndKind(t *testing.T) {
+	resolver := NewCompositeResolver([]ProviderHandle{{
+		Name: "production-ec2",
+		Kind: "ec2",
+		Resolver: stubResolver{identity: &Identity{
+			Source:   "kubernetes",
+			Provider: "stale-provider",
+			Name:     "i-abc123",
+		}},
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	id, err := resolver.Resolve(net.ParseIP("10.0.0.20"))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if id == nil {
+		t.Fatal("Resolve() returned nil identity")
+	}
+	if id.Provider != "production-ec2" {
+		t.Fatalf("provider = %q, want production-ec2", id.Provider)
+	}
+	if id.Source != "ec2" {
+		t.Fatalf("source = %q, want ec2", id.Source)
+	}
+}
+
 func TestCompositeResolverReadinessFailsWhenAllProvidersAreStaleOrDown(t *testing.T) {
 	resolver := NewCompositeResolver([]ProviderHandle{
 		{
@@ -172,6 +198,62 @@ func TestCompositeResolverReadinessPassesWhenOneProviderIsActive(t *testing.T) {
 	}
 }
 
+func TestCompositeResolverIdentityDumpRebindsNestedIdentityMetadata(t *testing.T) {
+	resolver := NewCompositeResolver([]ProviderHandle{
+		{
+			Name: "cluster-a",
+			Kind: "kubernetes",
+			Resolver: snapshotStubResolver{entries: []Mapping{{
+				IP:       "10.0.0.10",
+				Provider: "stale-provider",
+				Kind:     "ec2",
+				Identity: &Identity{
+					Source:   "ec2",
+					Provider: "stale-provider",
+					Name:     "default/api",
+				},
+			}}},
+		},
+		{
+			Name: "production-ec2",
+			Kind: "ec2",
+			Resolver: snapshotStubResolver{entries: []Mapping{{
+				IP:       "10.0.0.10",
+				Provider: "other-stale-provider",
+				Kind:     "kubernetes",
+				Identity: &Identity{
+					Source:   "kubernetes",
+					Provider: "other-stale-provider",
+					Name:     "i-shadow",
+				},
+			}}},
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	entries := resolver.IdentityDump()
+	if len(entries) != 1 {
+		t.Fatalf("IdentityDump() = %#v, want one entry", entries)
+	}
+	if entries[0].Effective == nil || entries[0].Effective.Identity == nil {
+		t.Fatalf("effective entry = %#v, want nested identity", entries[0].Effective)
+	}
+	if entries[0].Effective.Provider != "cluster-a" || entries[0].Effective.Kind != "kubernetes" {
+		t.Fatalf("effective mapping = %#v, want authoritative provider/kind", entries[0].Effective)
+	}
+	if entries[0].Effective.Identity.Provider != "cluster-a" || entries[0].Effective.Identity.Source != "kubernetes" {
+		t.Fatalf("effective identity = %#v, want authoritative provider/source", entries[0].Effective.Identity)
+	}
+	if len(entries[0].Shadows) != 1 {
+		t.Fatalf("shadows = %#v, want one shadow", entries[0].Shadows)
+	}
+	if entries[0].Shadows[0].Identity == nil {
+		t.Fatalf("shadow entry = %#v, want nested identity", entries[0].Shadows[0])
+	}
+	if entries[0].Shadows[0].Identity.Provider != "production-ec2" || entries[0].Shadows[0].Identity.Source != "ec2" {
+		t.Fatalf("shadow identity = %#v, want authoritative provider/source", entries[0].Shadows[0].Identity)
+	}
+}
+
 type stubResolver struct {
 	identity *Identity
 	err      error
@@ -194,6 +276,27 @@ func (r statusStubResolver) Resolve(net.IP) (*Identity, error) {
 
 func (r statusStubResolver) ProviderStatus() ProviderStatus {
 	return r.status
+}
+
+type snapshotStubResolver struct {
+	entries []Mapping
+}
+
+func (r snapshotStubResolver) Resolve(net.IP) (*Identity, error) {
+	return nil, nil
+}
+
+func (r snapshotStubResolver) IdentityMappings() []Mapping {
+	out := make([]Mapping, 0, len(r.entries))
+	for _, entry := range r.entries {
+		out = append(out, Mapping{
+			IP:       entry.IP,
+			Provider: entry.Provider,
+			Kind:     entry.Kind,
+			Identity: cloneIdentity(entry.Identity),
+		})
+	}
+	return out
 }
 
 func gatheredCounterValue(t *testing.T, reg *prometheus.Registry, metricName string, labels map[string]string) float64 {

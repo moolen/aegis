@@ -123,15 +123,21 @@ make build
 `aegis.example.yaml` keeps both `discovery.kubernetes` and `discovery.ec2`
 empty so the quick start runs locally without requiring cluster credentials or
 AWS credentials. To enable runtime Kubernetes discovery, add a provider entry
-under `discovery.kubernetes` and set either `kubeconfig` for a local run or
-leave it unset only when running inside the target cluster. To enable EC2
-discovery, add a provider entry under `discovery.ec2`, set the target AWS
-`region`, and define the tag filters that scope instance discovery. To enable
-TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
-`proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs behind an
-NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
-the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
-discovery changes without restarting the process, send `SIGHUP` to Aegis.
+under `discovery.kubernetes` and configure its `auth` block with
+`provider: kubeconfig` for local runs, `provider: inCluster` inside a cluster,
+or the managed-cluster variants `eks`, `gke`, or `aks` with their
+provider-specific fields. Policies now bind explicitly through
+`policies[].subjects`, so each policy must reference one or more named
+discovery providers through
+`subjects.kubernetes.discoveryNames` or `subjects.ec2.discoveryNames`. To
+enable EC2 discovery, add a provider entry under `discovery.ec2`, set the
+target AWS `region`, and define the tag filters that scope instance discovery.
+To enable TLS MITM for `CONNECT`, provide a proxy CA certificate and key
+through `proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs
+behind an NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled`
+and configure the balancer to emit Proxy Protocol v2 on the proxy port. To
+reload policy or discovery changes without restarting the process, send
+`SIGHUP` to Aegis.
 When rotating trust, keep the new active issuer under `proxy.ca` and keep the
 old CA loaded under `proxy.ca.additional[]`, for example:
 

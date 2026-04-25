@@ -20,11 +20,11 @@ import (
 )
 
 func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) {
-	originalLoadRESTConfig := loadRESTConfig
+	originalLoadKubeconfig := loadKubeconfig
 	originalNewKubernetesPodSource := newKubernetesPodSource
 	originalNewKubernetesProvider := newKubernetesProvider
 	t.Cleanup(func() {
-		loadRESTConfig = originalLoadRESTConfig
+		loadKubeconfig = originalLoadKubeconfig
 		newKubernetesPodSource = originalNewKubernetesPodSource
 		newKubernetesProvider = originalNewKubernetesProvider
 	})
@@ -33,10 +33,12 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	source := &fakeRuntimePodSource{}
 	resolver := &fakeRuntimeResolver{}
 	var loadedPath string
+	var loadedContext string
 	var sourceConfig *rest.Config
 	var providerCfg KubernetesProviderConfig
-	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
+	loadKubeconfig = func(kubeconfig string, kubeContext string) (*rest.Config, error) {
 		loadedPath = kubeconfig
+		loadedContext = kubeContext
 		return restCfg, nil
 	}
 	newKubernetesPodSource = func(cfg *rest.Config) (KubernetesPodSource, error) {
@@ -49,8 +51,12 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	}
 
 	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
-		Name:       "cluster-a",
-		Kubeconfig: "/tmp/a.kubeconfig",
+		Name: "cluster-a",
+		Auth: config.KubernetesAuthConfig{
+			Provider:   "kubeconfig",
+			Kubeconfig: "/tmp/a.kubeconfig",
+			Context:    "dev",
+		},
 		Namespaces: []string{"default"},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -58,6 +64,9 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 	}
 	if loadedPath != "/tmp/a.kubeconfig" {
 		t.Fatalf("loaded kubeconfig = %q, want /tmp/a.kubeconfig", loadedPath)
+	}
+	if loadedContext != "dev" {
+		t.Fatalf("loaded kubeconfig context = %q, want dev", loadedContext)
 	}
 	if sourceConfig != restCfg {
 		t.Fatalf("newKubernetesPodSource() config = %p, want %p", sourceConfig, restCfg)
@@ -83,11 +92,11 @@ func TestExportedNewKubernetesRuntimeProviderUsesInjectedDefaults(t *testing.T) 
 }
 
 func TestExportedNewKubernetesRuntimeProviderForwardsExplicitResyncPeriod(t *testing.T) {
-	originalLoadRESTConfig := loadRESTConfig
+	originalLoadKubeconfig := loadKubeconfig
 	originalNewKubernetesPodSource := newKubernetesPodSource
 	originalNewKubernetesProvider := newKubernetesProvider
 	t.Cleanup(func() {
-		loadRESTConfig = originalLoadRESTConfig
+		loadKubeconfig = originalLoadKubeconfig
 		newKubernetesPodSource = originalNewKubernetesPodSource
 		newKubernetesProvider = originalNewKubernetesProvider
 	})
@@ -95,8 +104,11 @@ func TestExportedNewKubernetesRuntimeProviderForwardsExplicitResyncPeriod(t *tes
 	explicitResync := 15 * time.Second
 	var loadedPath string
 	var providerCfg KubernetesProviderConfig
-	loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
+	loadKubeconfig = func(kubeconfig string, kubeContext string) (*rest.Config, error) {
 		loadedPath = kubeconfig
+		if kubeContext != "dev" {
+			t.Fatalf("loadKubeconfig context = %q, want dev", kubeContext)
+		}
 		return &rest.Config{}, nil
 	}
 	newKubernetesPodSource = func(*rest.Config) (KubernetesPodSource, error) {
@@ -108,8 +120,12 @@ func TestExportedNewKubernetesRuntimeProviderForwardsExplicitResyncPeriod(t *tes
 	}
 
 	handle, err := NewKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
-		Name:         "cluster-a",
-		Kubeconfig:   "/tmp/a.kubeconfig",
+		Name: "cluster-a",
+		Auth: config.KubernetesAuthConfig{
+			Provider:   "kubeconfig",
+			Kubeconfig: "/tmp/a.kubeconfig",
+			Context:    "dev",
+		},
 		Namespaces:   []string{"default"},
 		ResyncPeriod: &explicitResync,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -127,13 +143,17 @@ func TestExportedNewKubernetesRuntimeProviderForwardsExplicitResyncPeriod(t *tes
 	}
 }
 
-func TestNewKubernetesRuntimeProviderFallsBackToInClusterConfig(t *testing.T) {
-	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
-		loadRESTConfig: func(kubeconfig string) (*rest.Config, error) {
-			if kubeconfig != "" {
-				t.Fatalf("loadRESTConfig kubeconfig = %q, want empty", kubeconfig)
-			}
-			return &rest.Config{}, nil
+func TestNewKubernetesRuntimeProviderBuildsInClusterConfigFromAuthProvider(t *testing.T) {
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+		Name: "cluster-a",
+		Auth: config.KubernetesAuthConfig{
+			Provider: "inCluster",
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		authDeps: kubernetesAuthDeps{
+			loadInCluster: func() (*rest.Config, error) {
+				return &rest.Config{}, nil
+			},
 		},
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			return fakeRuntimePodSource{}, nil
@@ -149,9 +169,16 @@ func TestNewKubernetesRuntimeProviderFallsBackToInClusterConfig(t *testing.T) {
 
 func TestNewKubernetesRuntimeProviderPropagatesLoadRESTConfigErrors(t *testing.T) {
 	loadErr := errors.New("missing credentials")
-	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
-		loadRESTConfig: func(string) (*rest.Config, error) {
-			return nil, loadErr
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+		Name: "cluster-a",
+		Auth: config.KubernetesAuthConfig{
+			Provider: "inCluster",
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		authDeps: kubernetesAuthDeps{
+			loadInCluster: func() (*rest.Config, error) {
+				return nil, loadErr
+			},
 		},
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			t.Fatal("newKubernetesPodSource should not be called when rest config load fails")
@@ -174,9 +201,16 @@ func TestNewKubernetesRuntimeProviderPropagatesLoadRESTConfigErrors(t *testing.T
 }
 
 func TestNewKubernetesRuntimeProviderPropagatesSourceErrors(t *testing.T) {
-	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
-		loadRESTConfig: func(string) (*rest.Config, error) {
-			return &rest.Config{}, nil
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+		Name: "cluster-a",
+		Auth: config.KubernetesAuthConfig{
+			Provider: "inCluster",
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		authDeps: kubernetesAuthDeps{
+			loadInCluster: func() (*rest.Config, error) {
+				return &rest.Config{}, nil
+			},
 		},
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			return nil, errors.New("no cluster")
@@ -193,9 +227,16 @@ func TestNewKubernetesRuntimeProviderPropagatesSourceErrors(t *testing.T) {
 
 func TestNewKubernetesRuntimeProviderPropagatesProviderErrors(t *testing.T) {
 	providerErr := errors.New("provider init failed")
-	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{Name: "cluster-a"}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
-		loadRESTConfig: func(string) (*rest.Config, error) {
-			return &rest.Config{}, nil
+	_, err := newKubernetesRuntimeProvider(config.KubernetesDiscoveryConfig{
+		Name: "cluster-a",
+		Auth: config.KubernetesAuthConfig{
+			Provider: "inCluster",
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), kubernetesRuntimeProviderDeps{
+		authDeps: kubernetesAuthDeps{
+			loadInCluster: func() (*rest.Config, error) {
+				return &rest.Config{}, nil
+			},
 		},
 		newKubernetesPodSource: func(*rest.Config) (KubernetesPodSource, error) {
 			return fakeRuntimePodSource{}, nil
