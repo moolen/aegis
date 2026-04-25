@@ -365,6 +365,58 @@ func TestUnknownIdentityDenyBlocksHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestCIDRSubjectAllowsLoopbackRequestWithoutDiscovery(t *testing.T) {
+	const adminToken = "cidr-only-loopback"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/allowed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "aegis.yaml")
+
+	writeConfig(t, configPath, cidrPolicyConfigYAML(proxyAddr, metricsAddr, adminToken, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", []string{"127.0.0.0/8", "::1/128"}, configpkg.UnknownIdentityDeny))
+	startAegis(t, configPath)
+
+	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	simulation := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+		SourceIP: "127.0.0.1",
+		FQDN:     "127.0.0.1",
+		Port:     mustPort(t, upstreamURL.Host),
+		Protocol: "http",
+		Method:   http.MethodGet,
+		Path:     "/allowed",
+	})
+	if !simulation.UnknownIdentity {
+		t.Fatalf("simulation = %#v, want unknown identity", simulation)
+	}
+	if simulation.Action != "allow" || simulation.Reason != "policy_allowed" {
+		t.Fatalf("simulation = %#v, want allow policy_allowed", simulation)
+	}
+	if simulation.Decision == nil || simulation.Decision.Policy != "allow-http-cidr" {
+		t.Fatalf("decision = %#v, want allow-http-cidr", simulation.Decision)
+	}
+}
+
 func TestPolicySubjectBindsToConfiguredKubernetesProviderName(t *testing.T) {
 	const adminToken = "policy-subject-kubernetes"
 
@@ -839,6 +891,41 @@ func writeConfig(t *testing.T, path string, contents string) {
 
 func policyConfigYAML(proxyAddr string, metricsAddr string, host string, port int, allowedPath string) string {
 	return policyConfigYAMLWithOptions(proxyAddr, metricsAddr, host, port, allowedPath, policyConfigOptions{})
+}
+
+func cidrPolicyConfigYAML(proxyAddr string, metricsAddr string, adminToken string, host string, port int, allowedPath string, cidrs []string, unknownIdentityPolicy string) string {
+	adminBlock := ""
+	if adminToken != "" {
+		adminBlock = fmt.Sprintf("admin:\n  token: %q\n", adminToken)
+	}
+	unknownIdentityBlock := ""
+	if unknownIdentityPolicy != "" {
+		unknownIdentityBlock = fmt.Sprintf("  unknownIdentityPolicy: %s\n", unknownIdentityPolicy)
+	}
+
+	return fmt.Sprintf(`proxy:
+  listen: "%s"
+%smetrics:
+  listen: "%s"
+%sdns:
+  cache_ttl: 30s
+  timeout: 5s
+  servers: []
+  rebindingProtection:
+    allowedCIDRs: ["127.0.0.0/8"]
+policies:
+  - name: allow-http-cidr
+    subjects:
+      cidrs: %s
+    egress:
+      - fqdn: "%s"
+        ports: [%d]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET"]
+          allowedPaths: ["%s"]
+`, proxyAddr, unknownIdentityBlock, metricsAddr, adminBlock, quotedYAMLList(cidrs), host, port, allowedPath)
 }
 
 func policyConfigYAMLWithEnforcement(proxyAddr string, metricsAddr string, host string, port int, allowedPath string, enforcement string) string {

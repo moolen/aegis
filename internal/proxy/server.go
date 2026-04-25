@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,8 +32,8 @@ type IdentityResolver interface {
 }
 
 type PolicyEngine interface {
-	Evaluate(id *identity.Identity, fqdn string, port int, method string, path string) *policy.Decision
-	EvaluateConnect(id *identity.Identity, fqdn string, port int) *policy.Decision
+	Evaluate(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, path string) *policy.Decision
+	EvaluateConnect(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int) *policy.Decision
 }
 
 type Dependencies struct {
@@ -109,26 +110,26 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqIdentity := identity.Unknown()
+	sourceIP := requestSourceIP(r)
 	var decision *policy.Decision
 	audit := auditOutcome{}
-	unknownIdentityBlocked := false
 	if s.needsRequestIdentity() {
 		reqIdentity = s.resolveRequestIdentity(r)
-		if s.denyUnknownIdentity(reqIdentity) {
-			unknownIdentityBlocked = true
-			audit = s.recordUnknownIdentityAuditDecision("http", reqIdentity, host)
-			if !audit.Enabled {
-				s.recordRequestDecision("http", "deny", "none", "unknown_identity")
-				s.logRequestDecision(slog.LevelWarn, "http", "deny", "unknown_identity", reqIdentity, host, port, nil, r.Method, requestPolicyPath(r), auditOutcome{})
-				s.writeError(w, http.StatusForbidden, "request denied for unknown identity", "identity")
-				return
-			}
-		}
 	}
-	if !unknownIdentityBlocked && s.deps.PolicyEngine != nil {
+	if s.deps.PolicyEngine != nil {
 		decision = s.evaluatePolicy("http", func() *policy.Decision {
-			return s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
+			return s.deps.PolicyEngine.Evaluate(reqIdentity, sourceIP, host, port, r.Method, requestPolicyPath(r))
 		})
+	}
+	if s.denyUnknownIdentity(reqIdentity) && decision == nil {
+		audit = s.recordUnknownIdentityAuditDecision("http", reqIdentity, host)
+		if !audit.Enabled {
+			s.recordRequestDecision("http", "deny", "none", "unknown_identity")
+			s.logRequestDecision(slog.LevelWarn, "http", "deny", "unknown_identity", reqIdentity, host, port, nil, r.Method, requestPolicyPath(r), auditOutcome{})
+			s.writeError(w, http.StatusForbidden, "request denied for unknown identity", "identity")
+			return
+		}
+	} else if s.deps.PolicyEngine != nil {
 		audit = s.recordAuditPolicyDecision("http", reqIdentity, host, decision)
 		if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
 			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "policy_denied")
@@ -205,27 +206,27 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqIdentity := identity.Unknown()
+	sourceIP := requestSourceIP(r)
 	var decision *policy.Decision
 	audit := auditOutcome{}
-	unknownIdentityBlocked := false
 	if s.needsRequestIdentity() {
 		reqIdentity = s.resolveRequestIdentity(r)
-		if s.denyUnknownIdentity(reqIdentity) {
-			unknownIdentityBlocked = true
-			audit = s.recordUnknownIdentityAuditDecision("connect", reqIdentity, host)
-			if !audit.Enabled {
-				s.recordConnectResult("passthrough", "unknown_identity")
-				s.recordRequestDecision("connect", "deny", "none", "unknown_identity")
-				s.logRequestDecision(slog.LevelWarn, "connect", "deny", "unknown_identity", reqIdentity, host, port, nil, http.MethodConnect, "", auditOutcome{})
-				s.writeError(w, http.StatusForbidden, "connect target denied for unknown identity", "identity")
-				return
-			}
-		}
 	}
-	if !unknownIdentityBlocked && s.deps.PolicyEngine != nil {
+	if s.deps.PolicyEngine != nil {
 		decision = s.evaluatePolicy("connect", func() *policy.Decision {
-			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
+			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, sourceIP, host, port)
 		})
+	}
+	if s.denyUnknownIdentity(reqIdentity) && decision == nil {
+		audit = s.recordUnknownIdentityAuditDecision("connect", reqIdentity, host)
+		if !audit.Enabled {
+			s.recordConnectResult("passthrough", "unknown_identity")
+			s.recordRequestDecision("connect", "deny", "none", "unknown_identity")
+			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "unknown_identity", reqIdentity, host, port, nil, http.MethodConnect, "", auditOutcome{})
+			s.writeError(w, http.StatusForbidden, "connect target denied for unknown identity", "identity")
+			return
+		}
+	} else if s.deps.PolicyEngine != nil {
 		audit = s.recordAuditPolicyDecision("connect", reqIdentity, host, decision)
 		if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
 			s.recordConnectResult(connectDecisionMode(decision), "policy_denied")
@@ -338,7 +339,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if decision != nil && decision.TLSMode == "mitm" {
 		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), "policy_allowed")
 		s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "", audit)
-		s.handleConnectMITM(clientConn, buf.Reader, clientHello, upstreamConn, reqIdentity, sni, port)
+		s.handleConnectMITM(clientConn, buf.Reader, clientHello, upstreamConn, reqIdentity, sourceIP, sni, port)
 		return
 	}
 
@@ -359,7 +360,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
 }
 
-func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, upstreamConn net.Conn, reqIdentity *identity.Identity, serverName string, port int) {
+func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, upstreamConn net.Conn, reqIdentity *identity.Identity, sourceIP netip.Addr, serverName string, port int) {
 	clientTLSConn, err := s.handshakeClientMITM(clientConn, clientReader, clientHello, serverName)
 	if err != nil {
 		s.recordConnectResult("mitm", "client_tls_error")
@@ -398,7 +399,7 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 
 		if s.deps.PolicyEngine != nil {
 			decision := s.evaluatePolicy("mitm_http", func() *policy.Decision {
-				return s.deps.PolicyEngine.Evaluate(reqIdentity, serverName, port, req.Method, requestPolicyPath(req))
+				return s.deps.PolicyEngine.Evaluate(reqIdentity, sourceIP, serverName, port, req.Method, requestPolicyPath(req))
 			})
 			audit := s.recordAuditPolicyDecision("mitm_http", reqIdentity, serverName, decision)
 			if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
@@ -604,18 +605,12 @@ func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
 		return reqIdentity
 	}
 
-	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		s.deps.Logger.Debug("split remote address failed", "remote_addr", r.RemoteAddr, "error", err)
+	sourceIP := requestSourceIP(r)
+	if !sourceIP.IsValid() {
 		return reqIdentity
 	}
 
-	remoteIP := net.ParseIP(remoteHost)
-	if remoteIP == nil {
-		s.deps.Logger.Debug("parse remote ip failed", "remote_addr", r.RemoteAddr)
-		return reqIdentity
-	}
-
+	remoteIP := net.IP(sourceIP.AsSlice())
 	resolvedIdentity, err := s.deps.IdentityResolver.Resolve(remoteIP)
 	if err != nil {
 		s.deps.Logger.Debug("resolve request identity failed", "remote_ip", remoteIP.String(), "error", err)
@@ -626,6 +621,24 @@ func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
 	}
 
 	return resolvedIdentity
+}
+
+func requestSourceIP(r *http.Request) netip.Addr {
+	if r == nil {
+		return netip.Addr{}
+	}
+
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+
+	addr, err := netip.ParseAddr(remoteHost)
+	if err != nil {
+		return netip.Addr{}
+	}
+
+	return addr.Unmap()
 }
 
 func (s *Server) needsRequestIdentity() bool {

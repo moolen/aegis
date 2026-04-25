@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -587,6 +588,123 @@ func TestProxyUnknownIdentityDenyBlocksHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestServerAllowsCIDRSubjectWithoutResolvedIdentity(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	server := NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver:      staticIdentityResolver{},
+		UnknownIdentityPolicy: "deny",
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-loopback-cidr",
+			Subjects: config.PolicySubjectsConfig{
+				CIDRs: []string{"10.20.0.0/24"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/allowed"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://example.com%s/allowed", hostPortSuffix(upstreamURL.Host)), nil)
+	req.RemoteAddr = "10.20.0.10:1234"
+
+	resp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	}
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+}
+
+func TestProxyConnectAllowsCIDRSubjectWithoutResolvedIdentityWhenUnknownIdentityDenied(t *testing.T) {
+	clientHello := mustClientHello(t, "tunnel.internal")
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, len(clientHello)+4)
+		_, _ = io.ReadFull(conn, buf)
+		_, _ = conn.Write([]byte("pong"))
+	}()
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{
+				"tunnel.internal": {net.ParseIP("127.0.0.1")},
+			},
+		},
+		IdentityResolver:      staticIdentityResolver{},
+		UnknownIdentityPolicy: "deny",
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-source-cidr",
+			Subjects: config.PolicySubjectsConfig{
+				CIDRs: []string{"127.0.0.0/8"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:")))
+	defer conn.Close()
+	readConnectEstablished(t, reader)
+
+	if _, err := conn.Write(append(clientHello, []byte("ping")...)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	reply := make([]byte, 4)
+	if _, err := io.ReadFull(reader, reply); err != nil {
+		t.Fatalf("ReadFull() error = %v", err)
+	}
+	if string(reply) != "pong" {
+		t.Fatalf("reply = %q, want %q", string(reply), "pong")
+	}
+
+	_ = conn.Close()
+	<-done
+}
+
 func TestProxyBypassPolicyAllowsDeniedHTTPRequestsAndRecordsWouldDeny(t *testing.T) {
 	var upstreamHits atomic.Int32
 
@@ -871,7 +989,7 @@ func TestProxyEvaluatesPolicyAgainstEscapedPath(t *testing.T) {
 			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
 		},
 		PolicyEngine: &policyEngineStub{
-			evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
 				seenPolicyPath = reqPath
 				if reqPath == "/api%2Fsecret" {
 					return &policy.Decision{Allowed: true}
@@ -912,7 +1030,7 @@ func TestProxyRemoteAddrFeedsIdentityResolver(t *testing.T) {
 			},
 		},
 		PolicyEngine: &policyEngineStub{
-			evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
 				policyIdentity = id
 				return &policy.Decision{}
 			},
@@ -972,7 +1090,7 @@ func TestProxyFallsBackToUnknownIdentity(t *testing.T) {
 			server := NewServer(Dependencies{
 				IdentityResolver: tc.resolver,
 				PolicyEngine: &policyEngineStub{
-					evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+					evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
 						policyIdentity = id
 						return &policy.Decision{}
 					},
@@ -1126,11 +1244,11 @@ func TestProxyConnectUsesIdentityResolverAndPolicyEngine(t *testing.T) {
 		},
 	}
 	policyEngine := &policyEngineStub{
-		evaluate: func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+		evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
 			t.Fatal("http policy evaluation should not be called for CONNECT")
 			return nil
 		},
-		evaluateConnect: func(id *identity.Identity, fqdn string, port int) *policy.Decision {
+		evaluateConnect: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int) *policy.Decision {
 			if id == nil || id.Labels["app"] != "web" {
 				t.Fatalf("connect policy identity = %#v, want app=web", id)
 			}
@@ -1855,24 +1973,24 @@ func (r *spyIdentityResolver) Resolve(ip net.IP) (*identity.Identity, error) {
 type policyEngineStub struct {
 	calls           int
 	connectCalls    int
-	evaluate        func(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision
-	evaluateConnect func(id *identity.Identity, fqdn string, port int) *policy.Decision
+	evaluate        func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision
+	evaluateConnect func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int) *policy.Decision
 }
 
-func (p *policyEngineStub) Evaluate(id *identity.Identity, fqdn string, port int, method string, reqPath string) *policy.Decision {
+func (p *policyEngineStub) Evaluate(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
 	p.calls++
 	if p.evaluate == nil {
 		return &policy.Decision{}
 	}
-	return p.evaluate(id, fqdn, port, method, reqPath)
+	return p.evaluate(id, sourceIP, fqdn, port, method, reqPath)
 }
 
-func (p *policyEngineStub) EvaluateConnect(id *identity.Identity, fqdn string, port int) *policy.Decision {
+func (p *policyEngineStub) EvaluateConnect(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int) *policy.Decision {
 	p.connectCalls++
 	if p.evaluateConnect == nil {
 		return &policy.Decision{}
 	}
-	return p.evaluateConnect(id, fqdn, port)
+	return p.evaluateConnect(id, sourceIP, fqdn, port)
 }
 
 func mustPolicyEngine(t *testing.T, cfgs []config.PolicyConfig) *policy.Engine {
@@ -1881,7 +1999,7 @@ func mustPolicyEngine(t *testing.T, cfgs []config.PolicyConfig) *policy.Engine {
 	normalized := make([]config.PolicyConfig, len(cfgs))
 	for i, cfg := range cfgs {
 		normalized[i] = cfg
-		if normalized[i].Subjects.Kubernetes != nil || normalized[i].Subjects.EC2 != nil {
+		if normalized[i].Subjects.Kubernetes != nil || normalized[i].Subjects.EC2 != nil || len(normalized[i].Subjects.CIDRs) > 0 {
 			continue
 		}
 		normalized[i].Subjects = config.PolicySubjectsConfig{

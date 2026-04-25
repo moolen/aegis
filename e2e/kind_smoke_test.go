@@ -4,7 +4,9 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +43,7 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 	clusterName := fmt.Sprintf("aegis-e2e-%d", time.Now().UnixNano())
 	kubeContext := "kind-" + clusterName
 	createKindCluster(t, repoRoot, clusterName)
+	waitForKindControlPlaneReady(t, repoRoot, kubeContext)
 	t.Cleanup(func() {
 		runBestEffort(repoRoot, 2*time.Minute, "kind", "delete", "cluster", "--name", clusterName)
 	})
@@ -49,32 +52,11 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 	runCommand(t, repoRoot, 5*time.Minute, "kind", "load", "docker-image", kindImageRef, "--name", clusterName)
 
 	kubectlApplyYAML(t, repoRoot, kubeContext, kindNamespace, echoManifestYAML())
-	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "status", "deployment/echo", "--timeout=180s")
-
-	valuesPath := writeKindValuesFile(t, kindValuesYAML())
-	runCommand(
-		t,
-		repoRoot,
-		4*time.Minute,
-		"helm",
-		"upgrade",
-		"--install",
-		"--reset-values",
-		kindReleaseName,
-		"./deploy/helm",
-		"-n",
-		kindNamespace,
-		"--create-namespace",
-		"-f",
-		valuesPath,
-		"--wait",
-		"--timeout",
-		"180s",
-	)
-	runCommand(t, repoRoot, 2*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "restart", "deployment/aegis")
-	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "status", "deployment/aegis", "--timeout=180s")
+	waitForDeploymentAvailable(t, repoRoot, kubeContext, kindNamespace, "echo", 3*time.Minute)
 
 	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindCurlPodName, "--ignore-not-found")
+	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindAllowedPod, "--ignore-not-found")
+	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindDeniedPod, "--ignore-not-found")
 	runCommand(
 		t,
 		repoRoot,
@@ -95,6 +77,34 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"sleep 3600",
 	)
 	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "wait", "--for=condition=Ready", "pod/"+kindCurlPodName, "--timeout=180s")
+	createCurlPod(t, repoRoot, kubeContext, kindAllowedPod, "role=allowed")
+	createCurlPod(t, repoRoot, kubeContext, kindDeniedPod, "role=denied")
+
+	allowedPodIP := kindPodIP(t, repoRoot, kubeContext, kindAllowedPod)
+	deniedPodIP := kindPodIP(t, repoRoot, kubeContext, kindDeniedPod)
+
+	valuesPath := writeKindValuesFile(t, kindValuesYAML(kindHostCIDR(t, allowedPodIP)))
+	runCommand(
+		t,
+		repoRoot,
+		4*time.Minute,
+		"helm",
+		"upgrade",
+		"--install",
+		"--reset-values",
+		kindReleaseName,
+		"./deploy/helm",
+		"-n",
+		kindNamespace,
+		"--create-namespace",
+		"-f",
+		valuesPath,
+		"--wait",
+		"--timeout",
+		"180s",
+	)
+	runCommand(t, repoRoot, 2*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "restart", "deployment/aegis")
+	waitForDeploymentAvailable(t, repoRoot, kubeContext, kindNamespace, "aegis", 3*time.Minute)
 
 	healthz := kubectlExec(t, repoRoot, kubeContext, "curl", "-fsS", "http://aegis:9090/healthz")
 	if got := strings.TrimSpace(healthz); got != "ok" {
@@ -134,10 +144,61 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		t.Fatalf("metrics output missing expected request counter:\n%s", metrics)
 	}
 
-	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindAllowedPod, "--ignore-not-found")
-	runBestEffort(repoRoot, time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "delete", "pod", kindDeniedPod, "--ignore-not-found")
-	createCurlPod(t, repoRoot, kubeContext, kindAllowedPod, "role=allowed")
-	createCurlPod(t, repoRoot, kubeContext, kindDeniedPod, "role=denied")
+	cidrAllowedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/cidr", allowedPodIP, kindEchoHostName)
+	cidrDeniedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/cidr", deniedPodIP, kindEchoHostName)
+	cidrAllowedSimulation := kubectlExecPodEventually(
+		t,
+		repoRoot,
+		30*time.Second,
+		kubeContext,
+		kindAllowedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -fsS --max-time 10 -H 'Authorization: Bearer %s' '%s'", kindAdminToken, cidrAllowedSimulationURL),
+	)
+	if !strings.Contains(cidrAllowedSimulation, `"action":"allow"`) || !strings.Contains(cidrAllowedSimulation, `"policy":"allow-echo-from-cidr"`) {
+		t.Fatalf("cidr allowed simulation = %s, want allow-echo-from-cidr allow", cidrAllowedSimulation)
+	}
+
+	cidrDeniedSimulation := kubectlExecPodEventually(
+		t,
+		repoRoot,
+		30*time.Second,
+		kubeContext,
+		kindAllowedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -fsS --max-time 10 -H 'Authorization: Bearer %s' '%s'", kindAdminToken, cidrDeniedSimulationURL),
+	)
+	if !strings.Contains(cidrDeniedSimulation, `"action":"deny"`) || !strings.Contains(cidrDeniedSimulation, `"reason":"policy_denied"`) {
+		t.Fatalf("cidr denied simulation = %s, want deny policy_denied", cidrDeniedSimulation)
+	}
+
+	cidrAllowedStatus := strings.TrimSpace(kubectlExecPod(
+		t,
+		repoRoot,
+		kubeContext,
+		kindAllowedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -sS --proxy http://aegis:3128 -o /dev/null -w '%%{http_code}' http://%s/cidr", kindEchoHostName),
+	))
+	if cidrAllowedStatus != "200" {
+		t.Fatalf("cidr-allowed request status = %q, want %q", cidrAllowedStatus, "200")
+	}
+
+	cidrDeniedStatus := strings.TrimSpace(kubectlExecPod(
+		t,
+		repoRoot,
+		kubeContext,
+		kindDeniedPod,
+		"sh",
+		"-c",
+		fmt.Sprintf("curl -sS --proxy http://aegis:3128 -o /dev/null -w '%%{http_code}' http://%s/cidr", kindEchoHostName),
+	))
+	if cidrDeniedStatus != "403" {
+		t.Fatalf("cidr-denied request status = %q, want %q", cidrDeniedStatus, "403")
+	}
 
 	identityValuesPath := writeKindValuesFile(t, kindIdentityValuesYAML())
 	runCommand(
@@ -160,7 +221,7 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		"180s",
 	)
 	runCommand(t, repoRoot, 2*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "restart", "deployment/aegis")
-	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "rollout", "status", "deployment/aegis", "--timeout=180s")
+	waitForDeploymentAvailable(t, repoRoot, kubeContext, kindNamespace, "aegis", 3*time.Minute)
 
 	waitFor(t, 30*time.Second, func() bool {
 		metricsBody, err := tryKubectlExecPod(repoRoot, kubeContext, kindAllowedPod, "curl", "-fsS", "http://aegis:9090/metrics")
@@ -172,8 +233,6 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 		return activeOK && entriesOK && active == 1 && entries >= 2
 	})
 
-	allowedPodIP := kindPodIP(t, repoRoot, kubeContext, kindAllowedPod)
-	deniedPodIP := kindPodIP(t, repoRoot, kubeContext, kindDeniedPod)
 	allowedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", allowedPodIP, kindEchoHostName)
 	deniedSimulationURL := fmt.Sprintf("http://aegis:9090/admin/simulate?sourceIP=%s&fqdn=%s&port=80&protocol=http&method=GET&path=/allowed", deniedPodIP, kindEchoHostName)
 
@@ -319,6 +378,110 @@ func kubectlExec(t *testing.T, repoRoot string, kubeContext string, args ...stri
 	return kubectlExecPod(t, repoRoot, kubeContext, kindCurlPodName, args...)
 }
 
+type podList struct {
+	Items []struct {
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+		Status struct {
+			Conditions []statusCondition `json:"conditions"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+type deploymentStatus struct {
+	Metadata struct {
+		Generation int64 `json:"generation"`
+	} `json:"metadata"`
+	Spec struct {
+		Replicas *int32 `json:"replicas"`
+	} `json:"spec"`
+	Status struct {
+		ObservedGeneration  int64             `json:"observedGeneration"`
+		Replicas            int32             `json:"replicas"`
+		UpdatedReplicas     int32             `json:"updatedReplicas"`
+		ReadyReplicas       int32             `json:"readyReplicas"`
+		AvailableReplicas   int32             `json:"availableReplicas"`
+		UnavailableReplicas int32             `json:"unavailableReplicas"`
+		Conditions          []statusCondition `json:"conditions"`
+	} `json:"status"`
+}
+
+type statusCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+func waitForKindControlPlaneReady(t *testing.T, repoRoot string, kubeContext string) {
+	t.Helper()
+
+	waitFor(t, 2*time.Minute, func() bool {
+		output, err := runCommandOutput(repoRoot, 15*time.Second, "kubectl", "--context", kubeContext, "-n", "kube-system", "get", "pods", "-o", "json")
+		if err != nil {
+			return false
+		}
+
+		var pods podList
+		if err := json.Unmarshal([]byte(output), &pods); err != nil {
+			return false
+		}
+
+		schedulerReady := false
+		controllerReady := false
+		for _, pod := range pods.Items {
+			if strings.HasPrefix(pod.Metadata.Name, "kube-scheduler-") && podReady(pod.Status.Conditions) {
+				schedulerReady = true
+			}
+			if strings.HasPrefix(pod.Metadata.Name, "kube-controller-manager-") && podReady(pod.Status.Conditions) {
+				controllerReady = true
+			}
+		}
+
+		return schedulerReady && controllerReady
+	})
+}
+
+func waitForDeploymentAvailable(t *testing.T, repoRoot string, kubeContext string, namespace string, name string, timeout time.Duration) {
+	t.Helper()
+
+	waitFor(t, timeout, func() bool {
+		output, err := runCommandOutput(repoRoot, 15*time.Second, "kubectl", "--context", kubeContext, "-n", namespace, "get", "deployment", name, "-o", "json")
+		if err != nil {
+			return false
+		}
+
+		var status deploymentStatus
+		if err := json.Unmarshal([]byte(output), &status); err != nil {
+			return false
+		}
+
+		replicas := int32(1)
+		if status.Spec.Replicas != nil {
+			replicas = *status.Spec.Replicas
+		}
+
+		return status.Status.ObservedGeneration >= status.Metadata.Generation &&
+			status.Status.UpdatedReplicas == replicas &&
+			status.Status.ReadyReplicas == replicas &&
+			status.Status.AvailableReplicas == replicas &&
+			status.Status.UnavailableReplicas == 0 &&
+			conditionTrue(status.Status.Conditions, "Available")
+	})
+}
+
+func podReady(conditions []statusCondition) bool {
+	return conditionTrue(conditions, "Ready")
+}
+
+func conditionTrue(conditions []statusCondition, wantType string) bool {
+	for _, condition := range conditions {
+		if condition.Type == wantType && condition.Status == "True" {
+			return true
+		}
+	}
+	return false
+}
+
 func kubectlExecPodEventually(t *testing.T, repoRoot string, timeout time.Duration, kubeContext string, podName string, args ...string) string {
 	t.Helper()
 
@@ -342,17 +505,13 @@ func kubectlExecPodEventually(t *testing.T, repoRoot string, timeout time.Durati
 func kubectlExecPod(t *testing.T, repoRoot string, kubeContext string, podName string, args ...string) string {
 	t.Helper()
 
-	output, err := tryKubectlExecPod(repoRoot, kubeContext, podName, args...)
-	if err != nil {
-		t.Fatalf("kubectl exec %s failed: %v\n%s", podName, err, output)
-	}
-	return output
+	return kubectlExecPodEventually(t, repoRoot, 30*time.Second, kubeContext, podName, args...)
 }
 
 func tryKubectlExecPod(repoRoot string, kubeContext string, podName string, args ...string) (string, error) {
 	commandArgs := []string{"--context", kubeContext, "-n", kindNamespace, "exec", podName, "--"}
 	commandArgs = append(commandArgs, args...)
-	return runCommandOutput(repoRoot, 2*time.Minute, "kubectl", commandArgs...)
+	return runCommandOutput(repoRoot, 20*time.Second, "kubectl", commandArgs...)
 }
 
 func kindPodIP(t *testing.T, repoRoot string, kubeContext string, podName string) string {
@@ -445,7 +604,7 @@ func createCurlPod(t *testing.T, repoRoot string, kubeContext string, podName st
 	runCommand(t, repoRoot, 3*time.Minute, "kubectl", "--context", kubeContext, "-n", kindNamespace, "wait", "--for=condition=Ready", "pod/"+podName, "--timeout=180s")
 }
 
-func kindValuesYAML() string {
+func kindValuesYAML(cidr string) string {
 	return `image:
   repository: aegis
   tag: e2e-kind
@@ -476,6 +635,17 @@ config:
         namespaces: ["aegis-e2e"]
         resyncPeriod: 5s
   policies:
+    - name: allow-echo-from-cidr
+      subjects:
+        cidrs: ["` + cidr + `"]
+      egress:
+        - fqdn: "echo.aegis-e2e.svc.cluster.local"
+          ports: [80]
+          tls:
+            mode: mitm
+          http:
+            allowedMethods: ["GET"]
+            allowedPaths: ["/cidr"]
     - name: allow-echo
       subjects:
         kubernetes:
@@ -542,6 +712,17 @@ config:
             allowedMethods: ["GET"]
             allowedPaths: ["/allowed"]
 `
+}
+
+func kindHostCIDR(t *testing.T, ip string) string {
+	t.Helper()
+
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		t.Fatalf("ParseAddr(%q) error = %v", ip, err)
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()).String()
 }
 
 func echoManifestYAML() string {

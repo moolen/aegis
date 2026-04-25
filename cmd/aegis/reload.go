@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -249,10 +250,12 @@ func (m *runtimeManager) DumpIdentities() []appmetrics.IdentityDumpRecord {
 }
 
 func (m *runtimeManager) Simulate(req appmetrics.SimulationRequest) (appmetrics.SimulationResponse, error) {
-	sourceIP := net.ParseIP(req.SourceIP)
-	if sourceIP == nil {
+	sourceAddr, err := netip.ParseAddr(req.SourceIP)
+	if err != nil {
 		return appmetrics.SimulationResponse{}, fmt.Errorf("sourceIP must be a valid IP address")
 	}
+	sourceAddr = sourceAddr.Unmap()
+	sourceIP := net.IP(sourceAddr.AsSlice())
 
 	m.mu.RLock()
 	generation := m.current
@@ -275,38 +278,25 @@ func (m *runtimeManager) Simulate(req appmetrics.SimulationRequest) (appmetrics.
 	if generation.identityResolver != nil {
 		resolved, err := generation.identityResolver.Resolve(sourceIP)
 		if err != nil {
-			return appmetrics.SimulationResponse{}, fmt.Errorf("resolve source identity: %w", err)
-		}
-		if resolved != nil {
+			if m.logger != nil {
+				m.logger.Debug("resolve simulated source identity failed", "source_ip", sourceIP.String(), "error", err)
+			}
+		} else if resolved != nil {
 			id = resolved
 		}
 	}
 	resp.Identity = identityRecordFromIdentity(id, id.Provider, id.Source)
 	resp.UnknownIdentity = isUnknownIdentity(id)
 
-	if resp.UnknownIdentity && resp.UnknownIdentityPolicy == config.UnknownIdentityDeny {
-		if status.Effective == config.EnforcementAudit {
-			resp.Action = "allow"
-			resp.Reason = "audit_unknown_identity"
-			resp.WouldAction = "would_deny"
-			resp.WouldReason = "unknown_identity"
-			resp.WouldBlock = true
-			return resp, nil
-		}
-		resp.Action = "deny"
-		resp.Reason = "unknown_identity"
-		return resp, nil
-	}
-
 	var decision *policy.Decision
 	switch req.Protocol {
 	case "connect":
 		if generation.policyEngine != nil {
-			decision = generation.policyEngine.EvaluateConnect(id, req.FQDN, req.Port)
+			decision = generation.policyEngine.EvaluateConnect(id, sourceAddr, req.FQDN, req.Port)
 		}
 	case "http", "":
 		if generation.policyEngine != nil {
-			decision = generation.policyEngine.Evaluate(id, req.FQDN, req.Port, req.Method, req.Path)
+			decision = generation.policyEngine.Evaluate(id, sourceAddr, req.FQDN, req.Port, req.Method, req.Path)
 		}
 	default:
 		return appmetrics.SimulationResponse{}, fmt.Errorf("protocol must be http or connect")
@@ -320,6 +310,20 @@ func (m *runtimeManager) Simulate(req appmetrics.SimulationRequest) (appmetrics.
 			Bypass:            decision.Bypass,
 			PolicyEnforcement: decision.PolicyEnforcement,
 		}
+	}
+
+	if resp.UnknownIdentity && resp.UnknownIdentityPolicy == config.UnknownIdentityDeny && decision == nil {
+		if status.Effective == config.EnforcementAudit {
+			resp.Action = "allow"
+			resp.Reason = "audit_unknown_identity"
+			resp.WouldAction = "would_deny"
+			resp.WouldReason = "unknown_identity"
+			resp.WouldBlock = true
+			return resp, nil
+		}
+		resp.Action = "deny"
+		resp.Reason = "unknown_identity"
+		return resp, nil
 	}
 
 	shadow := status.Effective == config.EnforcementAudit || (decision != nil && (decision.Bypass || decision.PolicyEnforcement == config.EnforcementAudit))

@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -545,7 +546,7 @@ func TestRunBuildsPoliciesFromExplicitSubjectsSchema(t *testing.T) {
 		t.Fatal("IdentityResolver.Resolve() returned nil identity")
 	}
 
-	decision := deps.PolicyEngine.Evaluate(id, "example.com", 80, http.MethodGet, "/")
+	decision := deps.PolicyEngine.Evaluate(id, netip.MustParseAddr("10.0.0.10"), "example.com", 80, http.MethodGet, "/")
 	if decision == nil || !decision.Allowed || decision.Policy != "policy-a" {
 		t.Fatalf("decision = %#v, want allowed policy-a decision", decision)
 	}
@@ -1017,6 +1018,107 @@ func TestRuntimeManagerSimulateDeniesUnknownIdentityWhenConfigured(t *testing.T)
 	}
 	if resp.Action != "deny" || resp.Reason != "unknown_identity" {
 		t.Fatalf("response = %#v, want deny unknown_identity", resp)
+	}
+}
+
+func TestRuntimeManagerSimulateAllowsCIDRSubjectWithoutIdentity(t *testing.T) {
+	manager := &runtimeManager{
+		enforcement: proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	manager.current.cfg = testRuntimeConfig()
+	manager.current.cfg.Proxy.UnknownIdentityPolicy = config.UnknownIdentityDeny
+	manager.current.identityResolver = fakeIdentityResolver{}
+
+	engine, err := policy.NewEngine([]config.PolicyConfig{{
+		Name: "allow-source-cidr",
+		Subjects: config.PolicySubjectsConfig{
+			CIDRs: []string{"10.0.0.0/24"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"GET"},
+				AllowedPaths:   []string{"/allowed"},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	manager.current.policyEngine = engine
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		SourceIP: "10.0.0.10",
+		FQDN:     "example.com",
+		Port:     80,
+		Protocol: "http",
+		Method:   http.MethodGet,
+		Path:     "/allowed",
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Identity == nil || !resp.UnknownIdentity {
+		t.Fatalf("identity = %#v, unknownIdentity = %v, want unknown identity record", resp.Identity, resp.UnknownIdentity)
+	}
+	if resp.Action != "allow" || resp.Reason != "policy_allowed" {
+		t.Fatalf("response = %#v, want allow policy_allowed", resp)
+	}
+	if resp.Decision == nil || resp.Decision.Policy != "allow-source-cidr" {
+		t.Fatalf("decision = %#v, want allow-source-cidr", resp.Decision)
+	}
+}
+
+func TestRuntimeManagerSimulateAllowsCIDRSubjectWhenIdentityResolverErrors(t *testing.T) {
+	manager := &runtimeManager{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		enforcement: proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	manager.current.cfg = testRuntimeConfig()
+	manager.current.cfg.Proxy.UnknownIdentityPolicy = config.UnknownIdentityDeny
+	manager.current.identityResolver = fakeIdentityResolver{err: errors.New("boom")}
+
+	engine, err := policy.NewEngine([]config.PolicyConfig{{
+		Name: "allow-source-cidr",
+		Subjects: config.PolicySubjectsConfig{
+			CIDRs: []string{"10.0.0.0/24"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"GET"},
+				AllowedPaths:   []string{"/allowed"},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	manager.current.policyEngine = engine
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		SourceIP: "10.0.0.10",
+		FQDN:     "example.com",
+		Port:     80,
+		Protocol: "http",
+		Method:   http.MethodGet,
+		Path:     "/allowed",
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Identity == nil || !resp.UnknownIdentity {
+		t.Fatalf("identity = %#v, unknownIdentity = %v, want unknown identity record", resp.Identity, resp.UnknownIdentity)
+	}
+	if resp.Action != "allow" || resp.Reason != "policy_allowed" {
+		t.Fatalf("response = %#v, want allow policy_allowed", resp)
+	}
+	if resp.Decision == nil || resp.Decision.Policy != "allow-source-cidr" {
+		t.Fatalf("decision = %#v, want allow-source-cidr", resp.Decision)
 	}
 }
 
