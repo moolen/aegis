@@ -7,11 +7,15 @@ The `perf/` package runs reproducible `k6` baselines against Aegis in two enviro
 
 ## Required Tools
 
+- `go` (builds `bin/aegis` and the fixture helper on demand for local targets)
 - `k6`
+- `curl`
 - `docker`
 - `kind` (for Kind targets)
 - `kubectl` (for Kind targets)
 - `helm` (for Kind targets)
+- `openssl` (for MITM and in-cluster TLS fixture setup)
+- `base64` (for local MITM fixture trust material decoding)
 
 ## Scenarios
 
@@ -48,7 +52,7 @@ Use Kind targets when you need Helm-rendered deployment behavior, Kubernetes net
 - `make perf-kind-connect`
 - `make perf-kind-mitm`
 
-Local runs depend on `bin/aegis` and start fixture processes directly. Kind runs build/load an image, deploy the chart, and port-forward the in-cluster service before invoking the same logical `k6` scenario.
+Local runs build `bin/aegis` and the fixture helper on demand, then start fixture processes directly. Kind runs build/load an image, deploy the chart, and port-forward the in-cluster service before invoking the same logical `k6` scenario.
 
 ## Outputs
 
@@ -65,7 +69,7 @@ Typical artifact paths look like:
 - `perf/results/20260425T120000Z-http-local/summary.json`
 - `perf/results/20260425T120000Z-http-local/summary.txt`
 - `perf/results/20260425T120000Z-connect-mitm-local/meta.env`
-- `perf/results/20260425T120000Z-kind-http-kind/port-forward.log`
+- `perf/results/20260425T120000Z-http-kind/port-forward.log`
 
 Use `summary.json` for machine-readable metric review, `summary.txt` for the operator-facing `k6` summary, `metrics-before.txt` and `metrics-after.txt` to compare Aegis metrics snapshots, and `meta.env` to capture the run inputs that made the result reproducible.
 

@@ -226,7 +226,7 @@ start_port_forward() {
   wait_for_http_ok_pid "$pid" "${METRICS_URL}/healthz" 30
 }
 
-RESULT_DIR="$(new_result_dir "kind-${SCENARIO}" "kind")"
+RESULT_DIR="$(new_result_dir "${SCENARIO}" "kind")"
 PORT_FORWARD_LOG="${RESULT_DIR}/port-forward.log"
 MITM_CA_CERT="${RESULT_DIR}/mitm-ca.crt"
 MITM_CA_KEY="${RESULT_DIR}/mitm-ca.key"

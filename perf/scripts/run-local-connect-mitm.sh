@@ -8,7 +8,7 @@ require_tool curl
 require_tool k6
 require_tool base64
 resolve_go_bin
-require_executable "${REPO_ROOT}/bin/aegis"
+ensure_aegis_binary
 
 SCENARIO="connect-mitm"
 CONFIG_PATH="perf/config/local-connect-mitm.yaml"

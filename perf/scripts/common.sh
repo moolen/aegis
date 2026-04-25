@@ -143,6 +143,23 @@ build_fixture_helper() {
   )
 }
 
+build_aegis_binary() {
+  resolve_go_bin
+  mkdir -p "${REPO_ROOT}/bin"
+  (
+    cd "$REPO_ROOT"
+    "$GO_BIN" build -o ./bin/aegis ./cmd/aegis
+  )
+}
+
+ensure_aegis_binary() {
+  if [ -x "${REPO_ROOT}/bin/aegis" ]; then
+    return 0
+  fi
+  build_aegis_binary
+  require_executable "${REPO_ROOT}/bin/aegis"
+}
+
 wait_for_env_key() {
   local pid="$1"
   local env_file="$2"

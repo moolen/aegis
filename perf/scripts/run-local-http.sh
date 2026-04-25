@@ -7,7 +7,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 require_tool curl
 require_tool k6
 resolve_go_bin
-require_executable "${REPO_ROOT}/bin/aegis"
+ensure_aegis_binary
 
 SCENARIO="http"
 CONFIG_PATH="perf/config/local-http.yaml"
