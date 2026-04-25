@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,9 +234,12 @@ func TestLoadValidPolicyConfig(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-web
-    identitySelector:
-      matchLabels:
-        app: web
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels:
+          app: web
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -244,6 +248,11 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["/api/*"]
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -258,13 +267,21 @@ func TestLoadRejectsInvalidTLSMode(t *testing.T) {
   listen: ":3128"
 policies:
   - name: bad
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
         tls:
           mode: invalid
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -276,8 +293,11 @@ func TestLoadRejectsHTTPRulesForPassthrough(t *testing.T) {
   listen: ":3128"
 policies:
   - name: bad
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [443]
@@ -285,6 +305,11 @@ policies:
           mode: passthrough
         http:
           allowedMethods: ["GET"]
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -297,13 +322,21 @@ func TestLoadAcceptsPolicyLevelEnforcement(t *testing.T) {
 policies:
   - name: audited
     enforcement: audit
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [443]
         tls:
           mode: passthrough
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -318,21 +351,32 @@ func TestLoadRejectsDuplicatePolicyNames(t *testing.T) {
   listen: ":3128"
 policies:
   - name: duplicate
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
         tls:
           mode: mitm
   - name: duplicate
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.org"
         ports: [80]
         tls:
           mode: mitm
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -357,13 +401,21 @@ func TestLoadRejectsEmptyPolicyFQDN(t *testing.T) {
   listen: ":3128"
 policies:
   - name: bad
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "   "
         ports: [80]
         tls:
           mode: mitm
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -375,13 +427,21 @@ func TestLoadRejectsInvalidPolicyPort(t *testing.T) {
   listen: ":3128"
 policies:
   - name: bad
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [70000]
         tls:
           mode: mitm
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -393,8 +453,11 @@ func TestLoadRejectsEmptyHTTPMethodEntry(t *testing.T) {
   listen: ":3128"
 policies:
   - name: bad
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -402,6 +465,11 @@ policies:
           mode: mitm
         http:
           allowedMethods: ["GET", ""]
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -413,8 +481,11 @@ func TestLoadRejectsEmptyHTTPPathEntry(t *testing.T) {
   listen: ":3128"
 policies:
   - name: bad
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -422,6 +493,11 @@ policies:
           mode: mitm
         http:
           allowedPaths: ["/api/*", " "]
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -433,8 +509,11 @@ func TestLoadValidKubernetesDiscoveryConfig(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -443,7 +522,9 @@ policies:
 discovery:
   kubernetes:
     - name: cluster-a
-      kubeconfig: /tmp/kubeconfig
+      auth:
+        provider: kubeconfig
+        kubeconfig: /tmp/kubeconfig
       namespaces: ["default", "prod"]
       resyncPeriod: 30s
 `)))
@@ -470,8 +551,11 @@ func TestLoadRejectsKubernetesDiscoveryWithoutName(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -479,7 +563,9 @@ policies:
           mode: mitm
 discovery:
   kubernetes:
-    - kubeconfig: /tmp/kubeconfig
+    - auth:
+        provider: kubeconfig
+        kubeconfig: /tmp/kubeconfig
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
@@ -491,8 +577,11 @@ func TestLoadRejectsEmptyKubernetesNamespaceEntry(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -501,6 +590,8 @@ policies:
 discovery:
   kubernetes:
     - name: cluster-a
+      auth:
+        provider: inCluster
       namespaces: ["default", ""]
 `)))
 	if err == nil {
@@ -513,8 +604,11 @@ func TestLoadRejectsNonPositiveKubernetesResyncPeriod(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -523,6 +617,8 @@ policies:
 discovery:
   kubernetes:
     - name: cluster-a
+      auth:
+        provider: inCluster
       resyncPeriod: 0s
 `)))
 	if err == nil {
@@ -535,8 +631,9 @@ func TestLoadValidEC2DiscoveryConfig(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -580,8 +677,9 @@ func TestLoadRejectsEC2DiscoveryWithoutName(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -601,8 +699,9 @@ func TestLoadRejectsEC2DiscoveryWithoutRegion(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -622,8 +721,9 @@ func TestLoadRejectsEC2DiscoveryWithoutTagFilterKey(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -646,8 +746,9 @@ func TestLoadRejectsEmptyEC2TagFilterValue(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -671,8 +772,9 @@ func TestLoadRejectsNonPositiveEC2PollInterval(t *testing.T) {
   listen: ":3128"
 policies:
   - name: allow-example
-    identitySelector:
-      matchLabels: {}
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
     egress:
       - fqdn: "example.com"
         ports: [80]
@@ -686,6 +788,441 @@ discovery:
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadAcceptsKubernetesDiscoveryAuthProviders(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "kubeconfig",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: dev
+      auth:
+        provider: kubeconfig
+        kubeconfig: /tmp/dev.kubeconfig
+        context: dev
+policies:
+  - name: allow-dev
+    subjects:
+      kubernetes:
+        discoveryNames: ["dev"]
+        namespaces: ["default"]
+        matchLabels:
+          app: web
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "eks",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: eks
+        region: eu-central-1
+        clusterName: cluster-a
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["frontend"]
+        matchLabels:
+          app: frontend
+    egress:
+      - fqdn: "api.stripe.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "gke",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-b
+      auth:
+        provider: gke
+        project: prod-project
+        location: europe-west1
+        clusterName: cluster-b
+policies:
+  - name: allow-cluster-b
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-b"]
+        namespaces: ["frontend"]
+        matchLabels:
+          app: frontend
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "aks",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-c
+      auth:
+        provider: aks
+        subscriptionID: 00000000-0000-0000-0000-000000000000
+        resourceGroup: rg-platform
+        clusterName: cluster-c
+policies:
+  - name: allow-cluster-c
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-c"]
+        namespaces: ["frontend"]
+        matchLabels:
+          app: frontend
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "in-cluster",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: in-cluster
+      auth:
+        provider: inCluster
+policies:
+  - name: allow-in-cluster
+    subjects:
+      kubernetes:
+        discoveryNames: ["in-cluster"]
+        namespaces: ["default"]
+        matchLabels:
+          app: web
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET"]
+          allowedPaths: ["/*"]
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Load(bytes.NewReader([]byte(tt.yaml))); err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsLegacyIdentitySelectorPolicySchema(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: legacy
+    identitySelector:
+      matchLabels:
+        app: web
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "policies[0].identitySelector is no longer supported; use subjects instead") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownKubernetesDiscoveryReference(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
+policies:
+  - name: allow-cluster-b
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-b"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), `policies[0].subjects.kubernetes.discoveryNames[0] references unknown kubernetes discovery "cluster-b"`) {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownEC2DiscoveryReference(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  ec2:
+    - name: production-ec2
+      region: eu-central-1
+policies:
+  - name: allow-missing-ec2
+    subjects:
+      ec2:
+        discoveryNames: ["staging-ec2"]
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), `policies[0].subjects.ec2.discoveryNames[0] references unknown ec2 discovery "staging-ec2"`) {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsMissingKubernetesAuthProviderFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		message string
+	}{
+		{
+			name: "missing provider",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth: {}
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+			message: "discovery.kubernetes[0].auth.provider must be kubeconfig, inCluster, eks, gke, or aks",
+		},
+		{
+			name: "kubeconfig missing kubeconfig",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: kubeconfig
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+			message: "discovery.kubernetes[0].auth.kubeconfig is required for kubeconfig auth",
+		},
+		{
+			name: "eks missing fields",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: eks
+        region: eu-central-1
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+			message: "discovery.kubernetes[0].auth.region and clusterName are required for eks auth",
+		},
+		{
+			name: "gke missing fields",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: gke
+        project: prod-project
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+			message: "discovery.kubernetes[0].auth.project, location, and clusterName are required for gke auth",
+		},
+		{
+			name: "aks missing fields",
+			yaml: `proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: aks
+        subscriptionID: 00000000-0000-0000-0000-000000000000
+policies:
+  - name: allow-cluster-a
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+			message: "discovery.kubernetes[0].auth.subscriptionID, resourceGroup, and clusterName are required for aks auth",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(bytes.NewReader([]byte(tt.yaml)))
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("unexpected error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsEmptyPolicySubjects(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "empty subjects object",
+			yaml: `proxy:
+  listen: ":3128"
+policies:
+  - name: empty-subjects
+    subjects: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "empty kubernetes subject",
+			yaml: `proxy:
+  listen: ":3128"
+policies:
+  - name: empty-kubernetes
+    subjects:
+      kubernetes:
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+		{
+			name: "empty ec2 subject",
+			yaml: `proxy:
+  listen: ":3128"
+policies:
+  - name: empty-ec2
+    subjects:
+      ec2: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(bytes.NewReader([]byte(tt.yaml)))
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), "policies[0].subjects must reference at least one discovery provider") {
+				t.Fatalf("unexpected error = %v", err)
+			}
+		})
 	}
 }
 

@@ -57,26 +57,46 @@ config:
     rebindingProtection:
       allowedHostPatterns: []
       allowedCIDRs: []
-  policies:
-    - name: allow-example
-      # enforcement: audit
-      # bypass: true
-      identitySelector:
-        matchLabels: {}
-      egress:
-        - fqdn: "example.com"
-          ports: [80]
-          tls:
-            mode: mitm
-          http:
-            allowedMethods: ["GET"]
-            allowedPaths: ["/*"]
+  discovery:
+    kubernetes: []
+    # kubernetes:
+    #   - name: cluster-a
+    #     auth:
+    #       provider: inCluster
+    #     namespaces: ["default"]
+    #     resyncPeriod: 30s
+    ec2: []
+    # ec2:
+    #   - name: production-ec2
+    #     region: eu-central-1
+    #     tagFilters:
+    #       - key: "aegis-managed"
+    #         values: ["true"]
+    #     pollInterval: 30s
+  policies: []
+  # policies:
+  #   - name: allow-example
+  #     # enforcement: audit
+  #     # bypass: true
+  #     subjects:
+  #       kubernetes:
+  #         discoveryNames: ["cluster-a"]
+  #         namespaces: ["default"]
+  #         matchLabels: {}
+  #     egress:
+  #       - fqdn: "example.com"
+  #         ports: [80]
+  #         tls:
+  #           mode: mitm
+  #         http:
+  #           allowedMethods: ["GET"]
+  #           allowedPaths: ["/*"]
 
-# Bootstrap status: this chart now renders a runnable default policy config.
-# Plain HTTP requests are policy-enforced by default, Kubernetes and EC2
-# discovery can be wired at runtime, and CONNECT supports both SNI-validated
-# passthrough and CA-backed TLS MITM when config.proxy.ca is set and a CA
-# secret is mounted.
+# Bootstrap status: this chart renders a valid starter config with discovery
+# and policy bindings disabled by default. Uncomment a discovery provider and
+# a matching policy subject together to turn on identity-based enforcement.
+# CONNECT still supports both SNI-validated passthrough and CA-backed TLS MITM
+# when config.proxy.ca is set and a CA secret is mounted.
 # Set config.proxy.enforcement: audit to shadow policy decisions without
 # blocking traffic during migration. In audit mode, CONNECT stays transparent
 # passthrough, so inner HTTPS method/path rules are not actively inspected.
@@ -94,6 +114,7 @@ config:
 # set and reloads can distinguish rotated from companions_changed.
 # Set config.proxy.connectionLimits.maxConcurrentPerIdentity for a simple
 # per-identity abuse-control guardrail across HTTP requests and CONNECT tunnels.
-# The default empty identitySelector.matchLabels is a safe starter policy that
-# matches any discovered identity; tighten it once you know the workload labels
-# you want to authorize.
+# Policy subjects bind rules to named discovery providers. Use
+# config.policies[].subjects.kubernetes.discoveryNames or
+# config.policies[].subjects.ec2.discoveryNames to scope each rule, then
+# tighten Kubernetes namespaces and labels as needed.
