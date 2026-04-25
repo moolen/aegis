@@ -155,7 +155,7 @@ func (e *MITMEngine) CAStatus() MITMCAStatus {
 }
 
 func (e *MITMEngine) AddAdditionalCA(ca tls.Certificate) error {
-	_, fingerprint, err := parseMITMCA(ca)
+	caLeaf, fingerprint, err := parseMITMCA(ca)
 	if err != nil {
 		return err
 	}
@@ -166,6 +166,7 @@ func (e *MITMEngine) AddAdditionalCA(ca tls.Certificate) error {
 	e.companions = append(e.companions, mitmCARecord{
 		role:        mitmCACompanionRole,
 		fingerprint: fingerprint,
+		leaf:        caLeaf,
 	})
 	return nil
 }

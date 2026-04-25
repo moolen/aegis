@@ -206,8 +206,8 @@ func TestMITMEngineReportsIssuerAndCompanionFingerprints(t *testing.T) {
 		if companion.signer != nil {
 			t.Fatalf("companions[%d].signer = %#v, want nil signer material", i, companion.signer)
 		}
-		if companion.leaf != nil {
-			t.Fatalf("companions[%d].leaf = %#v, want nil parsed leaf", i, companion.leaf)
+		if companion.leaf == nil {
+			t.Fatalf("companions[%d].leaf = nil, want retained parsed leaf", i)
 		}
 	}
 
