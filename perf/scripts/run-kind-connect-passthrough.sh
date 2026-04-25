@@ -10,6 +10,7 @@ require_tool helm
 require_tool k6
 require_tool kind
 require_tool kubectl
+require_tool openssl
 
 SCENARIO="connect-passthrough"
 CLUSTER_NAME="${CLUSTER_NAME:-aegis-perf}"

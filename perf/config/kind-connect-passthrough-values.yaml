@@ -22,7 +22,6 @@ config:
         cidrs:
           - "127.0.0.0/8"
       egress:
-        - fqdn: "example.com"
         - fqdn: "echo-tls.aegis-perf.svc.cluster.local"
           ports: [443]
           tls:
