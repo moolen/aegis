@@ -169,6 +169,9 @@ func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 			discoveryNames: compileStringSet(cfg.EC2.DiscoveryNames),
 		}
 	}
+	if subjects.kubernetes == nil && subjects.ec2 == nil {
+		return Subjects{}, fmt.Errorf("policy subjects must not be empty")
+	}
 
 	return subjects, nil
 }

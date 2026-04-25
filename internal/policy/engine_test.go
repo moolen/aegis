@@ -181,6 +181,23 @@ func TestNewEngineRejectsEC2SubjectsWithoutDiscoveryNames(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsPoliciesWithoutAnySubjects(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name: "orphan-policy",
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want empty subjects validation error")
+	}
+	if !strings.Contains(err.Error(), "subjects") {
+		t.Fatalf("NewEngine() error = %q, want subjects validation error", err)
+	}
+}
+
 func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:     "frontend-egress",
@@ -611,6 +628,44 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 		80,
 		http.MethodGet,
 		"/",
+	)
+	if decision.Allowed {
+		t.Fatalf("decision.Allowed = true, want false")
+	}
+	if decision.Policy != "deny-first" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "deny-first")
+	}
+}
+
+func TestEvaluateConnectFirstMatchWins(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{
+		{
+			Name:     "deny-first",
+			Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "internal.example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			}},
+		},
+		{
+			Name:     "allow-second",
+			Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"default"}, map[string]string{"app": "web"}),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "default", map[string]string{"app": "web"}),
+		"example.com",
+		443,
 	)
 	if decision.Allowed {
 		t.Fatalf("decision.Allowed = true, want false")
