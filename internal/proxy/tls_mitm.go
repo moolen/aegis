@@ -24,8 +24,8 @@ const (
 )
 
 type MITMEngine struct {
-	issuer     MITMCARecord
-	companions []MITMCARecord
+	issuer     mitmCARecord
+	companions []mitmCARecord
 	logger     *slog.Logger
 	metrics    *metrics.Metrics
 	now        func() time.Time
@@ -34,10 +34,18 @@ type MITMEngine struct {
 	validFor   time.Duration
 }
 
-type MITMCARecord struct {
-	certificate tls.Certificate
-	leaf        *x509.Certificate
+type mitmCARole string
+
+const (
+	mitmCAIssuerRole    mitmCARole = "issuer"
+	mitmCACompanionRole mitmCARole = "companion"
+)
+
+type mitmCARecord struct {
+	role        mitmCARole
 	fingerprint string
+	leaf        *x509.Certificate
+	signer      *tls.Certificate
 }
 
 type MITMCAStatus struct {
@@ -70,10 +78,11 @@ func NewMITMEngine(ca tls.Certificate, logger *slog.Logger) (*MITMEngine, error)
 	}
 
 	return &MITMEngine{
-		issuer: MITMCARecord{
-			certificate: ca,
-			leaf:        caLeaf,
+		issuer: mitmCARecord{
+			role:        mitmCAIssuerRole,
 			fingerprint: fingerprint,
+			leaf:        caLeaf,
+			signer:      &ca,
 		},
 		logger:   logger,
 		now:      time.Now,
@@ -146,7 +155,7 @@ func (e *MITMEngine) CAStatus() MITMCAStatus {
 }
 
 func (e *MITMEngine) AddAdditionalCA(ca tls.Certificate) error {
-	caLeaf, fingerprint, err := parseMITMCA(ca)
+	_, fingerprint, err := parseMITMCA(ca)
 	if err != nil {
 		return err
 	}
@@ -154,9 +163,8 @@ func (e *MITMEngine) AddAdditionalCA(ca tls.Certificate) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.companions = append(e.companions, MITMCARecord{
-		certificate: ca,
-		leaf:        caLeaf,
+	e.companions = append(e.companions, mitmCARecord{
+		role:        mitmCACompanionRole,
 		fingerprint: fingerprint,
 	})
 	return nil
@@ -210,7 +218,7 @@ func (e *MITMEngine) generateCertificate(serverName string, now time.Time) (*tls
 		AuthorityKeyId:        e.issuer.leaf.SubjectKeyId,
 	}
 
-	der, err := x509.CreateCertificate(rand.Reader, template, e.issuer.leaf, leafKey.Public(), e.issuer.certificate.PrivateKey)
+	der, err := x509.CreateCertificate(rand.Reader, template, e.issuer.leaf, leafKey.Public(), e.issuer.signer.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("sign mitm certificate for %q: %w", serverName, err)
 	}

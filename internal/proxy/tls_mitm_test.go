@@ -160,6 +160,12 @@ func TestMITMEngineAlwaysIssuesWithPrimaryCA(t *testing.T) {
 	if cert.Leaf == nil {
 		t.Fatal("expected leaf certificate to be parsed")
 	}
+	if got, want := engine.issuer.role, mitmCAIssuerRole; got != want {
+		t.Fatalf("issuer role = %q, want %q", got, want)
+	}
+	if engine.issuer.signer == nil {
+		t.Fatal("expected issuer signer material to be retained")
+	}
 	primaryLeaf, _, err := parseMITMCA(primary.certificate)
 	if err != nil {
 		t.Fatalf("parseMITMCA(primary) error = %v", err)
@@ -189,6 +195,20 @@ func TestMITMEngineReportsIssuerAndCompanionFingerprints(t *testing.T) {
 	}
 	if err := engine.AddAdditionalCA(companionB.certificate); err != nil {
 		t.Fatalf("AddAdditionalCA(companionB) error = %v", err)
+	}
+	if len(engine.companions) != 2 {
+		t.Fatalf("companions = %#v, want two runtime companion records", engine.companions)
+	}
+	for i, companion := range engine.companions {
+		if got, want := companion.role, mitmCACompanionRole; got != want {
+			t.Fatalf("companions[%d].role = %q, want %q", i, got, want)
+		}
+		if companion.signer != nil {
+			t.Fatalf("companions[%d].signer = %#v, want nil signer material", i, companion.signer)
+		}
+		if companion.leaf != nil {
+			t.Fatalf("companions[%d].leaf = %#v, want nil parsed leaf", i, companion.leaf)
+		}
 	}
 
 	_, primaryFingerprint, err := parseMITMCA(primary.certificate)
