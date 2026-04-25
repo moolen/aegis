@@ -567,5 +567,5 @@ func normalizeCIDRSubject(value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return prefix.String(), nil
+	return prefix.Masked().String(), nil
 }

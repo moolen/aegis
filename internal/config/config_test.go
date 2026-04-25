@@ -291,7 +291,7 @@ discovery:
 		t.Fatalf("Load() error = %v", err)
 	}
 	got := cfg.Policies[0].Subjects.CIDRs
-	want := []string{"10.20.0.1/16", "2001:db8::/64"}
+	want := []string{"10.20.0.0/16", "2001:db8::/64"}
 	if len(got) != len(want) {
 		t.Fatalf("subjects.cidrs length = %d, want %d", len(got), len(want))
 	}
