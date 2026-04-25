@@ -38,6 +38,7 @@ type Dependencies struct {
 	Resolver          Resolver
 	DestinationGuard  *DestinationGuard
 	DrainTracker      *DrainTracker
+	ConnectionLimiter *ConnectionLimiter
 	AuditMode         bool
 	IdentityResolver  IdentityResolver
 	PolicyEngine      PolicyEngine
@@ -107,8 +108,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	reqIdentity := identity.Unknown()
 	var decision *policy.Decision
 	audit := auditOutcome{}
-	if s.deps.PolicyEngine != nil {
+	if s.needsRequestIdentity() {
 		reqIdentity = s.resolveRequestIdentity(r)
+	}
+	if s.deps.PolicyEngine != nil {
 		decision = s.evaluatePolicy("http", func() *policy.Decision {
 			return s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
 		})
@@ -120,6 +123,14 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	releaseConnectionLimit, limitErr := s.acquireIdentityConnection("http", reqIdentity)
+	if limitErr != nil {
+		s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "connection_limit_exceeded")
+		s.logConnectionLimitExceeded("http", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), limitErr)
+		s.writeError(w, http.StatusTooManyRequests, "identity concurrent connection limit exceeded", "limits")
+		return
+	}
+	defer releaseConnectionLimit()
 
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
@@ -182,8 +193,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	reqIdentity := identity.Unknown()
 	var decision *policy.Decision
 	audit := auditOutcome{}
-	if s.deps.PolicyEngine != nil {
+	if s.needsRequestIdentity() {
 		reqIdentity = s.resolveRequestIdentity(r)
+	}
+	if s.deps.PolicyEngine != nil {
 		decision = s.evaluatePolicy("connect", func() *policy.Decision {
 			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
 		})
@@ -210,6 +223,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			audit.EffectiveTLSMode = "passthrough"
 		}
 	}
+	releaseConnectionLimit, limitErr := s.acquireIdentityConnection("connect", reqIdentity)
+	if limitErr != nil {
+		s.recordConnectResult(mode, "connection_limit_exceeded")
+		s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "connection_limit_exceeded")
+		s.logConnectionLimitExceeded("connect", reqIdentity, host, port, decision, http.MethodConnect, "", limitErr)
+		s.writeError(w, http.StatusTooManyRequests, "identity concurrent connection limit exceeded", "limits")
+		return
+	}
+	defer releaseConnectionLimit()
 
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
@@ -580,6 +602,31 @@ func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
 	return resolvedIdentity
 }
 
+func (s *Server) needsRequestIdentity() bool {
+	return s.deps.PolicyEngine != nil || (s.deps.ConnectionLimiter != nil && s.deps.ConnectionLimiter.Enabled())
+}
+
+func (s *Server) acquireIdentityConnection(protocol string, reqIdentity *identity.Identity) (func(), *ErrConnectionLimitExceeded) {
+	if s.deps.ConnectionLimiter == nil {
+		return func() {}, nil
+	}
+
+	release, err := s.deps.ConnectionLimiter.Acquire(reqIdentity, protocol)
+	if err == nil {
+		return release, nil
+	}
+
+	var limitErr *ErrConnectionLimitExceeded
+	if errors.As(err, &limitErr) {
+		return nil, limitErr
+	}
+
+	s.deps.Logger.Error("identity connection limiter failed", "protocol", protocol, "identity_name", normalizeIdentityName(reqIdentity), "error", err)
+	return nil, &ErrConnectionLimitExceeded{
+		Identity: normalizeIdentityName(reqIdentity),
+	}
+}
+
 func requestPolicyPath(r *http.Request) string {
 	if r.URL == nil {
 		return "/"
@@ -772,6 +819,30 @@ func (s *Server) logRequestDecision(level slog.Level, protocol string, action st
 		)
 	}
 	s.deps.Logger.Log(context.Background(), level, "request decision", fields...)
+}
+
+func (s *Server) logConnectionLimitExceeded(protocol string, reqIdentity *identity.Identity, host string, port int, decision *policy.Decision, method string, path string, limitErr *ErrConnectionLimitExceeded) {
+	fields := []any{
+		"protocol", protocol,
+		"action", "deny",
+		"reason", "connection_limit_exceeded",
+		"host", host,
+		"port", port,
+		"policy", normalizePolicyName(decisionPolicyName(decision)),
+		"identity_name", normalizeIdentityName(reqIdentity),
+		"active_connections", limitErr.Active,
+		"connection_limit", limitErr.Limit,
+	}
+	if method != "" {
+		fields = append(fields, "method", method)
+	}
+	if path != "" {
+		fields = append(fields, "path", path)
+	}
+	if decision != nil && decision.TLSMode != "" {
+		fields = append(fields, "tls_mode", decision.TLSMode)
+	}
+	s.deps.Logger.Log(context.Background(), slog.LevelWarn, "request decision", fields...)
 }
 
 func decisionPolicyName(decision *policy.Decision) string {

@@ -185,6 +185,112 @@ func TestProxyAllowsHTTPRequestsWhenPolicyMatches(t *testing.T) {
 	}
 }
 
+func TestProxyConnectionLimiterRejectsSecondConcurrentHTTPRequest(t *testing.T) {
+	upstreamStarted := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamStarted <- struct{}{}
+		<-releaseUpstream
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	connectionLimiter := NewConnectionLimiter(slog.New(slog.NewTextHandler(io.Discard, nil)), m)
+	connectionLimiter.UpdateLimit(1)
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		ConnectionLimiter: connectionLimiter,
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/allowed"},
+				},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	firstDone := make(chan *http.Response, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		resp, reqErr := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/allowed", hostPortSuffix(upstreamURL.Host)), nil)
+		if reqErr != nil {
+			firstErr <- reqErr
+			return
+		}
+		firstDone <- resp
+	}()
+
+	select {
+	case <-upstreamStarted:
+	case err := <-firstErr:
+		t.Fatalf("first proxiedRequest() error = %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first request to reach upstream")
+	}
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/allowed", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("second proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
+	}
+
+	close(releaseUpstream)
+
+	select {
+	case resp := <-firstDone:
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("first status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+		}
+	case err := <-firstErr:
+		t.Fatalf("first proxiedRequest() error = %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first response")
+	}
+
+	if got := counterValue(t, reg, "aegis_identity_connection_limit_rejections_total", map[string]string{"protocol": "http"}); got != 1 {
+		t.Fatalf("http limit rejection metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "deny",
+		"policy":   "allow-web",
+		"reason":   "connection_limit_exceeded",
+	}); got != 1 {
+		t.Fatalf("deny decision metric = %v, want 1", got)
+	}
+	if got := gaugeValue(t, reg, "aegis_identity_connections_active", map[string]string{"protocol": "http"}); got != 0 {
+		t.Fatalf("http active gauge = %v, want 0", got)
+	}
+}
+
 func TestProxyRecordsHTTPDecisionAndPolicyDurationMetrics(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -1029,6 +1135,104 @@ func TestProxyConnectDeniesBeforeDNSLookup(t *testing.T) {
 	}
 	if dnsCalls != 0 {
 		t.Fatalf("dnsCalls = %d, want 0", dnsCalls)
+	}
+}
+
+func TestProxyConnectionLimiterRejectsSecondConcurrentConnectTunnel(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamAccepted := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
+	go func() {
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		upstreamAccepted <- struct{}{}
+		<-releaseUpstream
+	}()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	connectionLimiter := NewConnectionLimiter(slog.New(slog.NewTextHandler(io.Discard, nil)), m)
+	connectionLimiter.UpdateLimit(1)
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		ConnectionLimiter: connectionLimiter,
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-connect",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	target := fmt.Sprintf("tunnel.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:"))
+	conn, reader := mustConnectProxy(t, proxyServer.URL, target)
+	defer conn.Close()
+	readConnectEstablished(t, reader)
+
+	select {
+	case <-upstreamAccepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first tunnel to reach upstream")
+	}
+
+	secondConn, err := net.Dial("tcp", strings.TrimPrefix(proxyServer.URL, "http://"))
+	if err != nil {
+		t.Fatalf("Dial() second error = %v", err)
+	}
+	defer secondConn.Close()
+	if _, err := fmt.Fprintf(secondConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		t.Fatalf("Fprintf() second error = %v", err)
+	}
+
+	secondResp, err := http.ReadResponse(bufio.NewReader(secondConn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("ReadResponse() second error = %v", err)
+	}
+	defer secondResp.Body.Close()
+	if secondResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second CONNECT status = %d, want %d", secondResp.StatusCode, http.StatusTooManyRequests)
+	}
+
+	close(releaseUpstream)
+
+	if got := counterValue(t, reg, "aegis_identity_connection_limit_rejections_total", map[string]string{"protocol": "connect"}); got != 1 {
+		t.Fatalf("connect limit rejection metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_connect_tunnels_total", map[string]string{
+		"mode":   "passthrough",
+		"result": "connection_limit_exceeded",
+	}); got != 1 {
+		t.Fatalf("connect result metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "connect",
+		"action":   "deny",
+		"policy":   "allow-connect",
+		"reason":   "connection_limit_exceeded",
+	}); got != 1 {
+		t.Fatalf("connect deny decision metric = %v, want 1", got)
 	}
 }
 

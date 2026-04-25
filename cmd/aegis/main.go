@@ -153,10 +153,12 @@ func shutdownServer(logger *slog.Logger, name string, srv *http.Server, ctx cont
 func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, *http.Server, *appmetrics.Metrics, error) {
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
-	deps, err := buildProxyDependencies(ctx, cfg, logger, m, proxy.NewDrainTracker(logger, m))
+	connectionLimiter := proxy.NewConnectionLimiter(logger, m)
+	deps, err := buildProxyDependencies(ctx, cfg, logger, m, proxy.NewDrainTracker(logger, m), connectionLimiter)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	connectionLimiter.UpdateLimit(cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
 	proxyHandler := newProxyServer(deps)
 	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
 
@@ -164,7 +166,7 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	return proxySrv, metricsSrv, m, nil
 }
 
-func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics, drainTracker *proxy.DrainTracker) (proxy.Dependencies, error) {
+func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics, drainTracker *proxy.DrainTracker, connectionLimiter *proxy.ConnectionLimiter) (proxy.Dependencies, error) {
 	resolver := dns.NewResolver(dns.Config{
 		CacheTTL: cfg.DNS.CacheTTL,
 		Timeout:  cfg.DNS.Timeout,
@@ -196,15 +198,16 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 	}
 
 	return proxy.Dependencies{
-		Resolver:         resolver,
-		DestinationGuard: destinationGuard,
-		DrainTracker:     drainTracker,
-		AuditMode:        config.NormalizeEnforcementMode(cfg.Proxy.Enforcement) == config.EnforcementAudit,
-		IdentityResolver: identityResolver,
-		PolicyEngine:     engine,
-		MITM:             mitmEngine,
-		Metrics:          m,
-		Logger:           logger,
+		Resolver:          resolver,
+		DestinationGuard:  destinationGuard,
+		DrainTracker:      drainTracker,
+		ConnectionLimiter: connectionLimiter,
+		AuditMode:         config.NormalizeEnforcementMode(cfg.Proxy.Enforcement) == config.EnforcementAudit,
+		IdentityResolver:  identityResolver,
+		PolicyEngine:      engine,
+		MITM:              mitmEngine,
+		Metrics:           m,
+		Logger:            logger,
 	}, nil
 }
 

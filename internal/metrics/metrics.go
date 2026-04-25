@@ -3,33 +3,36 @@ package metrics
 import "github.com/prometheus/client_golang/prometheus"
 
 type Metrics struct {
-	RequestsTotal                  *prometheus.CounterVec
-	RequestDecisionsTotal          *prometheus.CounterVec
-	AuditDecisionsTotal            *prometheus.CounterVec
-	ErrorsTotal                    *prometheus.CounterVec
-	RequestDuration                *prometheus.HistogramVec
-	PolicyEvaluationDuration       *prometheus.HistogramVec
-	DNSResolutionsTotal            *prometheus.CounterVec
-	DNSDuration                    prometheus.Histogram
-	DiscoveryProviderStartsTotal   *prometheus.CounterVec
-	DiscoveryProviderFailuresTotal *prometheus.CounterVec
-	DiscoveryProvidersActive       prometheus.Gauge
-	IdentityMapEntries             *prometheus.GaugeVec
-	IdentityResolutionsTotal       *prometheus.CounterVec
-	IdentityOverlapsTotal          *prometheus.CounterVec
-	ProxyProtocolConnectionsTotal  *prometheus.CounterVec
-	ConfigReloadsTotal             *prometheus.CounterVec
-	ConnectTunnelsTotal            *prometheus.CounterVec
-	ConnectTunnelsActive           *prometheus.GaugeVec
-	MITMCertificatesTotal          *prometheus.CounterVec
-	MITMCACyclesTotal              *prometheus.CounterVec
-	MITMCertificateCacheEntries    prometheus.Gauge
-	MITMCertificateCacheEvictions  *prometheus.CounterVec
-	ShutdownsTotal                 *prometheus.CounterVec
-	ShutdownDuration               prometheus.Histogram
-	ShutdownForcedTunnelCloses     *prometheus.CounterVec
-	UpstreamTLSErrorsTotal         *prometheus.CounterVec
-	TLSSNIMissingTotal             prometheus.Counter
+	RequestsTotal                          *prometheus.CounterVec
+	RequestDecisionsTotal                  *prometheus.CounterVec
+	AuditDecisionsTotal                    *prometheus.CounterVec
+	ErrorsTotal                            *prometheus.CounterVec
+	RequestDuration                        *prometheus.HistogramVec
+	PolicyEvaluationDuration               *prometheus.HistogramVec
+	DNSResolutionsTotal                    *prometheus.CounterVec
+	DNSDuration                            prometheus.Histogram
+	DiscoveryProviderStartsTotal           *prometheus.CounterVec
+	DiscoveryProviderFailuresTotal         *prometheus.CounterVec
+	DiscoveryProvidersActive               prometheus.Gauge
+	IdentityMapEntries                     *prometheus.GaugeVec
+	IdentityResolutionsTotal               *prometheus.CounterVec
+	IdentityOverlapsTotal                  *prometheus.CounterVec
+	IdentityConnectionLimit                prometheus.Gauge
+	IdentityConnectionsActive              *prometheus.GaugeVec
+	IdentityConnectionLimitRejectionsTotal *prometheus.CounterVec
+	ProxyProtocolConnectionsTotal          *prometheus.CounterVec
+	ConfigReloadsTotal                     *prometheus.CounterVec
+	ConnectTunnelsTotal                    *prometheus.CounterVec
+	ConnectTunnelsActive                   *prometheus.GaugeVec
+	MITMCertificatesTotal                  *prometheus.CounterVec
+	MITMCACyclesTotal                      *prometheus.CounterVec
+	MITMCertificateCacheEntries            prometheus.Gauge
+	MITMCertificateCacheEvictions          *prometheus.CounterVec
+	ShutdownsTotal                         *prometheus.CounterVec
+	ShutdownDuration                       prometheus.Histogram
+	ShutdownForcedTunnelCloses             *prometheus.CounterVec
+	UpstreamTLSErrorsTotal                 *prometheus.CounterVec
+	TLSSNIMissingTotal                     prometheus.Counter
 }
 
 func New(reg prometheus.Registerer) *Metrics {
@@ -132,6 +135,26 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Total number of overlapping identity matches.",
 			},
 			[]string{"winner_provider", "winner_kind", "shadow_provider", "shadow_kind"},
+		),
+		IdentityConnectionLimit: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "aegis_identity_connection_limit",
+				Help: "Configured maximum concurrent upstream connections per identity. Zero disables the limit.",
+			},
+		),
+		IdentityConnectionsActive: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_identity_connections_active",
+				Help: "Current number of active upstream connections counted against identity concurrency limits.",
+			},
+			[]string{"protocol"},
+		),
+		IdentityConnectionLimitRejectionsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_identity_connection_limit_rejections_total",
+				Help: "Total number of requests or tunnels rejected by the identity concurrent connection limit.",
+			},
+			[]string{"protocol"},
 		),
 		ProxyProtocolConnectionsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -239,6 +262,9 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.IdentityMapEntries,
 		m.IdentityResolutionsTotal,
 		m.IdentityOverlapsTotal,
+		m.IdentityConnectionLimit,
+		m.IdentityConnectionsActive,
+		m.IdentityConnectionLimitRejectionsTotal,
 		m.ProxyProtocolConnectionsTotal,
 		m.ConfigReloadsTotal,
 		m.ConnectTunnelsTotal,

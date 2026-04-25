@@ -27,6 +27,8 @@ config:
   proxy:
     listen: ":3128"
     # enforcement: audit
+    # connectionLimits:
+    #   maxConcurrentPerIdentity: 100
     # proxyProtocol:
     #   enabled: true
     #   headerTimeout: 2s
@@ -68,6 +70,8 @@ config:
 # passthrough, so inner HTTPS method/path rules are not actively inspected.
 # Set config.policies[].bypass: true for a narrower per-policy shadow mode with
 # the same transparent CONNECT behavior.
+# Set config.proxy.connectionLimits.maxConcurrentPerIdentity for a simple
+# per-identity abuse-control guardrail across HTTP requests and CONNECT tunnels.
 # The default empty identitySelector.matchLabels is a safe starter policy that
 # matches any discovered identity; tighten it once you know the workload labels
 # you want to authorize.

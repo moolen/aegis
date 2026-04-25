@@ -38,6 +38,7 @@ type runtimeManager struct {
 	configPath string
 	handler    *reloadableProxyHandler
 	drain      *proxy.DrainTracker
+	limiter    *proxy.ConnectionLimiter
 
 	mu      sync.RWMutex
 	current runtimeGeneration
@@ -50,6 +51,9 @@ type runtimeGeneration struct {
 }
 
 func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler, drain *proxy.DrainTracker) *runtimeManager {
+	if drain == nil {
+		drain = proxy.NewDrainTracker(logger, metrics)
+	}
 	return &runtimeManager{
 		rootCtx:    rootCtx,
 		logger:     logger,
@@ -57,6 +61,7 @@ func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *ap
 		configPath: configPath,
 		handler:    handler,
 		drain:      drain,
+		limiter:    proxy.NewConnectionLimiter(logger, metrics),
 	}
 }
 
@@ -105,11 +110,12 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	}
 
 	generationCtx, cancel := context.WithCancel(m.rootCtx)
-	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics, m.drain)
+	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics, m.drain, m.limiter)
 	if err != nil {
 		cancel()
 		return err
 	}
+	m.limiter.UpdateLimit(cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
 
 	nextHandler := newProxyServer(deps).Handler()
 	m.handler.Swap(nextHandler)

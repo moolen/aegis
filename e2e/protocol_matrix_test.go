@@ -243,6 +243,58 @@ func TestCONNECTBypassAllowsDeniedTargets(t *testing.T) {
 	}
 }
 
+func TestCONNECTConnectionLimitRejectsSecondConcurrentTunnel(t *testing.T) {
+	const targetHost = "limit.internal"
+
+	upstream := startDiscardTCPServer(t)
+	dnsServer := startStaticDNSServer(t, map[string]net.IP{targetHost: net.ParseIP("127.0.0.1")})
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configPath := filepath.Join(t.TempDir(), "aegis.yaml")
+	writeConfig(t, configPath, proxyConfigYAML(proxyConfigSpec{
+		ProxyAddr:                proxyAddr,
+		MetricsAddr:              metricsAddr,
+		DNSServers:               []string{dnsServer},
+		AllowedHostPatterns:      []string{"*.internal"},
+		MaxConcurrentPerIdentity: 1,
+		PolicyName:               "allow-connect",
+		PolicyFQDN:               targetHost,
+		PolicyPort:               mustPort(t, upstream.Addr().String()),
+		TLSMode:                  "passthrough",
+	}))
+
+	startAegis(t, configPath)
+
+	target := fmt.Sprintf("%s:%d", targetHost, mustPort(t, upstream.Addr().String()))
+	conn, _, resp := openConnectTunnel(t, proxyAddr, target)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first CONNECT status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	resp.Body.Close()
+	defer conn.Close()
+
+	secondConn, _, secondResp := openConnectTunnel(t, proxyAddr, target)
+	secondConn.Close()
+	defer secondResp.Body.Close()
+	if secondResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second CONNECT status = %d, want %d", secondResp.StatusCode, http.StatusTooManyRequests)
+	}
+
+	metricsBody := fetchMetrics(t, "http://"+metricsAddr)
+	if got := metricValue(t, metricsBody, "aegis_identity_connection_limit_rejections_total", map[string]string{"protocol": "connect"}); got != 1 {
+		t.Fatalf("connect limit rejection metric = %v, want 1", got)
+	}
+	if got := metricValue(t, metricsBody, "aegis_request_decisions_total", map[string]string{
+		"protocol": "connect",
+		"action":   "deny",
+		"policy":   "allow-connect",
+		"reason":   "connection_limit_exceeded",
+	}); got != 1 {
+		t.Fatalf("connect deny decision metric = %v, want 1", got)
+	}
+}
+
 func TestTLSNoSNIBlocked(t *testing.T) {
 	const host = "nosni.internal"
 
@@ -555,21 +607,22 @@ func TestMITMUpstreamCertValidated(t *testing.T) {
 }
 
 type proxyConfigSpec struct {
-	ProxyAddr           string
-	MetricsAddr         string
-	DNSServers          []string
-	AllowedHostPatterns []string
-	AllowedCIDRs        []string
-	Enforcement         string
-	PolicyBypass        bool
-	ProxyCACertFile     string
-	ProxyCAKeyFile      string
-	PolicyName          string
-	PolicyFQDN          string
-	PolicyPort          int
-	TLSMode             string
-	AllowedMethods      []string
-	AllowedPaths        []string
+	ProxyAddr                string
+	MetricsAddr              string
+	DNSServers               []string
+	AllowedHostPatterns      []string
+	AllowedCIDRs             []string
+	Enforcement              string
+	PolicyBypass             bool
+	MaxConcurrentPerIdentity int
+	ProxyCACertFile          string
+	ProxyCAKeyFile           string
+	PolicyName               string
+	PolicyFQDN               string
+	PolicyPort               int
+	TLSMode                  string
+	AllowedMethods           []string
+	AllowedPaths             []string
 }
 
 func proxyConfigYAML(spec proxyConfigSpec) string {
@@ -577,6 +630,9 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 	fmt.Fprintf(&b, "proxy:\n  listen: %q\n", spec.ProxyAddr)
 	if spec.Enforcement != "" {
 		fmt.Fprintf(&b, "  enforcement: %s\n", spec.Enforcement)
+	}
+	if spec.MaxConcurrentPerIdentity > 0 {
+		fmt.Fprintf(&b, "  connectionLimits:\n    maxConcurrentPerIdentity: %d\n", spec.MaxConcurrentPerIdentity)
 	}
 	if spec.ProxyCACertFile != "" || spec.ProxyCAKeyFile != "" {
 		fmt.Fprintf(&b, "  ca:\n    certFile: %q\n    keyFile: %q\n", spec.ProxyCACertFile, spec.ProxyCAKeyFile)

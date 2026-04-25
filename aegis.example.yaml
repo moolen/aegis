@@ -1,6 +1,8 @@
 proxy:
   listen: ":3128"
   # enforcement: audit   # audit | enforce
+  # connectionLimits:
+  #   maxConcurrentPerIdentity: 100
   # Uncomment when Aegis sits behind an L4 load balancer that injects
   # Proxy Protocol v2 headers and you want identity resolution to use the
   # original client source IP instead of the balancer IP.

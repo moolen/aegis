@@ -26,6 +26,8 @@ Implemented in this bootstrap:
   would-deny metrics and logs while traffic keeps flowing.
 - Per-policy `bypass: true` shadowing so a matching policy can emit would-allow
   / would-deny signals without blocking traffic.
+- Optional per-identity concurrent connection limits across plain HTTP requests
+  and `CONNECT` tunnels.
 - Configurable graceful shutdown with explicit CONNECT tunnel draining and
   force-close accounting when the grace period expires.
 - Structured JSON logging with `slog`.
@@ -72,6 +74,9 @@ Current runtime behavior:
 - Shutdown uses `shutdown.gracePeriod` to stop accepting new requests, drain
   active CONNECT tunnels, and force-close any remaining hijacked tunnels when
   the grace period expires.
+- When `proxy.connectionLimits.maxConcurrentPerIdentity` is greater than zero,
+  Aegis limits each resolved identity across active HTTP requests and CONNECT
+  tunnels combined. Limit hits return `429 Too Many Requests`.
 
 ## Quick Start
 
@@ -101,6 +106,8 @@ By default, Aegis also blocks loopback, private, and link-local upstream
 addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
 `dns.rebindingProtection.allowedHostPatterns` or
 `dns.rebindingProtection.allowedCIDRs` for explicit internal destinations.
+Set `proxy.connectionLimits.maxConcurrentPerIdentity` to cap concurrent
+upstream usage per resolved identity during migration or steady-state rollout.
 Use `shutdown.gracePeriod` to control how long Aegis drains in-flight traffic
 before it force-closes remaining CONNECT tunnels during process shutdown.
 
@@ -135,7 +142,8 @@ It exercises the built `aegis` binary as a subprocess across reload-sensitive
 runtime behavior and the main HTTPS protocol matrix: passthrough allow/deny,
 no-SNI and SNI-mismatch blocking, MITM certificate generation, MITM inner HTTP
 policy denial, client trust failure, upstream TLS validation, and audit-mode
-plus per-policy-bypass allow-on-deny behavior for both HTTP and `CONNECT`. The
+plus per-policy-bypass allow-on-deny behavior for both HTTP and `CONNECT`, as
+well as concurrent-connection enforcement for both protocols. The
 heavier cluster-aware
 suite from the original design doc is split out into
 `make e2e-kind`, which creates a Kind cluster, loads a locally built Aegis
@@ -168,7 +176,8 @@ optional `proxyCA.existingSecret` mount for the CA files referenced by
 in-cluster Kubernetes discovery can watch pods when you enable
 `config.discovery.kubernetes`. Both `config.proxy.enforcement: audit` and
 per-policy `config.policies[].bypass: true` are supported for migration
-rollouts. The Fargate scaffold also exposes an
+rollouts, and `config.proxy.connectionLimits.maxConcurrentPerIdentity` can be
+used as a simple abuse-control guardrail. The Fargate scaffold also exposes an
 `enable_proxy_protocol_v2` switch on the NLB target group so source IP
 preservation can be paired with `config.proxy.proxyProtocol.enabled`.
 

@@ -222,6 +222,85 @@ func TestPolicyBypassAllowsDeniedHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPConnectionLimitRejectsSecondConcurrentRequest(t *testing.T) {
+	upstreamStarted := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamStarted <- struct{}{}
+		<-releaseUpstream
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "aegis.yaml")
+
+	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", policyConfigOptions{MaxConcurrentPerIdentity: 1}))
+	startAegis(t, configPath)
+
+	firstRespCh := make(chan *http.Response, 1)
+	firstErrCh := make(chan error, 1)
+	go func() {
+		resp, reqErr := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+		if reqErr != nil {
+			firstErrCh <- reqErr
+			return
+		}
+		firstRespCh <- resp
+	}()
+
+	select {
+	case <-upstreamStarted:
+	case err := <-firstErrCh:
+		t.Fatalf("first proxiedRequest() error = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first request to hit upstream")
+	}
+
+	secondResp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+	if err != nil {
+		t.Fatalf("second proxiedRequest() error = %v", err)
+	}
+	defer secondResp.Body.Close()
+	if secondResp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want %d", secondResp.StatusCode, http.StatusTooManyRequests)
+	}
+
+	close(releaseUpstream)
+
+	select {
+	case firstResp := <-firstRespCh:
+		defer firstResp.Body.Close()
+		if firstResp.StatusCode != http.StatusNoContent {
+			t.Fatalf("first status = %d, want %d", firstResp.StatusCode, http.StatusNoContent)
+		}
+	case err := <-firstErrCh:
+		t.Fatalf("first proxiedRequest() error = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first response")
+	}
+
+	metricsBody := fetchMetrics(t, "http://"+metricsAddr)
+	if got := metricValue(t, metricsBody, "aegis_identity_connection_limit_rejections_total", map[string]string{"protocol": "http"}); got != 1 {
+		t.Fatalf("http limit rejection metric = %v, want 1", got)
+	}
+	if got := metricValue(t, metricsBody, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "deny",
+		"policy":   "allow-http",
+		"reason":   "connection_limit_exceeded",
+	}); got != 1 {
+		t.Fatalf("deny decision metric = %v, want 1", got)
+	}
+}
+
 func TestMITMCARotationIsVisibleInMetrics(t *testing.T) {
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
@@ -430,14 +509,19 @@ func policyConfigYAMLWithEnforcement(proxyAddr string, metricsAddr string, host 
 }
 
 type policyConfigOptions struct {
-	Enforcement string
-	Bypass      bool
+	Enforcement              string
+	Bypass                   bool
+	MaxConcurrentPerIdentity int
 }
 
 func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host string, port int, allowedPath string, opts policyConfigOptions) string {
 	enforcementBlock := ""
 	if opts.Enforcement != "" {
 		enforcementBlock = "  enforcement: " + opts.Enforcement + "\n"
+	}
+	connectionLimitBlock := ""
+	if opts.MaxConcurrentPerIdentity > 0 {
+		connectionLimitBlock = fmt.Sprintf("  connectionLimits:\n    maxConcurrentPerIdentity: %d\n", opts.MaxConcurrentPerIdentity)
 	}
 	bypassBlock := ""
 	if opts.Bypass {
@@ -446,7 +530,7 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
 
 	return fmt.Sprintf(`proxy:
   listen: "%s"
-%smetrics:
+%s%smetrics:
   listen: "%s"
 dns:
   cache_ttl: 30s
@@ -466,7 +550,7 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["%s"]
-`, proxyAddr, enforcementBlock, metricsAddr, bypassBlock, host, port, allowedPath)
+`, proxyAddr, enforcementBlock, connectionLimitBlock, metricsAddr, bypassBlock, host, port, allowedPath)
 }
 
 func mitmConfigYAML(proxyAddr string, metricsAddr string, certFile string, keyFile string) string {

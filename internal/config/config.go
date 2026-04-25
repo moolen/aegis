@@ -30,10 +30,11 @@ type Config struct {
 }
 
 type ProxyConfig struct {
-	Enforcement   string              `yaml:"enforcement"`
-	Listen        string              `yaml:"listen"`
-	CA            CAConfig            `yaml:"ca"`
-	ProxyProtocol ProxyProtocolConfig `yaml:"proxyProtocol"`
+	Enforcement      string                 `yaml:"enforcement"`
+	Listen           string                 `yaml:"listen"`
+	CA               CAConfig               `yaml:"ca"`
+	ProxyProtocol    ProxyProtocolConfig    `yaml:"proxyProtocol"`
+	ConnectionLimits ConnectionLimitsConfig `yaml:"connectionLimits"`
 }
 
 type CAConfig struct {
@@ -44,6 +45,10 @@ type CAConfig struct {
 type ProxyProtocolConfig struct {
 	Enabled       bool           `yaml:"enabled"`
 	HeaderTimeout *time.Duration `yaml:"headerTimeout"`
+}
+
+type ConnectionLimitsConfig struct {
+	MaxConcurrentPerIdentity int `yaml:"maxConcurrentPerIdentity"`
 }
 
 type MetricsConfig struct {
@@ -170,6 +175,9 @@ func (c Config) Validate() error {
 	}
 	if c.Proxy.ProxyProtocol.HeaderTimeout != nil && *c.Proxy.ProxyProtocol.HeaderTimeout <= 0 {
 		return fmt.Errorf("proxy.proxyProtocol.headerTimeout must be greater than zero")
+	}
+	if c.Proxy.ConnectionLimits.MaxConcurrentPerIdentity < 0 {
+		return fmt.Errorf("proxy.connectionLimits.maxConcurrentPerIdentity must be greater than or equal to zero")
 	}
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")

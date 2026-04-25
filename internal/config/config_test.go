@@ -67,6 +67,31 @@ metrics:
 	}
 }
 
+func TestLoadRejectsNegativeMaxConcurrentConnectionsPerIdentity(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  connectionLimits:
+    maxConcurrentPerIdentity: -1
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadAcceptsMaxConcurrentConnectionsPerIdentity(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  connectionLimits:
+    maxConcurrentPerIdentity: 7
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity != 7 {
+		t.Fatalf("maxConcurrentPerIdentity = %d, want 7", cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
+	}
+}
+
 func TestLoadDefaultsProxyEnforcementToEnforce(t *testing.T) {
 	cfg, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"
