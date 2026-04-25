@@ -38,6 +38,30 @@ func TestLocalPerfConfigTemplatesExist(t *testing.T) {
 	}
 }
 
+func TestLocalPerfScriptsExist(t *testing.T) {
+	paths := []string{
+		"common.sh",
+		"run-local-http.sh",
+		"run-local-connect-passthrough.sh",
+		"run-local-connect-mitm.sh",
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("os.Stat(%q) error = %v", path, err)
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Fatalf("%q mode = %v, want executable bit set", path, info.Mode())
+			}
+		})
+	}
+}
+
 func TestHTTPFixtureServesConfiguredPath(t *testing.T) {
 	srv := newHTTPFixture("/allowed", http.StatusNoContent)
 	req := httptest.NewRequest(http.MethodGet, "http://fixture/allowed", nil)
