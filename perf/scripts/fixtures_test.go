@@ -62,6 +62,28 @@ func TestLocalPerfScriptsExist(t *testing.T) {
 	}
 }
 
+func TestKindPerfAssetsExist(t *testing.T) {
+	paths := []string{
+		"../config/kind-http-values.yaml",
+		"../config/kind-connect-passthrough-values.yaml",
+		"../config/kind-connect-mitm-values.yaml",
+		"run-kind-http.sh",
+		"run-kind-connect-passthrough.sh",
+		"run-kind-connect-mitm.sh",
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("os.Stat(%q) error = %v", path, err)
+			}
+		})
+	}
+}
+
 func TestHTTPFixtureServesConfiguredPath(t *testing.T) {
 	srv := newHTTPFixture("/allowed", http.StatusNoContent)
 	req := httptest.NewRequest(http.MethodGet, "http://fixture/allowed", nil)
