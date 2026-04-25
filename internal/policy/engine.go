@@ -159,7 +159,7 @@ func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 		subjects.kubernetes = &KubernetesSubject{
 			discoveryNames: discoveryNames,
 			namespaces:     namespaces,
-			matchLabels:    cloneStringMap(cfg.Kubernetes.MatchLabels),
+			matchLabels:    compileLabelSelector(cfg.Kubernetes.MatchLabels),
 		}
 	}
 	if cfg.EC2 != nil {
@@ -368,6 +368,28 @@ func cloneStringMap(src map[string]string) map[string]string {
 	}
 
 	return dst
+}
+
+func compileLabelSelector(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+
+	compiled := make(map[string]string, len(src))
+	for key, value := range src {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		compiled[key] = value
+	}
+
+	if len(compiled) == 0 {
+		return nil
+	}
+
+	return compiled
 }
 
 func compileStringSet(values []string) map[string]struct{} {

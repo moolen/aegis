@@ -333,6 +333,30 @@ func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedNamespaceBinding(t 
 	}
 }
 
+func TestEvaluateMatchesKubernetesSubjectWithWhitespacePaddedMatchLabels(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{" app ": " frontend "}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "frontend", map[string]string{"app": "frontend"}),
+		"api.stripe.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected whitespace-padded matchLabels to match runtime labels")
+	}
+}
+
 func TestEvaluateMatchesWhitespacePaddedFQDNRule(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:     "allow-web",
