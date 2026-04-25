@@ -385,22 +385,9 @@ func (m *runtimeManager) recordEnforcementStatus() {
 }
 
 func (m *runtimeManager) recordMITMLifecycle(previous *proxy.MITMEngine, next *proxy.MITMEngine, isReload bool) {
-	result := "disabled"
-	switch {
-	case previous == nil && next == nil:
+	result := classifyMITMLifecycle(previous, next, isReload)
+	if result == "" {
 		return
-	case previous == nil && next != nil:
-		if isReload {
-			result = "enabled"
-		} else {
-			result = "initial"
-		}
-	case previous != nil && next == nil:
-		result = "disabled"
-	case sameMITMCASet(previous, next):
-		result = "unchanged"
-	default:
-		result = "rotated"
 	}
 
 	if m.metrics != nil {
@@ -416,8 +403,28 @@ func (m *runtimeManager) recordMITMLifecycle(previous *proxy.MITMEngine, next *p
 		m.logger.Info("mitm ca disabled")
 	case "unchanged":
 		m.logger.Info("mitm ca reloaded without fingerprint change", "fingerprints", next.Fingerprints())
+	case "companions_changed":
+		previousStatus := previous.CAStatus()
+		nextStatus := next.CAStatus()
+		m.logger.Info(
+			"mitm ca companions changed",
+			"previous_issuer_fingerprint", previousStatus.IssuerFingerprint,
+			"issuer_fingerprint", nextStatus.IssuerFingerprint,
+			"previous_companion_fingerprints", previousStatus.CompanionFingerprints,
+			"companion_fingerprints", nextStatus.CompanionFingerprints,
+		)
 	case "rotated":
-		m.logger.Info("mitm ca rotated", "previous_fingerprints", previous.Fingerprints(), "fingerprints", next.Fingerprints())
+		previousStatus := previous.CAStatus()
+		nextStatus := next.CAStatus()
+		m.logger.Info(
+			"mitm ca rotated",
+			"previous_issuer_fingerprint", previousStatus.IssuerFingerprint,
+			"issuer_fingerprint", nextStatus.IssuerFingerprint,
+			"previous_companion_fingerprints", previousStatus.CompanionFingerprints,
+			"companion_fingerprints", nextStatus.CompanionFingerprints,
+			"previous_fingerprints", previousStatus.AllFingerprints,
+			"fingerprints", nextStatus.AllFingerprints,
+		)
 	}
 
 	if previous != nil {
@@ -533,13 +540,53 @@ func firstNonEmpty(values ...string) string {
 }
 
 func sameMITMCASet(left *proxy.MITMEngine, right *proxy.MITMEngine) bool {
-	leftFingerprints := left.Fingerprints()
-	rightFingerprints := right.Fingerprints()
-	if len(leftFingerprints) != len(rightFingerprints) {
+	return sameMITMCAStatus(left.CAStatus(), right.CAStatus())
+}
+
+func classifyMITMLifecycle(previous *proxy.MITMEngine, next *proxy.MITMEngine, isReload bool) string {
+	switch {
+	case previous == nil && next == nil:
+		return ""
+	case previous == nil && next != nil:
+		if isReload {
+			return "enabled"
+		}
+		return "initial"
+	case previous != nil && next == nil:
+		return "disabled"
+	case sameMITMCASet(previous, next):
+		return "unchanged"
+	case previous.CAStatus().IssuerFingerprint != next.CAStatus().IssuerFingerprint:
+		return "rotated"
+	default:
+		return "companions_changed"
+	}
+}
+
+func sameMITMCAStatus(left proxy.MITMCAStatus, right proxy.MITMCAStatus) bool {
+	if left.IssuerFingerprint != right.IssuerFingerprint {
 		return false
 	}
-	for i := range leftFingerprints {
-		if leftFingerprints[i] != rightFingerprints[i] {
+	return sameFingerprintSet(left.CompanionFingerprints, right.CompanionFingerprints)
+}
+
+func sameFingerprintSet(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	counts := make(map[string]int, len(left))
+	for _, fingerprint := range left {
+		counts[fingerprint]++
+	}
+	for _, fingerprint := range right {
+		counts[fingerprint]--
+		if counts[fingerprint] < 0 {
+			return false
+		}
+	}
+	for _, count := range counts {
+		if count != 0 {
 			return false
 		}
 	}

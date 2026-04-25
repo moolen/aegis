@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -597,6 +598,89 @@ func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
+	issuerCert, issuerKey := writeTestCAFiles(t, "Issuer CA")
+	companionACert, companionAKey := writeTestCAFiles(t, "Old Companion A")
+	companionBCert, companionBKey := writeTestCAFiles(t, "Old Companion B")
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithAdditionalCAs(
+		"policy-a",
+		":3128",
+		":9090",
+		issuerCert,
+		issuerKey,
+		[][2]string{{companionACert, companionAKey}},
+	))
+
+	reg := prometheus.NewRegistry()
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(reg), configPath, &reloadableProxyHandler{}, nil)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAMLWithAdditionalCAs(
+		"policy-b",
+		":3128",
+		":9090",
+		issuerCert,
+		issuerKey,
+		[][2]string{{companionBCert, companionBKey}},
+	))
+	if err := manager.ReloadFromFile(); err != nil {
+		t.Fatalf("ReloadFromFile() error = %v", err)
+	}
+
+	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "companions_changed"}); got != 1 {
+		t.Fatalf("companions_changed metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "rotated"}); got != 0 {
+		t.Fatalf("rotated metric = %v, want 0", got)
+	}
+}
+
+func TestRuntimeManagerReloadRejectsInvalidCompanionCA(t *testing.T) {
+	issuerCert, issuerKey := writeTestCAFiles(t, "Issuer CA")
+	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithCA("policy-a", ":3128", ":9090", issuerCert, issuerKey))
+
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()), configPath, &reloadableProxyHandler{}, nil)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	badKeyPath := filepath.Join(t.TempDir(), "broken-companion.key")
+	if err := os.WriteFile(badKeyPath, []byte("broken-key"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	writeRuntimeConfigAt(t, configPath, runtimeConfigYAMLWithAdditionalCAs(
+		"policy-b",
+		":3128",
+		":9090",
+		issuerCert,
+		issuerKey,
+		[][2]string{{issuerCert, badKeyPath}},
+	))
+
+	if err := manager.ReloadFromFile(); err == nil {
+		t.Fatal("expected ReloadFromFile() to fail for invalid companion CA material")
+	}
+	if status := manager.RuntimeStatus(); status.MITM == nil || len(status.MITM.CompanionFingerprints) != 0 {
+		t.Fatalf("RuntimeStatus().MITM = %#v, want unchanged previous generation", status.MITM)
+	}
+}
+
 func TestRuntimeManagerRuntimeStatusIncludesMITMCASet(t *testing.T) {
 	certA, keyA := writeTestCAFiles(t, "Primary CA")
 	certB, keyB := writeTestCAFiles(t, "Companion CA")
@@ -1117,7 +1201,10 @@ func (p fakeHandlerProvider) Handler() http.Handler {
 func counterValue(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
 	t.Helper()
 
-	metric := mustFindMetric(t, reg, name, labels)
+	metric := findMetric(t, reg, name, labels)
+	if metric == nil {
+		return 0
+	}
 	if metric.Counter == nil {
 		t.Fatalf("metric %q is not a counter", name)
 	}
@@ -1139,6 +1226,16 @@ func gaugeValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 func mustFindMetric(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) *dto.Metric {
 	t.Helper()
 
+	metric := findMetric(t, reg, name, labels)
+	if metric == nil {
+		t.Fatalf("metric %q with labels %#v not found", name, labels)
+	}
+	return metric
+}
+
+func findMetric(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) *dto.Metric {
+	t.Helper()
+
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather() error = %v", err)
@@ -1155,7 +1252,6 @@ func mustFindMetric(t *testing.T, reg *prometheus.Registry, name string, labels 
 		}
 	}
 
-	t.Fatalf("metric %q with labels %#v not found", name, labels)
 	return nil
 }
 
