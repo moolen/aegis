@@ -24,16 +24,26 @@ const (
 )
 
 type MITMEngine struct {
-	ca                     tls.Certificate
-	caLeaf                 *x509.Certificate
-	fingerprint            string
-	additionalFingerprints []string
-	logger                 *slog.Logger
-	metrics                *metrics.Metrics
-	now                    func() time.Time
-	mu                     sync.Mutex
-	cache                  map[string]cachedMITMCertificate
-	validFor               time.Duration
+	issuer     MITMCARecord
+	companions []MITMCARecord
+	logger     *slog.Logger
+	metrics    *metrics.Metrics
+	now        func() time.Time
+	mu         sync.Mutex
+	cache      map[string]cachedMITMCertificate
+	validFor   time.Duration
+}
+
+type MITMCARecord struct {
+	certificate tls.Certificate
+	leaf        *x509.Certificate
+	fingerprint string
+}
+
+type MITMCAStatus struct {
+	IssuerFingerprint     string
+	CompanionFingerprints []string
+	AllFingerprints       []string
 }
 
 type cachedMITMCertificate struct {
@@ -60,13 +70,15 @@ func NewMITMEngine(ca tls.Certificate, logger *slog.Logger) (*MITMEngine, error)
 	}
 
 	return &MITMEngine{
-		ca:          ca,
-		caLeaf:      caLeaf,
-		fingerprint: fingerprint,
-		logger:      logger,
-		now:         time.Now,
-		cache:       make(map[string]cachedMITMCertificate),
-		validFor:    defaultMITMCertificateTTL,
+		issuer: MITMCARecord{
+			certificate: ca,
+			leaf:        caLeaf,
+			fingerprint: fingerprint,
+		},
+		logger:   logger,
+		now:      time.Now,
+		cache:    make(map[string]cachedMITMCertificate),
+		validFor: defaultMITMCertificateTTL,
 	}, nil
 }
 
@@ -105,21 +117,48 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, str
 }
 
 func (e *MITMEngine) Fingerprint() string {
-	return e.fingerprint
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.issuer.fingerprint
 }
 
 func (e *MITMEngine) Fingerprints() []string {
-	fingerprints := []string{e.fingerprint}
-	fingerprints = append(fingerprints, e.additionalFingerprints...)
-	return fingerprints
+	return e.CAStatus().AllFingerprints
+}
+
+func (e *MITMEngine) CAStatus() MITMCAStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	status := MITMCAStatus{
+		IssuerFingerprint:     e.issuer.fingerprint,
+		CompanionFingerprints: make([]string, 0, len(e.companions)),
+		AllFingerprints:       make([]string, 0, len(e.companions)+1),
+	}
+	status.AllFingerprints = append(status.AllFingerprints, e.issuer.fingerprint)
+	for _, companion := range e.companions {
+		status.CompanionFingerprints = append(status.CompanionFingerprints, companion.fingerprint)
+		status.AllFingerprints = append(status.AllFingerprints, companion.fingerprint)
+	}
+
+	return status
 }
 
 func (e *MITMEngine) AddAdditionalCA(ca tls.Certificate) error {
-	_, fingerprint, err := parseMITMCA(ca)
+	caLeaf, fingerprint, err := parseMITMCA(ca)
 	if err != nil {
 		return err
 	}
-	e.additionalFingerprints = append(e.additionalFingerprints, fingerprint)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.companions = append(e.companions, MITMCARecord{
+		certificate: ca,
+		leaf:        caLeaf,
+		fingerprint: fingerprint,
+	})
 	return nil
 }
 
@@ -168,10 +207,10 @@ func (e *MITMEngine) generateCertificate(serverName string, now time.Time) (*tls
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		AuthorityKeyId:        e.caLeaf.SubjectKeyId,
+		AuthorityKeyId:        e.issuer.leaf.SubjectKeyId,
 	}
 
-	der, err := x509.CreateCertificate(rand.Reader, template, e.caLeaf, leafKey.Public(), e.ca.PrivateKey)
+	der, err := x509.CreateCertificate(rand.Reader, template, e.issuer.leaf, leafKey.Public(), e.issuer.certificate.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("sign mitm certificate for %q: %w", serverName, err)
 	}

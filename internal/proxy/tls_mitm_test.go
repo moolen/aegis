@@ -137,6 +137,81 @@ func TestMITMEngineSupportsAdditionalCAs(t *testing.T) {
 	}
 }
 
+func TestMITMEngineAlwaysIssuesWithPrimaryCA(t *testing.T) {
+	primary := newMITMTestCA(t)
+	companion := newMITMTestCA(t)
+
+	engine, err := NewMITMEngine(primary.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+	if err := engine.AddAdditionalCA(companion.certificate); err != nil {
+		t.Fatalf("AddAdditionalCA() error = %v", err)
+	}
+
+	cert, result, err := engine.CertificateForSNI("example.internal")
+	if err != nil {
+		t.Fatalf("CertificateForSNI() error = %v", err)
+	}
+	if result != "issued" {
+		t.Fatalf("result = %q, want %q", result, "issued")
+	}
+	if cert.Leaf == nil {
+		t.Fatal("expected leaf certificate to be parsed")
+	}
+	primaryLeaf, _, err := parseMITMCA(primary.certificate)
+	if err != nil {
+		t.Fatalf("parseMITMCA(primary) error = %v", err)
+	}
+	if got, want := string(cert.Leaf.AuthorityKeyId), string(primaryLeaf.SubjectKeyId); got != want {
+		t.Fatalf("AuthorityKeyId = %x, want %x", cert.Leaf.AuthorityKeyId, primaryLeaf.SubjectKeyId)
+	}
+}
+
+func TestMITMEngineReportsIssuerAndCompanionFingerprints(t *testing.T) {
+	primary := newMITMTestCA(t)
+	companionA := newMITMTestCA(t)
+	companionB := newMITMTestCA(t)
+
+	engine, err := NewMITMEngine(primary.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+	if err := engine.AddAdditionalCA(companionA.certificate); err != nil {
+		t.Fatalf("AddAdditionalCA(companionA) error = %v", err)
+	}
+	if err := engine.AddAdditionalCA(companionB.certificate); err != nil {
+		t.Fatalf("AddAdditionalCA(companionB) error = %v", err)
+	}
+
+	status := engine.CAStatus()
+	if status.IssuerFingerprint == "" {
+		t.Fatal("expected issuer fingerprint")
+	}
+	if len(status.CompanionFingerprints) != 2 {
+		t.Fatalf("CompanionFingerprints = %#v, want two companions", status.CompanionFingerprints)
+	}
+	if len(status.AllFingerprints) != 3 {
+		t.Fatalf("AllFingerprints = %#v, want issuer plus companions", status.AllFingerprints)
+	}
+	if status.AllFingerprints[0] != status.IssuerFingerprint {
+		t.Fatalf("AllFingerprints[0] = %q, want issuer %q", status.AllFingerprints[0], status.IssuerFingerprint)
+	}
+}
+
+func TestMITMEngineRejectsInvalidAdditionalCA(t *testing.T) {
+	primary := newMITMTestCA(t)
+	leafOnly := primary.issueServerCertificate(t, "not-a-ca.internal")
+
+	engine, err := NewMITMEngine(primary.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+	if err := engine.AddAdditionalCA(leafOnly); err == nil {
+		t.Fatal("expected AddAdditionalCA() to reject a non-CA certificate")
+	}
+}
+
 func TestProxyConnectMITMDeniesHTTPRequest(t *testing.T) {
 	ca := newMITMTestCA(t)
 	mitmEngine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
