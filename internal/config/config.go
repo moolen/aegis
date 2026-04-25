@@ -92,6 +92,7 @@ type EC2TagFilterConfig struct {
 
 type PolicyConfig struct {
 	Name             string                 `yaml:"name"`
+	Bypass           bool                   `yaml:"bypass"`
 	IdentitySelector IdentitySelectorConfig `yaml:"identitySelector"`
 	Egress           []EgressRuleConfig     `yaml:"egress"`
 }

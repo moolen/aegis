@@ -131,6 +131,45 @@ func TestEvaluateAllowsMatchingRule(t *testing.T) {
 	}
 }
 
+func TestEvaluateCarriesBypassPolicyState(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:   "break-glass",
+		Bypass: true,
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"POST"},
+				AllowedPaths:   []string{"/*"},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.Evaluate(
+		&identity.Identity{Labels: map[string]string{"app": "web"}},
+		"example.com",
+		80,
+		http.MethodGet,
+		"/blocked",
+	)
+	if decision.Allowed {
+		t.Fatalf("decision.Allowed = true, want false")
+	}
+	if !decision.Bypass {
+		t.Fatal("decision.Bypass = false, want true")
+	}
+	if decision.Policy != "break-glass" {
+		t.Fatalf("decision.Policy = %q, want %q", decision.Policy, "break-glass")
+	}
+}
+
 func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name: "allow-web",

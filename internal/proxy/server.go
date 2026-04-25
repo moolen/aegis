@@ -58,6 +58,7 @@ type auditOutcome struct {
 	WouldReason           string
 	EffectiveTLSMode      string
 	MITMInspectionSkipped bool
+	PolicyBypass          bool
 }
 
 func NewServer(deps Dependencies) *Server {
@@ -112,7 +113,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
 		})
 		audit = s.recordAuditPolicyDecision("http", reqIdentity, host, decision)
-		if !s.auditMode() && (decision == nil || !decision.Allowed) {
+		if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
 			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "policy_denied")
 			s.logRequestDecision(slog.LevelWarn, "http", "deny", "policy_denied", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), auditOutcome{})
 			s.writeError(w, http.StatusForbidden, "request denied by policy", "policy")
@@ -187,14 +188,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
 		})
 		audit = s.recordAuditPolicyDecision("connect", reqIdentity, host, decision)
-		if !s.auditMode() && (decision == nil || !decision.Allowed) {
+		if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
 			s.recordConnectResult(connectDecisionMode(decision), "policy_denied")
 			s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "policy_denied")
 			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "policy_denied", reqIdentity, host, port, decision, http.MethodConnect, "", auditOutcome{})
 			s.writeError(w, http.StatusForbidden, "connect target denied by policy", "policy")
 			return
 		}
-		if !s.auditMode() && decision.TLSMode == "mitm" && s.deps.MITM == nil {
+		if !s.shadowMode(decision) && decision.TLSMode == "mitm" && s.deps.MITM == nil {
 			s.recordConnectResult("mitm", "configuration_error")
 			s.writeError(w, http.StatusInternalServerError, "connect tls mitm requires proxy.ca cert and key configuration", "tls")
 			return
@@ -202,7 +203,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mode := connectResolvedMode(decision)
-	if s.auditMode() {
+	if s.shadowMode(decision) {
 		mode = "passthrough"
 		if decision != nil && decision.TLSMode == "mitm" {
 			audit.MITMInspectionSkipped = true
@@ -255,7 +256,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	releaseTunnel := s.trackConnectTunnel(mode, clientConn, upstreamConn)
 	defer releaseTunnel()
 
-	if s.auditMode() {
+	if s.shadowMode(decision) {
 		s.recordConnectResult(mode, "established")
 		reason := auditActualReason(audit)
 		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), reason)
@@ -352,7 +353,7 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 				return s.deps.PolicyEngine.Evaluate(reqIdentity, serverName, port, req.Method, requestPolicyPath(req))
 			})
 			audit := s.recordAuditPolicyDecision("mitm_http", reqIdentity, serverName, decision)
-			if !s.auditMode() && (decision == nil || !decision.Allowed) {
+			if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
 				s.recordPolicyError()
 				s.recordRequestDecision("mitm_http", "deny", decisionPolicyName(decision), "policy_denied")
 				s.logRequestDecision(slog.LevelWarn, "mitm_http", "deny", "policy_denied", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), auditOutcome{})
@@ -759,6 +760,9 @@ func (s *Server) logRequestDecision(level slog.Level, protocol string, action st
 		if audit.MITMInspectionSkipped {
 			fields = append(fields, "mitm_inspection_skipped", true)
 		}
+		if audit.PolicyBypass {
+			fields = append(fields, "policy_bypass", true)
+		}
 	}
 	if reqIdentity != nil {
 		fields = append(fields,
@@ -795,15 +799,20 @@ func (s *Server) auditMode() bool {
 	return s.deps.AuditMode
 }
 
+func (s *Server) shadowMode(decision *policy.Decision) bool {
+	return s.auditMode() || (decision != nil && decision.Bypass)
+}
+
 func (s *Server) recordAuditPolicyDecision(protocol string, reqIdentity *identity.Identity, fqdn string, decision *policy.Decision) auditOutcome {
-	if !s.auditMode() {
+	if !s.shadowMode(decision) {
 		return auditOutcome{}
 	}
 
 	outcome := auditOutcome{
-		Enabled:     true,
-		WouldAction: "would_allow",
-		WouldReason: "policy_allowed",
+		Enabled:      true,
+		WouldAction:  "would_allow",
+		WouldReason:  "policy_allowed",
+		PolicyBypass: decision != nil && decision.Bypass,
 	}
 	if decision == nil || !decision.Allowed {
 		outcome.WouldAction = "would_deny"

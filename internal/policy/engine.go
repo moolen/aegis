@@ -17,10 +17,12 @@ type Decision struct {
 	Policy  string
 	Rule    string
 	TLSMode string
+	Bypass  bool
 }
 
 type Policy struct {
 	name     string
+	bypass   bool
 	selector map[string]string
 	egress   []Rule
 }
@@ -56,7 +58,7 @@ func (e *Engine) Evaluate(id *identity.Identity, fqdn string, port int, method s
 			continue
 		}
 
-		decision := &Decision{Policy: policy.name}
+		decision := &Decision{Policy: policy.name, Bypass: policy.bypass}
 		for _, rule := range policy.egress {
 			if !rule.matches(fqdn, port, method, reqPath) {
 				continue
@@ -80,7 +82,7 @@ func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *
 			continue
 		}
 
-		decision := &Decision{Policy: policy.name}
+		decision := &Decision{Policy: policy.name, Bypass: policy.bypass}
 		for _, rule := range policy.egress {
 			if !rule.matchesConnect(fqdn, port) {
 				continue
@@ -101,6 +103,7 @@ func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *
 func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 	policy := Policy{
 		name:     cfg.Name,
+		bypass:   cfg.Bypass,
 		selector: cloneStringMap(cfg.IdentitySelector.MatchLabels),
 		egress:   make([]Rule, 0, len(cfg.Egress)),
 	}

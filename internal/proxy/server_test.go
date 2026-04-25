@@ -369,6 +369,82 @@ func TestProxyAuditModeAllowsDeniedHTTPRequestsAndRecordsWouldDeny(t *testing.T)
 	}
 }
 
+func TestProxyBypassPolicyAllowsDeniedHTTPRequestsAndRecordsWouldDeny(t *testing.T) {
+	var upstreamHits atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:   "break-glass",
+			Bypass: true,
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"POST"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/blocked", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "allow",
+		"policy":   "break-glass",
+		"reason":   "audit_policy_denied",
+	}); got != 1 {
+		t.Fatalf("actual decision metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_audit_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "would_deny",
+		"identity": "default/web",
+		"fqdn":     "example.com",
+		"policy":   "break-glass",
+		"reason":   "policy_denied",
+	}); got != 1 {
+		t.Fatalf("audit decision metric = %v, want 1", got)
+	}
+}
+
 func TestProxyBlocksHTTPRequestsToDirectLoopbackIP(t *testing.T) {
 	proxyServer := httptest.NewServer(NewServer(Dependencies{
 		DestinationGuard: mustDestinationGuard(t, nil, nil),
@@ -1036,6 +1112,98 @@ func TestProxyConnectAuditModeAllowsDeniedTargetsAndRecordsWouldDeny(t *testing.
 		"identity": "default/jobs",
 		"fqdn":     "tunnel.internal",
 		"policy":   "none",
+		"reason":   "policy_denied",
+	}); got != 1 {
+		t.Fatalf("audit decision metric = %v, want 1", got)
+	}
+
+	<-done
+}
+
+func TestProxyConnectBypassPolicyAllowsDeniedTargetsAndRecordsWouldDeny(t *testing.T) {
+	clientHello := mustClientHello(t, "denied.internal")
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, len(clientHello)+4)
+		_, _ = io.ReadFull(conn, buf)
+		_, _ = conn.Write([]byte("pong"))
+	}()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{
+				"denied.internal": {net.ParseIP("127.0.0.1")},
+			},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:   "break-glass",
+			Bypass: true,
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "jobs"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "allowed.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/allowed"},
+				},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, fmt.Sprintf("denied.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:")))
+	defer conn.Close()
+	readConnectEstablished(t, reader)
+
+	if _, err := conn.Write(append(clientHello, []byte("ping")...)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	reply := make([]byte, 4)
+	if _, err := io.ReadFull(reader, reply); err != nil {
+		t.Fatalf("ReadFull() error = %v", err)
+	}
+	if string(reply) != "pong" {
+		t.Fatalf("reply = %q, want %q", string(reply), "pong")
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "connect",
+		"action":   "allow",
+		"policy":   "break-glass",
+		"reason":   "audit_policy_denied",
+	}); got != 1 {
+		t.Fatalf("actual decision metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_audit_decisions_total", map[string]string{
+		"protocol": "connect",
+		"action":   "would_deny",
+		"identity": "default/jobs",
+		"fqdn":     "denied.internal",
+		"policy":   "break-glass",
 		"reason":   "policy_denied",
 	}); got != 1 {
 		t.Fatalf("audit decision metric = %v, want 1", got)

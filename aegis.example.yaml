@@ -42,6 +42,7 @@ discovery:
   #     pollInterval: 30s
 policies:
   - name: allow-example
+    # bypass: true   # shadow this policy without blocking matching traffic
     identitySelector:
       matchLabels: {}
     egress:

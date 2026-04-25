@@ -46,6 +46,7 @@ config:
       allowedCIDRs: []
   policies:
     - name: allow-example
+      # bypass: true
       identitySelector:
         matchLabels: {}
       egress:
@@ -65,6 +66,8 @@ config:
 # Set config.proxy.enforcement: audit to shadow policy decisions without
 # blocking traffic during migration. In audit mode, CONNECT stays transparent
 # passthrough, so inner HTTPS method/path rules are not actively inspected.
+# Set config.policies[].bypass: true for a narrower per-policy shadow mode with
+# the same transparent CONNECT behavior.
 # The default empty identitySelector.matchLabels is a safe starter policy that
 # matches any discovered identity; tighten it once you know the workload labels
 # you want to authorize.
