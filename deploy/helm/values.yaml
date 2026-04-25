@@ -1,0 +1,99 @@
+image:
+  repository: ghcr.io/moolen/aegis
+  tag: bootstrap
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  proxyPort: 3128
+  metricsPort: 9090
+
+serviceAccount:
+  create: false
+  name: ""
+
+rbac:
+  create: false
+
+proxyCA:
+  existingSecret: ""
+  mountPath: /etc/aegis/ca
+  certFile: ca.crt
+  keyFile: ca.key
+
+resources: {}
+
+config:
+  proxy:
+    listen: ":3128"
+    # enforcement: audit
+    # unknownIdentityPolicy: deny
+    # connectionLimits:
+    #   maxConcurrentPerIdentity: 100
+    # proxyProtocol:
+    #   enabled: true
+    #   headerTimeout: 2s
+    # proxy.ca is always the active issuing CA for forged MITM leaf
+    # certificates. Keep previous trust roots under proxy.ca.additional during
+    # rotation windows so Aegis can report the full CA set and distinguish
+    # issuer rotation from companion-only reload changes.
+    # ca:
+    #   certFile: /etc/aegis/ca/new-ca.crt
+    #   keyFile: /etc/aegis/ca/new-ca.key
+    #   additional:
+    #     - certFile: /etc/aegis/ca/old-ca.crt
+    #       keyFile: /etc/aegis/ca/old-ca.key
+  admin: {}
+  # admin:
+  #   token: replace-me
+  metrics:
+    listen: ":9090"
+  shutdown:
+    gracePeriod: 10s
+  dns:
+    cache_ttl: 30s
+    timeout: 5s
+    servers: []
+    rebindingProtection:
+      allowedHostPatterns: []
+      allowedCIDRs: []
+  policies:
+    - name: allow-example
+      # enforcement: audit
+      # bypass: true
+      identitySelector:
+        matchLabels: {}
+      egress:
+        - fqdn: "example.com"
+          ports: [80]
+          tls:
+            mode: mitm
+          http:
+            allowedMethods: ["GET"]
+            allowedPaths: ["/*"]
+
+# Bootstrap status: this chart now renders a runnable default policy config.
+# Plain HTTP requests are policy-enforced by default, Kubernetes and EC2
+# discovery can be wired at runtime, and CONNECT supports both SNI-validated
+# passthrough and CA-backed TLS MITM when config.proxy.ca is set and a CA
+# secret is mounted.
+# Set config.proxy.enforcement: audit to shadow policy decisions without
+# blocking traffic during migration. In audit mode, CONNECT stays transparent
+# passthrough, so inner HTTPS method/path rules are not actively inspected.
+# Set config.policies[].enforcement: audit for a narrower staged rollout where
+# specific matched policies stay in shadow mode while the rest enforce.
+# Set config.proxy.unknownIdentityPolicy: deny to refuse traffic from source
+# IPs that do not resolve to a known identity.
+# Set config.admin.token to enable POST /admin/enforcement?mode=audit|enforce|config
+# on the metrics port as a protected global kill switch.
+# Set config.policies[].bypass: true for a narrower per-policy shadow mode with
+# the same transparent CONNECT behavior.
+# Set config.proxy.ca with the active issuing CA for forged MITM leaf
+# certificates, and keep previous trust roots under config.proxy.ca.additional
+# during dual-CA rollout periods so GET /admin/runtime can report the full CA
+# set and reloads can distinguish rotated from companions_changed.
+# Set config.proxy.connectionLimits.maxConcurrentPerIdentity for a simple
+# per-identity abuse-control guardrail across HTTP requests and CONNECT tunnels.
+# The default empty identitySelector.matchLabels is a safe starter policy that
+# matches any discovered identity; tighten it once you know the workload labels
+# you want to authorize.

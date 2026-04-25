@@ -1,0 +1,68 @@
+proxy:
+  listen: ":3128"
+  # enforcement: audit   # audit | enforce
+  # unknownIdentityPolicy: deny   # allow | deny
+  # connectionLimits:
+  #   maxConcurrentPerIdentity: 100
+  # Uncomment when Aegis sits behind an L4 load balancer that injects
+  # Proxy Protocol v2 headers and you want identity resolution to use the
+  # original client source IP instead of the balancer IP.
+  # proxyProtocol:
+  #   enabled: true
+  #   headerTimeout: 2s
+  # Uncomment to enable TLS MITM for CONNECT rules with tls.mode: mitm.
+  # proxy.ca is always the active issuing CA for forged MITM leaf certificates.
+  # Keep previous trust roots under proxy.ca.additional during rotation windows
+  # so Aegis can report the full CA set and distinguish issuer rotation from
+  # companion-only reload changes.
+  # ca:
+  #   certFile: /etc/aegis/ca/new-ca.crt
+  #   keyFile: /etc/aegis/ca/new-ca.key
+  #   additional:
+  #     - certFile: /etc/aegis/ca/old-ca.crt
+  #       keyFile: /etc/aegis/ca/old-ca.key
+admin:
+  # token: "replace-me"   # enables the metrics-port admin kill switch
+metrics:
+  listen: ":9090"
+shutdown:
+  gracePeriod: 10s
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  servers: []
+  rebindingProtection:
+    # Allow internal destinations explicitly when you need them. By default,
+    # Aegis blocks loopback, private, and link-local upstream addresses to
+    # reduce DNS rebinding and SSRF risk.
+    allowedHostPatterns: []
+    allowedCIDRs: []
+discovery:
+  kubernetes: []
+  # kubernetes:
+  #   - name: cluster-a
+  #     kubeconfig: /path/to/kubeconfig
+  #     namespaces: ["default"]
+  #     resyncPeriod: 30s
+  ec2: []
+  # ec2:
+  #   - name: production-ec2
+  #     region: eu-central-1
+  #     tagFilters:
+  #       - key: "aegis-managed"
+  #         values: ["true"]
+  #     pollInterval: 30s
+policies:
+  - name: allow-example
+    # enforcement: audit   # policy-level audit | enforce
+    # bypass: true   # shadow this policy without blocking matching traffic
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET"]
+          allowedPaths: ["/*"]
