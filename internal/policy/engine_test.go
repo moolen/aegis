@@ -127,6 +127,60 @@ func TestNewEngineRejectsUnsupportedFQDNMetacharacters(t *testing.T) {
 	}
 }
 
+func TestNewEngineRejectsKubernetesSubjectsWithoutDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects(nil, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes discoveryNames validation error", err)
+	}
+}
+
+func TestNewEngineRejectsKubernetesSubjectsWithoutNamespaces(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, nil, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want kubernetes namespaces validation error")
+	}
+	if !strings.Contains(err.Error(), "kubernetes") || !strings.Contains(err.Error(), "namespaces") {
+		t.Fatalf("NewEngine() error = %q, want kubernetes namespaces validation error", err)
+	}
+}
+
+func TestNewEngineRejectsEC2SubjectsWithoutDiscoveryNames(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name:     "legacy-web-egress",
+		Subjects: ec2Subjects(nil),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "metadata.internal",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want ec2 discoveryNames validation error")
+	}
+	if !strings.Contains(err.Error(), "ec2") || !strings.Contains(err.Error(), "discoveryNames") {
+		t.Fatalf("NewEngine() error = %q, want ec2 discoveryNames validation error", err)
+	}
+}
+
 func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:     "frontend-egress",
@@ -157,6 +211,30 @@ func TestEvaluateMatchesKubernetesSubjectForBoundProviderOnly(t *testing.T) {
 	)
 	if denied.Allowed {
 		t.Fatal("expected cluster-b identity not to match cluster-a-scoped policy")
+	}
+}
+
+func TestEvaluateMatchesKubernetesSubjectWithEmptyMatchLabels(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, nil),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		kubernetesIdentity("cluster-a", "frontend", map[string]string{"any": "label"}),
+		"api.stripe.com",
+		443,
+	)
+	if !decision.Allowed {
+		t.Fatal("expected empty kubernetes matchLabels to behave as a label wildcard")
 	}
 }
 
@@ -237,6 +315,54 @@ func TestEvaluateSkipsPolicyWhenIdentitySourceHasNoMatchingSubject(t *testing.T)
 	}
 	if decision.Policy != "" {
 		t.Fatalf("decision.Policy = %q, want empty", decision.Policy)
+	}
+}
+
+func TestEvaluateDoesNotMatchKubernetesSubjectWithoutNamespaceLabel(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(&identity.Identity{
+		Source:   "kubernetes",
+		Provider: "cluster-a",
+		Labels:   map[string]string{"app": "frontend"},
+	}, "api.stripe.com", 443)
+	if decision.Allowed {
+		t.Fatal("expected kubernetes identity without namespace label not to match")
+	}
+}
+
+func TestEvaluateDoesNotMatchKubernetesSubjectWithNilLabels(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:     "frontend-egress",
+		Subjects: kubernetesSubjects([]string{"cluster-a"}, []string{"frontend"}, map[string]string{"app": "frontend"}),
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "api.stripe.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(&identity.Identity{
+		Source:   "kubernetes",
+		Provider: "cluster-a",
+		Labels:   nil,
+	}, "api.stripe.com", 443)
+	if decision.Allowed {
+		t.Fatal("expected kubernetes identity with nil labels not to match")
 	}
 }
 

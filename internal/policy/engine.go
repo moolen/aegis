@@ -120,11 +120,16 @@ func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *
 }
 
 func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
+	subjects, err := compileSubjects(cfg.Subjects)
+	if err != nil {
+		return Policy{}, err
+	}
+
 	policy := Policy{
 		name:        cfg.Name,
 		enforcement: config.NormalizeEnforcementMode(cfg.Enforcement),
 		bypass:      cfg.Bypass,
-		subjects:    compileSubjects(cfg.Subjects),
+		subjects:    subjects,
 		egress:      make([]Rule, 0, len(cfg.Egress)),
 	}
 
@@ -139,9 +144,16 @@ func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 	return policy, nil
 }
 
-func compileSubjects(cfg config.PolicySubjectsConfig) Subjects {
+func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 	subjects := Subjects{}
 	if cfg.Kubernetes != nil {
+		if len(cfg.Kubernetes.DiscoveryNames) == 0 {
+			return Subjects{}, fmt.Errorf("kubernetes subjects.discoveryNames must not be empty")
+		}
+		if len(cfg.Kubernetes.Namespaces) == 0 {
+			return Subjects{}, fmt.Errorf("kubernetes subjects.namespaces must not be empty")
+		}
+
 		subjects.kubernetes = &KubernetesSubject{
 			discoveryNames: compileStringSet(cfg.Kubernetes.DiscoveryNames),
 			namespaces:     compileStringSet(cfg.Kubernetes.Namespaces),
@@ -149,12 +161,16 @@ func compileSubjects(cfg config.PolicySubjectsConfig) Subjects {
 		}
 	}
 	if cfg.EC2 != nil {
+		if len(cfg.EC2.DiscoveryNames) == 0 {
+			return Subjects{}, fmt.Errorf("ec2 subjects.discoveryNames must not be empty")
+		}
+
 		subjects.ec2 = &EC2Subject{
 			discoveryNames: compileStringSet(cfg.EC2.DiscoveryNames),
 		}
 	}
 
-	return subjects
+	return subjects, nil
 }
 
 func compileRule(cfg config.EgressRuleConfig) (Rule, error) {
