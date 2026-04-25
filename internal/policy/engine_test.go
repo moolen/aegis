@@ -301,6 +301,29 @@ func TestNewEngineRejectsKubernetesSubjectsWithWhitespaceOnlyMatchLabelKey(t *te
 	}
 }
 
+func TestEngineRejectsInvalidCIDRSubject(t *testing.T) {
+	_, err := NewEngine([]config.PolicyConfig{{
+		Name: "cidr-egress",
+		Subjects: config.PolicySubjectsConfig{
+			CIDRs: []string{"10.20.0.0/16", "not-a-cidr"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err == nil {
+		t.Fatal("NewEngine() error = nil, want cidr validation error")
+	}
+	if !strings.Contains(err.Error(), "subjects.cidrs[1]") {
+		t.Fatalf("NewEngine() error = %q, want indexed cidr subject path", err)
+	}
+	if !strings.Contains(err.Error(), "not-a-cidr") {
+		t.Fatalf("NewEngine() error = %q, want rejected cidr value", err)
+	}
+}
+
 func TestEngineAllowsCIDRSubjectWithoutIdentity(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name:     "cidr-egress",

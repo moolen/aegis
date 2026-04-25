@@ -181,11 +181,11 @@ func compileSubjects(cfg config.PolicySubjectsConfig) (Subjects, error) {
 	}
 	if len(cfg.CIDRs) > 0 {
 		subjects.cidrs = make([]netip.Prefix, 0, len(cfg.CIDRs))
-		for _, cidr := range cfg.CIDRs {
+		for i, cidr := range cfg.CIDRs {
 			cidr = strings.TrimSpace(cidr)
 			prefix, err := netip.ParsePrefix(cidr)
 			if err != nil {
-				return Subjects{}, fmt.Errorf("cidr subjects.cidrs %q: %w", cidr, err)
+				return Subjects{}, fmt.Errorf("cidr subjects.cidrs[%d] %q: %w", i, cidr, err)
 			}
 			subjects.cidrs = append(subjects.cidrs, prefix)
 		}
