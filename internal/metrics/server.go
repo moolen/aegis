@@ -24,6 +24,7 @@ type ReadyChecker interface {
 type AdminAPI interface {
 	AdminToken() string
 	EnforcementStatus() EnforcementStatus
+	RuntimeStatus() RuntimeStatus
 	SetEnforcementMode(mode string) (EnforcementStatus, error)
 	DumpIdentities() []IdentityDumpRecord
 	Simulate(SimulationRequest) (SimulationResponse, error)
@@ -33,6 +34,17 @@ type EnforcementStatus struct {
 	Configured string `json:"configured"`
 	Override   string `json:"override,omitempty"`
 	Effective  string `json:"effective"`
+}
+
+type RuntimeStatus struct {
+	MITM *MITMStatus `json:"mitm,omitempty"`
+}
+
+type MITMStatus struct {
+	Enabled               bool     `json:"enabled"`
+	IssuerFingerprint     string   `json:"issuerFingerprint,omitempty"`
+	CompanionFingerprints []string `json:"companionFingerprints,omitempty"`
+	AllFingerprints       []string `json:"allFingerprints,omitempty"`
 }
 
 type IdentityRecord struct {
@@ -140,6 +152,17 @@ func NewServer(addr string, reg *prometheus.Registry, readyChecker ReadyChecker,
 			return
 		}
 		writeJSON(w, adminAPI.DumpIdentities())
+	})
+	mux.HandleFunc("/admin/runtime", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeAdminEndpoint(w, r, adminAPI) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, adminAPI.RuntimeStatus())
 	})
 	mux.HandleFunc("/admin/simulate", func(w http.ResponseWriter, r *http.Request) {
 		if !authorizeAdminEndpoint(w, r, adminAPI) {

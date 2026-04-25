@@ -166,6 +166,49 @@ func TestServerReturnsAdminEnforcementStatus(t *testing.T) {
 	}
 }
 
+func TestServerReturnsAdminRuntimeStatus(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	admin := &enforcementAdminStub{
+		token: "secret",
+		runtime: RuntimeStatus{
+			MITM: &MITMStatus{
+				Enabled:               true,
+				IssuerFingerprint:     "issuer-fp",
+				CompanionFingerprints: []string{"old-fp"},
+				AllFingerprints:       []string{"issuer-fp", "old-fp"},
+			},
+		},
+	}
+
+	srv := NewServer(":0", reg, nil, admin)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/admin/runtime", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var body RuntimeStatus
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if body.MITM == nil || body.MITM.IssuerFingerprint != "issuer-fp" {
+		t.Fatalf("runtime MITM status = %#v, want issuer fingerprint", body.MITM)
+	}
+}
+
 func TestServerUpdatesAdminEnforcementMode(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	admin := &enforcementAdminStub{
@@ -292,6 +335,7 @@ func (f readyCheckerFunc) CheckReadiness() error {
 type enforcementAdminStub struct {
 	token          string
 	status         EnforcementStatus
+	runtime        RuntimeStatus
 	lastMode       string
 	identities     []IdentityDumpRecord
 	simulation     SimulationResponse
@@ -304,6 +348,10 @@ func (s *enforcementAdminStub) AdminToken() string {
 
 func (s *enforcementAdminStub) EnforcementStatus() EnforcementStatus {
 	return s.status
+}
+
+func (s *enforcementAdminStub) RuntimeStatus() RuntimeStatus {
+	return s.runtime
 }
 
 func (s *enforcementAdminStub) SetEnforcementMode(mode string) (EnforcementStatus, error) {

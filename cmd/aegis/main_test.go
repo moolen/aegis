@@ -597,6 +597,39 @@ func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerRuntimeStatusIncludesMITMCASet(t *testing.T) {
+	certA, keyA := writeTestCAFiles(t, "Primary CA")
+	certB, keyB := writeTestCAFiles(t, "Companion CA")
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithAdditionalCAs(
+		"policy-a",
+		":3128",
+		":9090",
+		certA,
+		keyA,
+		[][2]string{{certB, keyB}},
+	))
+
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()), configPath, &reloadableProxyHandler{}, nil)
+	defer manager.Close()
+
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	status := manager.RuntimeStatus()
+	if status.MITM == nil || !status.MITM.Enabled {
+		t.Fatalf("RuntimeStatus().MITM = %#v, want enabled MITM status", status.MITM)
+	}
+	if len(status.MITM.CompanionFingerprints) != 1 {
+		t.Fatalf("CompanionFingerprints = %#v, want one companion", status.MITM.CompanionFingerprints)
+	}
+}
+
 func TestRuntimeManagerEnforcementOverridePersistsAcrossReload(t *testing.T) {
 	configPath := writeRuntimeConfig(t, runtimeConfigYAML("policy-a", ":3128", ":9090", false, ""))
 	reg := prometheus.NewRegistry()
@@ -871,6 +904,40 @@ func runtimeConfigYAMLWithCA(policyName string, proxyListen string, metricsListe
 		"        http:\n" +
 		"          allowedMethods: [\"GET\"]\n" +
 		"          allowedPaths: [\"/*\"]\n"
+}
+
+func runtimeConfigYAMLWithAdditionalCAs(policyName string, proxyListen string, metricsListen string, certFile string, keyFile string, additional [][2]string) string {
+	yaml := "proxy:\n" +
+		"  listen: \"" + proxyListen + "\"\n" +
+		"  ca:\n" +
+		"    certFile: \"" + certFile + "\"\n" +
+		"    keyFile: \"" + keyFile + "\"\n"
+	if len(additional) > 0 {
+		yaml += "    additional:\n"
+		for _, pair := range additional {
+			yaml += "      - certFile: \"" + pair[0] + "\"\n" +
+				"        keyFile: \"" + pair[1] + "\"\n"
+		}
+	}
+	yaml += "metrics:\n" +
+		"  listen: \"" + metricsListen + "\"\n" +
+		"dns:\n" +
+		"  cache_ttl: 30s\n" +
+		"  timeout: 5s\n" +
+		"  servers: []\n" +
+		"policies:\n" +
+		"  - name: " + policyName + "\n" +
+		"    identitySelector:\n" +
+		"      matchLabels: {}\n" +
+		"    egress:\n" +
+		"      - fqdn: \"example.com\"\n" +
+		"        ports: [443]\n" +
+		"        tls:\n" +
+		"          mode: mitm\n" +
+		"        http:\n" +
+		"          allowedMethods: [\"GET\"]\n" +
+		"          allowedPaths: [\"/*\"]\n"
+	return yaml
 }
 
 func testRuntimeConfig() config.Config {

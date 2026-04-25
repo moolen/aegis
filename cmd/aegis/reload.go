@@ -184,6 +184,26 @@ func (m *runtimeManager) EnforcementStatus() appmetrics.EnforcementStatus {
 	return enforcementStatusForConfig(m.current.cfg, m.enforcement)
 }
 
+func (m *runtimeManager) RuntimeStatus() appmetrics.RuntimeStatus {
+	m.mu.RLock()
+	mitm := m.current.mitm
+	m.mu.RUnlock()
+
+	if mitm == nil {
+		return appmetrics.RuntimeStatus{}
+	}
+
+	status := mitm.CAStatus()
+	return appmetrics.RuntimeStatus{
+		MITM: &appmetrics.MITMStatus{
+			Enabled:               true,
+			IssuerFingerprint:     status.IssuerFingerprint,
+			CompanionFingerprints: status.CompanionFingerprints,
+			AllFingerprints:       status.AllFingerprints,
+		},
+	}
+}
+
 func (m *runtimeManager) SetEnforcementMode(mode string) (appmetrics.EnforcementStatus, error) {
 	normalized := config.NormalizeEnforcementMode(mode)
 	switch normalized {
