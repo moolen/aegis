@@ -3,12 +3,21 @@ import { check, sleep } from "k6";
 
 const vus = Number(__ENV.VUS || "10");
 const duration = __ENV.DURATION || "30s";
-const targetHost = __ENV.TARGET_HOST || "127.0.0.1";
-const targetPort = __ENV.TARGET_PORT || "18443";
-const targetPath = __ENV.TARGET_PATH || "/allowed";
 const expectedStatus = Number(__ENV.EXPECTED_STATUS || "204");
 const resultDir = __ENV.RESULT_DIR || ".";
-const targetURL = `https://${targetHost}:${targetPort}${targetPath}`;
+const proxyURL = __ENV.PROXY_URL || __ENV.HTTPS_PROXY || __ENV.https_proxy || "";
+const targetURL =
+  __ENV.TARGET_URL ||
+  `https://${__ENV.TARGET_HOST || "127.0.0.1"}:${__ENV.TARGET_PORT || "18443"}${__ENV.TARGET_PATH || "/allowed"}`;
+
+function requireProxyEnv() {
+  if (!proxyURL) {
+    throw new Error("PROXY_URL or HTTPS_PROXY must be set");
+  }
+  if ((__ENV.HTTPS_PROXY || __ENV.https_proxy || "") !== proxyURL) {
+    throw new Error("HTTPS_PROXY must match PROXY_URL for the CONNECT passthrough scenario");
+  }
+}
 
 export const options = {
   scenarios: {
@@ -27,10 +36,12 @@ export const options = {
 };
 
 export default function () {
+  requireProxyEnv();
   const response = http.get(targetURL, {
     tags: {
       scenario: "local-connect-passthrough",
-      target: targetHost,
+      target: targetURL,
+      proxy: proxyURL,
     },
   });
 
@@ -54,7 +65,7 @@ function renderSummary(data) {
   return [
     "Aegis local CONNECT passthrough scenario",
     `target=${targetURL}`,
-    `proxy_env=${__ENV.HTTPS_PROXY || __ENV.HTTP_PROXY || "unset"}`,
+    `proxy=${proxyURL || "unset"}`,
     `iterations=${metricValue(data, "iterations", "count")}`,
     `checks_rate=${metricValue(data, "checks", "rate")}`,
     `http_req_failed=${metricValue(data, "http_req_failed", "rate")}`,
