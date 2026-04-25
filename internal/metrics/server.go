@@ -12,10 +12,24 @@ type Server struct {
 	handler http.Handler
 }
 
-func NewServer(addr string, reg *prometheus.Registry) *Server {
+type ReadyChecker interface {
+	CheckReadiness() error
+}
+
+func NewServer(addr string, reg *prometheus.Registry, readyChecker ReadyChecker) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if readyChecker != nil {
+			if err := readyChecker.CheckReadiness(); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})

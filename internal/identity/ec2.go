@@ -48,6 +48,11 @@ type EC2Provider struct {
 	mu      sync.Mutex
 	started bool
 	cancel  context.CancelFunc
+
+	statusMu         sync.RWMutex
+	lastSuccess      time.Time
+	lastError        time.Time
+	lastErrorMessage string
 }
 
 func NewEC2Provider(cfg EC2ProviderConfig, logger *slog.Logger) (*EC2Provider, error) {
@@ -106,7 +111,9 @@ func (p *EC2Provider) Start(ctx context.Context, startupTimeout time.Duration) e
 	}
 
 	go p.poll(runCtx)
+	go p.runStatusReporter(runCtx)
 	p.reportMapSize()
+	p.reportStatus()
 
 	return nil
 }
@@ -114,6 +121,7 @@ func (p *EC2Provider) Start(ctx context.Context, startupTimeout time.Duration) e
 func (p *EC2Provider) AttachMetrics(m *appmetrics.Metrics) {
 	p.metrics = m
 	p.reportMapSize()
+	p.reportStatus()
 }
 
 func (p *EC2Provider) Resolve(ip net.IP) (*Identity, error) {
@@ -144,6 +152,8 @@ func (p *EC2Provider) poll(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := p.refresh(ctx); err != nil {
+				p.noteRefreshFailure(err)
+				p.reportStatus()
 				p.logger.Warn("refresh ec2 provider failed", "error", err)
 			}
 		}
@@ -153,6 +163,7 @@ func (p *EC2Provider) poll(ctx context.Context) {
 func (p *EC2Provider) refresh(ctx context.Context) error {
 	instances, err := p.source.Instances(ctx, cloneEC2Filters(p.tagFilters))
 	if err != nil {
+		p.noteRefreshFailure(err)
 		return err
 	}
 
@@ -170,7 +181,9 @@ func (p *EC2Provider) refresh(ctx context.Context) error {
 	}
 
 	p.state.Store(next)
+	p.noteRefreshSuccess()
 	p.reportMapSizeWithSize(len(next))
+	p.reportStatus()
 	return nil
 }
 
@@ -221,4 +234,77 @@ func (p *EC2Provider) reportMapSizeWithSize(size int) {
 		return
 	}
 	p.metrics.IdentityMapEntries.WithLabelValues(p.name, "ec2").Set(float64(size))
+}
+
+func (p *EC2Provider) ProviderStatus() ProviderStatus {
+	p.statusMu.RLock()
+	defer p.statusMu.RUnlock()
+
+	return ProviderStatus{
+		Name:             p.name,
+		Kind:             "ec2",
+		State:            EvaluateProviderState(p.lastSuccess, time.Now()),
+		LastSuccess:      p.lastSuccess,
+		LastError:        p.lastError,
+		LastErrorMessage: p.lastErrorMessage,
+	}
+}
+
+func (p *EC2Provider) noteRefreshSuccess() {
+	p.statusMu.Lock()
+	defer p.statusMu.Unlock()
+
+	p.lastSuccess = time.Now()
+	p.lastError = time.Time{}
+	p.lastErrorMessage = ""
+}
+
+func (p *EC2Provider) noteRefreshFailure(err error) {
+	p.statusMu.Lock()
+	defer p.statusMu.Unlock()
+
+	p.lastError = time.Now()
+	if err != nil {
+		p.lastErrorMessage = err.Error()
+	}
+}
+
+func (p *EC2Provider) runStatusReporter(ctx context.Context) {
+	interval := ProviderStatusRefreshInterval
+	if interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.reportStatus()
+		}
+	}
+}
+
+func (p *EC2Provider) reportStatus() {
+	if p.metrics == nil {
+		return
+	}
+
+	status := p.ProviderStatus()
+	for _, state := range []string{ProviderStateActive, ProviderStateStale, ProviderStateDown} {
+		value := 0.0
+		if status.State == state {
+			value = 1
+		}
+		p.metrics.IdentityProviderStatus.WithLabelValues(p.name, "ec2", state).Set(value)
+	}
+
+	lastSuccess := 0.0
+	if !status.LastSuccess.IsZero() {
+		lastSuccess = float64(status.LastSuccess.Unix())
+	}
+	p.metrics.IdentityProviderLastSuccess.WithLabelValues(p.name, "ec2").Set(lastSuccess)
 }

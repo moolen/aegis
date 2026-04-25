@@ -246,6 +246,53 @@ func TestKubernetesProviderUpdatesIdentityMapGauge(t *testing.T) {
 	}
 }
 
+func TestKubernetesProviderTransitionsToStaleAndDownStatusAfterWatchLoss(t *testing.T) {
+	restoreStaleAfter := ProviderStaleAfter
+	restoreDownAfter := ProviderDownAfter
+	t.Cleanup(func() {
+		ProviderStaleAfter = restoreStaleAfter
+		ProviderDownAfter = restoreDownAfter
+	})
+
+	ProviderStaleAfter = 40 * time.Millisecond
+	ProviderDownAfter = 90 * time.Millisecond
+
+	provider := &KubernetesProvider{
+		name:    "cluster-a",
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		byIP:    make(map[string]*Identity),
+		ipByPod: make(map[string]string),
+		sources: map[string]*kubernetesSourceStatus{
+			"default": {},
+		},
+	}
+
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	provider.AttachMetrics(m)
+
+	provider.recordSourceListSuccess("default")
+	provider.recordSourceWatchEstablished("default")
+
+	if state := provider.ProviderStatus().State; state != ProviderStateActive {
+		t.Fatalf("initial state = %q, want %q", state, ProviderStateActive)
+	}
+
+	provider.recordSourceWatchClosed("default")
+
+	requireEventuallyProviderState(t, provider, ProviderStateStale)
+	provider.reportStatus()
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_provider_status", map[string]string{"provider": "cluster-a", "kind": "kubernetes", "status": ProviderStateStale}); got != 1 {
+		t.Fatalf("stale status gauge = %v, want 1", got)
+	}
+
+	requireEventuallyProviderState(t, provider, ProviderStateDown)
+	provider.reportStatus()
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_provider_status", map[string]string{"provider": "cluster-a", "kind": "kubernetes", "status": ProviderStateDown}); got != 1 {
+		t.Fatalf("down status gauge = %v, want 1", got)
+	}
+}
+
 func TestKubernetesProviderStartCancelsRunContextOnStartupTimeout(t *testing.T) {
 	client := newBlockingPodNamespaceClient()
 	provider, err := NewKubernetesProvider(KubernetesProviderConfig{

@@ -30,6 +30,8 @@ Implemented in this bootstrap:
   and `CONNECT` tunnels.
 - Configurable graceful shutdown with explicit CONNECT tunnel draining and
   force-close accounting when the grace period expires.
+- Readiness semantics backed by discovery-provider freshness, with provider
+  status metrics and a separate `/readyz` endpoint.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`, including reload, Proxy Protocol, CONNECT,
   MITM certificate-cache and CA lifecycle counters, request decision counters,
@@ -51,6 +53,9 @@ Current runtime behavior:
 - Provider startup failures are tolerated as long as at least one configured
   provider becomes active; failures are surfaced through structured logs and
   Prometheus metrics.
+- Active discovery providers are tracked as `active`, `stale`, or `down`.
+  `/healthz` remains liveness-only, while `/readyz` fails if discovery is
+  configured and no provider is currently `active`.
 - `CONNECT` requests resolve identity, evaluate policy, require a TLS
   ClientHello with matching SNI, and then run in passthrough or MITM mode
   depending on the matched rule.
@@ -122,6 +127,7 @@ Inspect metrics:
 
 ```bash
 curl http://127.0.0.1:9090/healthz
+curl http://127.0.0.1:9090/readyz
 curl http://127.0.0.1:9090/metrics
 ```
 

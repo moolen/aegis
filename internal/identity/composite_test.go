@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -129,6 +130,48 @@ func TestCompositeResolverContinuesAfterNilProviderResolver(t *testing.T) {
 	}
 }
 
+func TestCompositeResolverReadinessFailsWhenAllProvidersAreStaleOrDown(t *testing.T) {
+	resolver := NewCompositeResolver([]ProviderHandle{
+		{
+			Name:     "cluster-a",
+			Kind:     "kubernetes",
+			Resolver: statusStubResolver{status: ProviderStatus{Name: "cluster-a", Kind: "kubernetes", State: ProviderStateStale}},
+		},
+		{
+			Name:     "production-ec2",
+			Kind:     "ec2",
+			Resolver: statusStubResolver{status: ProviderStatus{Name: "production-ec2", Kind: "ec2", State: ProviderStateDown}},
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	err := resolver.CheckReadiness()
+	if err == nil {
+		t.Fatal("expected readiness failure")
+	}
+	if !strings.Contains(err.Error(), "no active discovery providers") {
+		t.Fatalf("readiness error = %q, want no active discovery providers", err)
+	}
+}
+
+func TestCompositeResolverReadinessPassesWhenOneProviderIsActive(t *testing.T) {
+	resolver := NewCompositeResolver([]ProviderHandle{
+		{
+			Name:     "cluster-a",
+			Kind:     "kubernetes",
+			Resolver: statusStubResolver{status: ProviderStatus{Name: "cluster-a", Kind: "kubernetes", State: ProviderStateStale}},
+		},
+		{
+			Name:     "production-ec2",
+			Kind:     "ec2",
+			Resolver: statusStubResolver{status: ProviderStatus{Name: "production-ec2", Kind: "ec2", State: ProviderStateActive}},
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	if err := resolver.CheckReadiness(); err != nil {
+		t.Fatalf("CheckReadiness() error = %v", err)
+	}
+}
+
 type stubResolver struct {
 	identity *Identity
 	err      error
@@ -139,6 +182,18 @@ func (r stubResolver) Resolve(net.IP) (*Identity, error) {
 		return nil, r.err
 	}
 	return r.identity, nil
+}
+
+type statusStubResolver struct {
+	status ProviderStatus
+}
+
+func (r statusStubResolver) Resolve(net.IP) (*Identity, error) {
+	return nil, nil
+}
+
+func (r statusStubResolver) ProviderStatus() ProviderStatus {
+	return r.status
 }
 
 func gatheredCounterValue(t *testing.T, reg *prometheus.Registry, metricName string, labels map[string]string) float64 {

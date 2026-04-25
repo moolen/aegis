@@ -45,9 +45,10 @@ type runtimeManager struct {
 }
 
 type runtimeGeneration struct {
-	cfg    config.Config
-	cancel context.CancelFunc
-	mitm   *proxy.MITMEngine
+	cfg          config.Config
+	cancel       context.CancelFunc
+	mitm         *proxy.MITMEngine
+	readyChecker appmetrics.ReadyChecker
 }
 
 func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler, drain *proxy.DrainTracker) *runtimeManager {
@@ -130,6 +131,9 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		cancel: cancel,
 		mitm:   deps.MITM,
 	}
+	if checker, ok := deps.IdentityResolver.(appmetrics.ReadyChecker); ok {
+		m.current.readyChecker = checker
+	}
 
 	return nil
 }
@@ -142,6 +146,17 @@ func (m *runtimeManager) ShutdownGracePeriod() time.Duration {
 		return 10 * time.Second
 	}
 	return m.current.cfg.Shutdown.GracePeriod
+}
+
+func (m *runtimeManager) CheckReadiness() error {
+	m.mu.RLock()
+	checker := m.current.readyChecker
+	m.mu.RUnlock()
+
+	if checker == nil {
+		return nil
+	}
+	return checker.CheckReadiness()
 }
 
 func (m *runtimeManager) recordReloadResult(result string) {

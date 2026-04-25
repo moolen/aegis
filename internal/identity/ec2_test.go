@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -237,6 +238,63 @@ func TestEC2ProviderUpdatesIdentityMapGauge(t *testing.T) {
 	}
 }
 
+func TestEC2ProviderTransitionsToStaleAndDownStatusAfterRefreshFailures(t *testing.T) {
+	restoreStaleAfter := ProviderStaleAfter
+	restoreDownAfter := ProviderDownAfter
+	restoreRefreshInterval := ProviderStatusRefreshInterval
+	t.Cleanup(func() {
+		ProviderStaleAfter = restoreStaleAfter
+		ProviderDownAfter = restoreDownAfter
+		ProviderStatusRefreshInterval = restoreRefreshInterval
+	})
+
+	ProviderStaleAfter = 40 * time.Millisecond
+	ProviderDownAfter = 90 * time.Millisecond
+	ProviderStatusRefreshInterval = 10 * time.Millisecond
+
+	source := newFakeEC2InstanceSource()
+	source.SetInstances([]EC2Instance{{
+		ID:        "i-abc123",
+		PrivateIP: "10.0.0.80",
+	}})
+
+	provider, err := NewEC2Provider(EC2ProviderConfig{
+		Name:         "production-ec2",
+		Source:       source,
+		PollInterval: 10 * time.Millisecond,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewEC2Provider() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := appmetrics.New(reg)
+	provider.AttachMetrics(m)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := provider.Start(ctx, time.Second); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	if state := provider.ProviderStatus().State; state != ProviderStateActive {
+		t.Fatalf("initial state = %q, want %q", state, ProviderStateActive)
+	}
+
+	source.SetError(errors.New("ec2 unavailable"))
+
+	requireEventuallyProviderState(t, provider, ProviderStateStale)
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_provider_status", map[string]string{"provider": "production-ec2", "kind": "ec2", "status": ProviderStateStale}); got != 1 {
+		t.Fatalf("stale status gauge = %v, want 1", got)
+	}
+
+	requireEventuallyProviderState(t, provider, ProviderStateDown)
+	if got := gatheredGaugeValue(t, reg, "aegis_identity_provider_status", map[string]string{"provider": "production-ec2", "kind": "ec2", "status": ProviderStateDown}); got != 1 {
+		t.Fatalf("down status gauge = %v, want 1", got)
+	}
+}
+
 func requireEventuallyEC2Identity(t *testing.T, provider *EC2Provider, ip string) *Identity {
 	t.Helper()
 
@@ -277,6 +335,7 @@ func requireEventuallyNoEC2Identity(t *testing.T, provider *EC2Provider, ip stri
 type fakeEC2InstanceSource struct {
 	mu        sync.Mutex
 	instances []EC2Instance
+	err       error
 }
 
 func newFakeEC2InstanceSource() *fakeEC2InstanceSource {
@@ -290,10 +349,20 @@ func (s *fakeEC2InstanceSource) SetInstances(instances []EC2Instance) {
 	s.instances = cloneEC2Instances(instances)
 }
 
+func (s *fakeEC2InstanceSource) SetError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.err = err
+}
+
 func (s *fakeEC2InstanceSource) Instances(context.Context, []EC2TagFilter) ([]EC2Instance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.err != nil {
+		return nil, s.err
+	}
 	return cloneEC2Instances(s.instances), nil
 }
 
@@ -385,6 +454,20 @@ func waitForEC2Signal(ch <-chan struct{}, timeout time.Duration) bool {
 	case <-time.After(timeout):
 		return false
 	}
+}
+
+func requireEventuallyProviderState(t *testing.T, provider interface{ ProviderStatus() ProviderStatus }, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if provider.ProviderStatus().State == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("provider state never became %q, last status=%#v", want, provider.ProviderStatus())
 }
 
 func closeOnceEC2(ch chan struct{}) {

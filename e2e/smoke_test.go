@@ -375,7 +375,7 @@ func startAegisWithEnv(t *testing.T, configPath string, extraEnv []string) *aegi
 	}
 	metricsAddr := parseMetricsAddr(t, string(cfgBytes))
 	waitFor(t, 10*time.Second, func() bool {
-		resp, getErr := http.Get("http://" + metricsAddr + "/healthz")
+		resp, getErr := http.Get("http://" + metricsAddr + "/readyz")
 		if getErr != nil {
 			return false
 		}

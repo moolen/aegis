@@ -97,6 +97,10 @@ func TestHelmChartDeploysAndEnforcesPolicyOnKind(t *testing.T) {
 	if got := strings.TrimSpace(healthz); got != "ok" {
 		t.Fatalf("healthz body = %q, want %q", got, "ok")
 	}
+	readyz := kubectlExec(t, repoRoot, kubeContext, "curl", "-fsS", "http://aegis:9090/readyz")
+	if got := strings.TrimSpace(readyz); got != "ok" {
+		t.Fatalf("readyz body = %q, want %q", got, "ok")
+	}
 
 	allowedStatus := strings.TrimSpace(kubectlExec(
 		t,

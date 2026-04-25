@@ -76,7 +76,7 @@ func run() int {
 		return 1
 	}
 
-	proxySrv, metricsSrv := newHTTPServers(cfg, reloadableHandler, appmetrics.NewServer(cfg.Metrics.Listen, registry).Handler())
+	proxySrv, metricsSrv := newHTTPServers(cfg, reloadableHandler, appmetrics.NewServer(cfg.Metrics.Listen, registry, runtime).Handler())
 	proxyListener, metricsListener, err := buildListeners(cfg, logger, m)
 	if err != nil {
 		logger.Error("build listeners failed", "error", err)
@@ -160,7 +160,7 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 	connectionLimiter.UpdateLimit(cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
 	proxyHandler := newProxyServer(deps)
-	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry)
+	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry, nil)
 
 	proxySrv, metricsSrv := newHTTPServers(cfg, proxyHandler.Handler(), metricsHandler.Handler())
 	return proxySrv, metricsSrv, m, nil

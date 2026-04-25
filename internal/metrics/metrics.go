@@ -14,6 +14,8 @@ type Metrics struct {
 	DiscoveryProviderStartsTotal           *prometheus.CounterVec
 	DiscoveryProviderFailuresTotal         *prometheus.CounterVec
 	DiscoveryProvidersActive               prometheus.Gauge
+	IdentityProviderStatus                 *prometheus.GaugeVec
+	IdentityProviderLastSuccess            *prometheus.GaugeVec
 	IdentityMapEntries                     *prometheus.GaugeVec
 	IdentityResolutionsTotal               *prometheus.CounterVec
 	IdentityOverlapsTotal                  *prometheus.CounterVec
@@ -114,6 +116,20 @@ func New(reg prometheus.Registerer) *Metrics {
 				Name: "aegis_discovery_providers_active",
 				Help: "Number of active discovery providers.",
 			},
+		),
+		IdentityProviderStatus: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_identity_provider_status",
+				Help: "Current discovery provider status. Exactly one of active, stale, or down is 1 for each provider.",
+			},
+			[]string{"provider", "kind", "status"},
+		),
+		IdentityProviderLastSuccess: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_identity_provider_last_success_timestamp_seconds",
+				Help: "Unix timestamp of the last successful discovery provider sync or watch establishment.",
+			},
+			[]string{"provider", "kind"},
 		),
 		IdentityMapEntries: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -259,6 +275,8 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.DiscoveryProviderStartsTotal,
 		m.DiscoveryProviderFailuresTotal,
 		m.DiscoveryProvidersActive,
+		m.IdentityProviderStatus,
+		m.IdentityProviderLastSuccess,
 		m.IdentityMapEntries,
 		m.IdentityResolutionsTotal,
 		m.IdentityOverlapsTotal,

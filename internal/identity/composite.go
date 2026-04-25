@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 
@@ -91,4 +92,38 @@ func (r *CompositeResolver) Resolve(ip net.IP) (*Identity, error) {
 	}
 
 	return winner, nil
+}
+
+func (r *CompositeResolver) ProviderStatuses() []ProviderStatus {
+	statuses := make([]ProviderStatus, 0, len(r.providers))
+	for _, provider := range r.providers {
+		if reporter, ok := provider.Resolver.(StatusReporter); ok {
+			status := reporter.ProviderStatus()
+			if status.Name == "" {
+				status.Name = provider.Name
+			}
+			if status.Kind == "" {
+				status.Kind = provider.Kind
+			}
+			if status.State == "" {
+				status.State = ProviderStateActive
+			}
+			statuses = append(statuses, status)
+			continue
+		}
+
+		statuses = append(statuses, ProviderStatus{
+			Name:  provider.Name,
+			Kind:  provider.Kind,
+			State: ProviderStateActive,
+		})
+	}
+	return statuses
+}
+
+func (r *CompositeResolver) CheckReadiness() error {
+	if err := ReadinessError(r.ProviderStatuses()); err != nil {
+		return fmt.Errorf("discovery not ready: %w", err)
+	}
+	return nil
 }
