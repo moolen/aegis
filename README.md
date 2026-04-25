@@ -79,10 +79,11 @@ Current runtime behavior:
   global audit mode immediately, `mode=enforce` forces blocking immediately,
   and `mode=config` clears the override and returns to the configured
   `proxy.enforcement` value. `GET /admin/enforcement` reports the configured,
-  override, and effective modes, `/admin/identities` returns the live
-  discovery map, `/admin/simulate` evaluates a hypothetical request against the
-  active runtime state, and `aegis_enforcement_mode` exposes the effective mode
-  in Prometheus.
+  override, and effective modes, `GET /admin/runtime` returns the active MITM
+  CA issuer plus any loaded companion CAs, `/admin/identities` returns the
+  live discovery map, `/admin/simulate` evaluates a hypothetical request
+  against the active runtime state, and `aegis_enforcement_mode` exposes the
+  effective mode in Prometheus.
 - When a matching policy sets `bypass: true`, that policy behaves like a
   scoped shadow rule: Aegis records would-allow / would-deny outcomes for the
   match but still forwards the traffic. As with global audit mode, bypassed
@@ -92,9 +93,11 @@ Current runtime behavior:
   mode before any upstream dial happens.
 - TLS MITM requires `proxy.ca.certFile` and `proxy.ca.keyFile`; once
   configured, Aegis terminates client TLS, verifies upstream TLS, and evaluates
-  decrypted HTTP requests before forwarding them. During CA rotation windows,
-  `proxy.ca.additional` can load previous CA keypairs alongside the active
-  issuing CA so the runtime tracks the full CA set across reloads.
+  decrypted HTTP requests before forwarding them. `proxy.ca` is always the
+  active issuing CA for forged MITM leaf certificates. During CA rotation
+  windows, `proxy.ca.additional[]` keeps companion CAs loaded so the runtime
+  can report the full CA set and distinguish issuer rotation from
+  companion-only reload changes.
 - When `proxy.proxyProtocol.enabled` is set, the proxy listener requires Proxy
   Protocol v2 on inbound connections and uses the forwarded source IP for
   request identity resolution.
@@ -129,6 +132,19 @@ TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
 NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
 the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
 discovery changes without restarting the process, send `SIGHUP` to Aegis.
+When rotating trust, keep the new active issuer under `proxy.ca` and keep the
+old CA loaded under `proxy.ca.additional[]`, for example:
+
+```yaml
+proxy:
+  ca:
+    certFile: /etc/aegis/ca/new-ca.crt
+    keyFile: /etc/aegis/ca/new-ca.key
+    additional:
+      - certFile: /etc/aegis/ca/old-ca.crt
+        keyFile: /etc/aegis/ca/old-ca.key
+```
+
 For migration, set `proxy.enforcement: audit` to shadow policy decisions
 without blocking traffic. For staged rollout, keep the global mode enforced and
 set `policies[].enforcement: audit` on the workloads that still need shadow
@@ -160,6 +176,8 @@ Inspect metrics:
 curl http://127.0.0.1:9090/healthz
 curl http://127.0.0.1:9090/readyz
 curl http://127.0.0.1:9090/metrics
+curl -H 'Authorization: Bearer replace-me' \
+  'http://127.0.0.1:9090/admin/runtime'
 curl -H 'Authorization: Bearer replace-me' \
   'http://127.0.0.1:9090/admin/identities'
 curl -H 'Authorization: Bearer replace-me' \
@@ -230,9 +248,13 @@ per-policy `config.policies[].enforcement: audit` or
 `config.policies[].bypass: true` are supported for migration rollouts,
 `config.admin.token` enables the metrics-port global kill switch and admin
 tooling endpoints, `config.proxy.unknownIdentityPolicy` controls default-deny
-behavior for unresolved sources, `config.proxy.ca.additional` supports dual-CA
-rotation windows, and `config.proxy.connectionLimits.maxConcurrentPerIdentity`
-can be used as a simple abuse-control guardrail. The Fargate scaffold also
+behavior for unresolved sources, `config.proxy.ca` stays the active issuing CA
+for forged MITM leaf certificates, `config.proxy.ca.additional[]` keeps
+companion CAs loaded during dual-CA rotation windows so `GET /admin/runtime`
+can report the full CA set and reloads can distinguish `rotated` from
+`companions_changed`, and
+`config.proxy.connectionLimits.maxConcurrentPerIdentity` can be used as a
+simple abuse-control guardrail. The Fargate scaffold also
 exposes an
 `enable_proxy_protocol_v2` switch on the NLB target group so source IP
 preservation can be paired with `config.proxy.proxyProtocol.enabled`.

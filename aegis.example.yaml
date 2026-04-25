@@ -11,9 +11,13 @@ proxy:
   #   enabled: true
   #   headerTimeout: 2s
   # Uncomment to enable TLS MITM for CONNECT rules with tls.mode: mitm.
+  # proxy.ca is always the active issuing CA for forged MITM leaf certificates.
+  # Keep previous trust roots under proxy.ca.additional during rotation windows
+  # so Aegis can report the full CA set and distinguish issuer rotation from
+  # companion-only reload changes.
   # ca:
-  #   certFile: /etc/aegis/ca/ca.crt
-  #   keyFile: /etc/aegis/ca/ca.key
+  #   certFile: /etc/aegis/ca/new-ca.crt
+  #   keyFile: /etc/aegis/ca/new-ca.key
   #   additional:
   #     - certFile: /etc/aegis/ca/old-ca.crt
   #       keyFile: /etc/aegis/ca/old-ca.key
