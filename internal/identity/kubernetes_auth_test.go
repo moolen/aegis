@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"golang.org/x/oauth2"
 	"k8s.io/client-go/rest"
 
@@ -408,7 +411,246 @@ func TestBuildAKSRESTConfigPropagatesKubeconfigErrors(t *testing.T) {
 	}
 }
 
+func TestApplyBearerTokenSourcePreservesExistingWrapTransport(t *testing.T) {
+	cfg := applyBearerTokenSource(&rest.Config{
+		WrapTransport: func(rt http.RoundTripper) http.RoundTripper {
+			return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				req.Header.Set("X-Existing-Wrap", "present")
+				return rt.RoundTrip(req)
+			})
+		},
+	}, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "wrapped-token"}))
+
+	headers := requestHeaders(t, cfg)
+	if headers.Get("Authorization") != "Bearer wrapped-token" {
+		t.Fatalf("authorization header = %q, want Bearer wrapped-token", headers.Get("Authorization"))
+	}
+	if headers.Get("X-Existing-Wrap") != "present" {
+		t.Fatalf("X-Existing-Wrap header = %q, want present", headers.Get("X-Existing-Wrap"))
+	}
+}
+
+func TestApplyBearerTokenSourceRefreshesTokenAcrossRequests(t *testing.T) {
+	tokenSource := &sequenceTokenSource{
+		tokens: []oauth2.Token{
+			{AccessToken: "token-a"},
+			{AccessToken: "token-b"},
+		},
+	}
+	cfg := applyBearerTokenSource(&rest.Config{}, tokenSource)
+
+	first := requestHeaders(t, cfg)
+	second := requestHeaders(t, cfg)
+
+	if first.Get("Authorization") != "Bearer token-a" {
+		t.Fatalf("first authorization header = %q, want Bearer token-a", first.Get("Authorization"))
+	}
+	if second.Get("Authorization") != "Bearer token-b" {
+		t.Fatalf("second authorization header = %q, want Bearer token-b", second.Get("Authorization"))
+	}
+	if tokenSource.calls != 2 {
+		t.Fatalf("token source calls = %d, want 2", tokenSource.calls)
+	}
+}
+
+func TestAKSTokenRequestParametersSelectsCurrentContextServerID(t *testing.T) {
+	serverID, tenantID, err := aksTokenRequestParameters([]byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YQ==
+    server: https://aks.example
+  name: cluster-a
+- cluster:
+    certificate-authority-data: Yg==
+    server: https://aks-b.example
+  name: cluster-b
+contexts:
+- context:
+    cluster: cluster-a
+    user: user-a
+  name: ctx-a
+- context:
+    cluster: cluster-b
+    user: user-b
+  name: ctx-b
+current-context: ctx-b
+kind: Config
+users:
+- name: user-a
+  user:
+    exec:
+      command: kubelogin
+      args:
+      - get-token
+      - --server-id
+      - ignored
+- name: user-b
+  user:
+    exec:
+      command: kubelogin
+      args:
+      - get-token
+      - --server-id=server-b
+      - --tenant-id
+      - tenant-b
+`))
+	if err != nil {
+		t.Fatalf("aksTokenRequestParameters() error = %v", err)
+	}
+	if serverID != "server-b" {
+		t.Fatalf("serverID = %q, want server-b", serverID)
+	}
+	if tenantID != "tenant-b" {
+		t.Fatalf("tenantID = %q, want tenant-b", tenantID)
+	}
+}
+
+func TestAKSTokenRequestParametersFallsBackToFirstContext(t *testing.T) {
+	serverID, tenantID, err := aksTokenRequestParameters([]byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YQ==
+    server: https://aks.example
+  name: cluster-a
+contexts:
+- context:
+    cluster: cluster-a
+    user: user-a
+  name: ctx-a
+kind: Config
+users:
+- name: user-a
+  user:
+    exec:
+      command: kubelogin
+      args:
+      - get-token
+      - --server-id
+      - first-server
+`))
+	if err != nil {
+		t.Fatalf("aksTokenRequestParameters() error = %v", err)
+	}
+	if serverID != "first-server" {
+		t.Fatalf("serverID = %q, want first-server", serverID)
+	}
+	if tenantID != "" {
+		t.Fatalf("tenantID = %q, want empty", tenantID)
+	}
+}
+
+func TestAKSTokenRequestParametersRejectsMissingServerID(t *testing.T) {
+	_, _, err := aksTokenRequestParameters([]byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YQ==
+    server: https://aks.example
+  name: cluster-a
+contexts:
+- context:
+    cluster: cluster-a
+    user: user-a
+  name: ctx-a
+current-context: ctx-a
+kind: Config
+users:
+- name: user-a
+  user:
+    exec:
+      command: kubelogin
+      args:
+      - get-token
+`))
+	if err == nil {
+		t.Fatal("expected missing server-id error")
+	}
+	if !strings.Contains(err.Error(), "--server-id") {
+		t.Fatalf("error = %q, want missing server-id message", err)
+	}
+}
+
+func TestAzureOAuth2TokenSourceUsesConfiguredCredential(t *testing.T) {
+	credential := &fakeAzureTokenCredential{
+		token: azcore.AccessToken{
+			Token:     "azure-token",
+			ExpiresOn: time.Unix(123, 0).UTC(),
+		},
+	}
+	source := azureOAuth2TokenSource{
+		ctx:        context.Background(),
+		credential: credential,
+		options: policy.TokenRequestOptions{
+			Scopes:   []string{"scope/.default"},
+			TenantID: "tenant-a",
+		},
+	}
+
+	token, err := source.Token()
+	if err != nil {
+		t.Fatalf("Token() error = %v", err)
+	}
+	if token.AccessToken != "azure-token" {
+		t.Fatalf("access token = %q, want azure-token", token.AccessToken)
+	}
+	if !token.Expiry.Equal(time.Unix(123, 0).UTC()) {
+		t.Fatalf("expiry = %s, want %s", token.Expiry, time.Unix(123, 0).UTC())
+	}
+	if credential.calls != 1 {
+		t.Fatalf("credential calls = %d, want 1", credential.calls)
+	}
+	if len(credential.lastOptions.Scopes) != 1 || credential.lastOptions.Scopes[0] != "scope/.default" {
+		t.Fatalf("credential scopes = %#v, want scope/.default", credential.lastOptions.Scopes)
+	}
+	if credential.lastOptions.TenantID != "tenant-a" {
+		t.Fatalf("credential tenant = %q, want tenant-a", credential.lastOptions.TenantID)
+	}
+}
+
+func TestNewAKSAmbientAzureCredentialUsesOnlyNonCLISources(t *testing.T) {
+	envCred := &fakeAzureTokenCredential{}
+	workloadCred := &fakeAzureTokenCredential{}
+	managedCred := &fakeAzureTokenCredential{}
+
+	var gotSources []azcore.TokenCredential
+	credential, err := newAKSAmbientAzureCredential(aksAzureCredentialDeps{
+		newEnvironmentCredential: func() (azcore.TokenCredential, error) {
+			return envCred, nil
+		},
+		newWorkloadIdentityCredential: func() (azcore.TokenCredential, error) {
+			return workloadCred, nil
+		},
+		newManagedIdentityCredential: func() (azcore.TokenCredential, error) {
+			return managedCred, nil
+		},
+		newChainedTokenCredential: func(sources []azcore.TokenCredential) (azcore.TokenCredential, error) {
+			gotSources = append([]azcore.TokenCredential(nil), sources...)
+			return managedCred, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("newAKSAmbientAzureCredential() error = %v", err)
+	}
+	if credential != managedCred {
+		t.Fatalf("credential = %v, want chained credential result", credential)
+	}
+	if len(gotSources) != 3 {
+		t.Fatalf("chained sources len = %d, want 3", len(gotSources))
+	}
+	if gotSources[0] != envCred || gotSources[1] != workloadCred || gotSources[2] != managedCred {
+		t.Fatalf("chained sources = %#v, want env/workload/managed order", gotSources)
+	}
+}
+
 func authorizationHeader(t *testing.T, cfg *rest.Config) string {
+	t.Helper()
+
+	return requestHeaders(t, cfg).Get("Authorization")
+}
+
+func requestHeaders(t *testing.T, cfg *rest.Config) http.Header {
 	t.Helper()
 
 	transport := cfg.WrapTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -430,11 +672,37 @@ func authorizationHeader(t *testing.T, cfg *rest.Config) string {
 	}
 	defer resp.Body.Close()
 
-	return resp.Request.Header.Get("Authorization")
+	return resp.Request.Header.Clone()
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+type sequenceTokenSource struct {
+	tokens []oauth2.Token
+	calls  int
+}
+
+func (s *sequenceTokenSource) Token() (*oauth2.Token, error) {
+	if s.calls >= len(s.tokens) {
+		return nil, errors.New("no more tokens")
+	}
+	token := s.tokens[s.calls]
+	s.calls++
+	return &token, nil
+}
+
+type fakeAzureTokenCredential struct {
+	token       azcore.AccessToken
+	calls       int
+	lastOptions policy.TokenRequestOptions
+}
+
+func (c *fakeAzureTokenCredential) GetToken(_ context.Context, options policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	c.calls++
+	c.lastOptions = options
+	return c.token, nil
 }

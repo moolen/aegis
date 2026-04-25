@@ -62,6 +62,13 @@ type aksRESTConfigDeps struct {
 	tokenSource    func(ctx context.Context, rawKubeconfig []byte) (oauth2.TokenSource, error)
 }
 
+type aksAzureCredentialDeps struct {
+	newEnvironmentCredential      func() (azcore.TokenCredential, error)
+	newWorkloadIdentityCredential func() (azcore.TokenCredential, error)
+	newManagedIdentityCredential  func() (azcore.TokenCredential, error)
+	newChainedTokenCredential     func([]azcore.TokenCredential) (azcore.TokenCredential, error)
+}
+
 func defaultKubernetesAuthDeps() kubernetesAuthDeps {
 	return kubernetesAuthDeps{
 		loadKubeconfig: loadKubeconfig,
@@ -242,7 +249,7 @@ func defaultGKETokenSource(ctx context.Context) (oauth2.TokenSource, error) {
 }
 
 func defaultLoadAKSKubeconfig(ctx context.Context, subscriptionID string, resourceGroup string, clusterName string) ([]byte, error) {
-	credential, err := azidentity.NewDefaultAzureCredential(nil)
+	credential, err := newAKSAmbientAzureCredential(defaultAKSAzureCredentialDeps())
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +280,7 @@ func defaultAKSTokenSource(ctx context.Context, rawKubeconfig []byte) (oauth2.To
 		return nil, err
 	}
 
-	credential, err := azidentity.NewDefaultAzureCredential(nil)
+	credential, err := newAKSAmbientAzureCredential(defaultAKSAzureCredentialDeps())
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +293,62 @@ func defaultAKSTokenSource(ctx context.Context, rawKubeconfig []byte) (oauth2.To
 			TenantID: tenantID,
 		},
 	}), nil
+}
+
+func defaultAKSAzureCredentialDeps() aksAzureCredentialDeps {
+	return aksAzureCredentialDeps{
+		newEnvironmentCredential: func() (azcore.TokenCredential, error) {
+			return azidentity.NewEnvironmentCredential(nil)
+		},
+		newWorkloadIdentityCredential: func() (azcore.TokenCredential, error) {
+			return azidentity.NewWorkloadIdentityCredential(nil)
+		},
+		newManagedIdentityCredential: func() (azcore.TokenCredential, error) {
+			return azidentity.NewManagedIdentityCredential(nil)
+		},
+		newChainedTokenCredential: func(sources []azcore.TokenCredential) (azcore.TokenCredential, error) {
+			return azidentity.NewChainedTokenCredential(sources, &azidentity.ChainedTokenCredentialOptions{
+				RetrySources: true,
+			})
+		},
+	}
+}
+
+func newAKSAmbientAzureCredential(deps aksAzureCredentialDeps) (azcore.TokenCredential, error) {
+	var sources []azcore.TokenCredential
+	var lastErr error
+
+	for _, constructor := range []func() (azcore.TokenCredential, error){
+		deps.newEnvironmentCredential,
+		deps.newWorkloadIdentityCredential,
+		deps.newManagedIdentityCredential,
+	} {
+		if constructor == nil {
+			continue
+		}
+
+		credential, err := constructor()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if credential != nil {
+			sources = append(sources, credential)
+		}
+	}
+
+	if len(sources) == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no ambient azure credential sources available for aks")
+	}
+
+	if deps.newChainedTokenCredential == nil {
+		return nil, fmt.Errorf("aks chained azure credential constructor is not configured")
+	}
+
+	return deps.newChainedTokenCredential(sources)
 }
 
 func managedClusterConnectionFromEKS(cluster *awseksTypes.Cluster) (managedClusterConnection, error) {
