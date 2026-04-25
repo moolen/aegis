@@ -302,6 +302,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("policies[%d].subjects must reference at least one discovery provider", i)
 		}
 		if policy.Subjects.Kubernetes != nil {
+			if len(policy.Subjects.Kubernetes.DiscoveryNames) == 0 {
+				return fmt.Errorf("policies[%d].subjects.kubernetes.discoveryNames must contain at least one discovery name", i)
+			}
 			if len(policy.Subjects.Kubernetes.Namespaces) == 0 {
 				return fmt.Errorf("policies[%d].subjects.kubernetes.namespaces must contain at least one namespace", i)
 			}
@@ -317,6 +320,9 @@ func (c Config) Validate() error {
 			}
 		}
 		if policy.Subjects.EC2 != nil {
+			if len(policy.Subjects.EC2.DiscoveryNames) == 0 {
+				return fmt.Errorf("policies[%d].subjects.ec2.discoveryNames must contain at least one discovery name", i)
+			}
 			for j, discoveryName := range policy.Subjects.EC2.DiscoveryNames {
 				if strings.TrimSpace(discoveryName) == "" {
 					return fmt.Errorf("policies[%d].subjects.ec2.discoveryNames[%d] must not be empty", i, j)

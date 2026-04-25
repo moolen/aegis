@@ -1238,6 +1238,74 @@ policies:
 	}
 }
 
+func TestLoadRejectsKubernetesPolicySubjectsWithoutDiscoveryNames(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
+  ec2:
+    - name: production-ec2
+      region: eu-central-1
+policies:
+  - name: missing-kubernetes-discovery-names
+    subjects:
+      kubernetes:
+        namespaces: ["default"]
+        matchLabels:
+          app: web
+      ec2:
+        discoveryNames: ["production-ec2"]
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "policies[0].subjects.kubernetes.discoveryNames must contain at least one discovery name") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsEC2PolicySubjectsWithoutDiscoveryNames(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
+  ec2:
+    - name: production-ec2
+      region: eu-central-1
+policies:
+  - name: missing-ec2-discovery-names
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels:
+          app: web
+      ec2: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "policies[0].subjects.ec2.discoveryNames must contain at least one discovery name") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
 func TestExampleConfigIncludesDiscoverySection(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "aegis.example.yaml"))
 	if err != nil {
