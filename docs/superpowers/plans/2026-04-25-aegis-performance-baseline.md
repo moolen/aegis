@@ -178,7 +178,8 @@ Create `perf/scripts/fixtures.go` as a small Go program with:
 - `fixtureConfig` struct
 - `parseFixtureConfig(args []string) (fixtureConfig, error)`
 - `newHTTPFixture(path string, successStatus int) http.Handler`
-- optional TLS startup path using generated or temp test certs for HTTPS fixtures
+- invalid mode rejection for any mode outside `http|passthrough|mitm`
+- minimal HTTPS startup path for `passthrough` and `mitm` using generated or temp test certs
 - `main()` that starts the requested listener and prints the bound address in a stable format
 
 Core shape:
@@ -209,6 +210,11 @@ func parseFixtureConfig(args []string) (fixtureConfig, error) {
     if err := fs.Parse(args); err != nil {
         return fixtureConfig{}, err
     }
+    switch cfg.Mode {
+    case "http", "passthrough", "mitm":
+    default:
+        return fixtureConfig{}, fmt.Errorf("invalid mode %q", cfg.Mode)
+    }
     return cfg, nil
 }
 
@@ -227,12 +233,9 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    ln, err := net.Listen("tcp", cfg.Listen)
-    if err != nil {
+    if err := runFixture(os.Args[1:], os.Stdout); err != nil {
         log.Fatal(err)
     }
-    fmt.Printf("LISTEN_ADDR=%s\n", ln.Addr().String())
-    log.Fatal(http.Serve(ln, newHTTPFixture(cfg.Path, http.StatusNoContent)))
 }
 ```
 
