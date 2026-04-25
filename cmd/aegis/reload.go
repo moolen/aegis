@@ -574,19 +574,8 @@ func sameFingerprintSet(left []string, right []string) bool {
 	if len(left) != len(right) {
 		return false
 	}
-
-	counts := make(map[string]int, len(left))
-	for _, fingerprint := range left {
-		counts[fingerprint]++
-	}
-	for _, fingerprint := range right {
-		counts[fingerprint]--
-		if counts[fingerprint] < 0 {
-			return false
-		}
-	}
-	for _, count := range counts {
-		if count != 0 {
+	for i := range left {
+		if left[i] != right[i] {
 			return false
 		}
 	}

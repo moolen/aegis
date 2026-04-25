@@ -600,8 +600,8 @@ func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
 
 func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
 	issuerCert, issuerKey := writeTestCAFiles(t, "Issuer CA")
-	companionACert, companionAKey := writeTestCAFiles(t, "Old Companion A")
-	companionBCert, companionBKey := writeTestCAFiles(t, "Old Companion B")
+	companionACert, companionAKey := writeTestCAFiles(t, "Companion A")
+	companionBCert, companionBKey := writeTestCAFiles(t, "Companion B")
 
 	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithAdditionalCAs(
 		"policy-a",
@@ -609,7 +609,10 @@ func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
 		":9090",
 		issuerCert,
 		issuerKey,
-		[][2]string{{companionACert, companionAKey}},
+		[][2]string{
+			{companionACert, companionAKey},
+			{companionBCert, companionBKey},
+		},
 	))
 
 	reg := prometheus.NewRegistry()
@@ -623,6 +626,12 @@ func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
 	if err := manager.LoadInitial(cfg); err != nil {
 		t.Fatalf("LoadInitial() error = %v", err)
 	}
+	if _, _, err := manager.current.mitm.CertificateForSNI("example.com"); err != nil {
+		t.Fatalf("CertificateForSNI() error = %v", err)
+	}
+	if got := gaugeValue(t, reg, "aegis_mitm_certificate_cache_entries"); got != 1 {
+		t.Fatalf("cache entries gauge = %v, want 1", got)
+	}
 
 	writeRuntimeConfigAt(t, configPath, runtimeConfigYAMLWithAdditionalCAs(
 		"policy-b",
@@ -630,7 +639,10 @@ func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
 		":9090",
 		issuerCert,
 		issuerKey,
-		[][2]string{{companionBCert, companionBKey}},
+		[][2]string{
+			{companionBCert, companionBKey},
+			{companionACert, companionAKey},
+		},
 	))
 	if err := manager.ReloadFromFile(); err != nil {
 		t.Fatalf("ReloadFromFile() error = %v", err)
@@ -639,8 +651,20 @@ func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
 	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "companions_changed"}); got != 1 {
 		t.Fatalf("companions_changed metric = %v, want 1", got)
 	}
+	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "unchanged"}); got != 0 {
+		t.Fatalf("unchanged metric = %v, want 0", got)
+	}
 	if got := counterValue(t, reg, "aegis_mitm_ca_cycles_total", map[string]string{"result": "rotated"}); got != 0 {
 		t.Fatalf("rotated metric = %v, want 0", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_certificate_cache_evictions_total", map[string]string{"reason": "reload"}); got != 1 {
+		t.Fatalf("reload eviction metric = %v, want 1", got)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_certificate_cache_evictions_total", map[string]string{"reason": "rotation"}); got != 0 {
+		t.Fatalf("rotation eviction metric = %v, want 0", got)
+	}
+	if got := gaugeValue(t, reg, "aegis_mitm_certificate_cache_entries"); got != 0 {
+		t.Fatalf("cache entries gauge = %v, want 0", got)
 	}
 }
 
