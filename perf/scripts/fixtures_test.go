@@ -53,11 +53,15 @@ func TestFixtureConfigRejectsInvalidMode(t *testing.T) {
 }
 
 func TestHTTPModeServesPlainHTTP(t *testing.T) {
-	addr, stop := startTestFixture(t, "http")
+	fixture, stop := startTestFixture(t, fixtureConfig{
+		Mode:   "http",
+		Listen: "127.0.0.1:0",
+		Path:   "/allowed",
+	})
 	defer stop()
 
 	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Get("http://" + addr + "/allowed")
+	resp, err := client.Get("http://" + fixture.addr + "/allowed")
 	if err != nil {
 		t.Fatalf("HTTP GET in http mode error = %v", err)
 	}
@@ -71,11 +75,15 @@ func TestHTTPModeServesPlainHTTP(t *testing.T) {
 func TestTLSModesServeHTTPS(t *testing.T) {
 	for _, mode := range []string{"passthrough", "mitm"} {
 		t.Run(mode, func(t *testing.T) {
-			addr, stop := startTestFixture(t, mode)
+			fixture, stop := startTestFixture(t, fixtureConfig{
+				Mode:   mode,
+				Listen: "127.0.0.1:0",
+				Path:   "/allowed",
+			})
 			defer stop()
 
 			httpClient := &http.Client{Timeout: time.Second}
-			resp, err := httpClient.Get("http://" + addr + "/allowed")
+			resp, err := httpClient.Get("http://" + fixture.addr + "/allowed")
 			if err == nil {
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusNoContent {
@@ -86,10 +94,10 @@ func TestTLSModesServeHTTPS(t *testing.T) {
 			httpsClient := &http.Client{
 				Timeout: time.Second,
 				Transport: &http.Transport{
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+					TLSClientConfig: &tls.Config{RootCAs: fixture.rootCAs},
 				},
 			}
-			resp, err = httpsClient.Get("https://" + addr + "/allowed")
+			resp, err = httpsClient.Get("https://" + fixture.addr + "/allowed")
 			if err != nil {
 				t.Fatalf("HTTPS GET in %s mode error = %v", mode, err)
 			}
@@ -102,15 +110,40 @@ func TestTLSModesServeHTTPS(t *testing.T) {
 	}
 }
 
-func startTestFixture(t *testing.T, mode string) (string, func()) {
+func TestTLSModesPublishVerifiableAddress(t *testing.T) {
+	for _, mode := range []string{"passthrough", "mitm"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture, stop := startTestFixture(t, fixtureConfig{
+				Mode:   mode,
+				Listen: "0.0.0.0:0",
+				Path:   "/allowed",
+			})
+			defer stop()
+
+			client := &http.Client{
+				Timeout: time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{RootCAs: fixture.rootCAs},
+				},
+			}
+			resp, err := client.Get("https://" + fixture.addr + "/allowed")
+			if err != nil {
+				t.Fatalf("HTTPS GET via published address error = %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+			}
+		})
+	}
+}
+
+func startTestFixture(t *testing.T, cfg fixtureConfig) (*runningFixture, func()) {
 	t.Helper()
 
 	var stdout bytes.Buffer
-	fixture, err := startFixture(fixtureConfig{
-		Mode:   mode,
-		Listen: "127.0.0.1:0",
-		Path:   "/allowed",
-	}, &stdout)
+	fixture, err := startFixture(cfg, &stdout)
 	if err != nil {
 		t.Fatalf("startFixture() error = %v", err)
 	}
@@ -135,5 +168,5 @@ func startTestFixture(t *testing.T, mode string) (string, func()) {
 		}
 	}
 
-	return fixture.addr, stop
+	return fixture, stop
 }
