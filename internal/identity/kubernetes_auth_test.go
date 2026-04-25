@@ -591,7 +591,7 @@ users:
 	}
 }
 
-func TestAKSTokenRequestParametersFallsBackToFirstContext(t *testing.T) {
+func TestAKSTokenRequestParametersUsesOnlyContextWhenCurrentContextMissing(t *testing.T) {
 	serverID, tenantID, err := aksTokenRequestParameters([]byte(`
 apiVersion: v1
 clusters:
@@ -623,6 +623,54 @@ users:
 	}
 	if tenantID != "" {
 		t.Fatalf("tenantID = %q, want empty", tenantID)
+	}
+}
+
+func TestAKSTokenRequestParametersRejectsAmbiguousContextWhenCurrentContextMissing(t *testing.T) {
+	_, _, err := aksTokenRequestParameters([]byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YQ==
+    server: https://aks-a.example
+  name: cluster-a
+- cluster:
+    certificate-authority-data: Yg==
+    server: https://aks-b.example
+  name: cluster-b
+contexts:
+- context:
+    cluster: cluster-a
+    user: user-a
+  name: ctx-a
+- context:
+    cluster: cluster-b
+    user: user-b
+  name: ctx-b
+kind: Config
+users:
+- name: user-a
+  user:
+    exec:
+      command: kubelogin
+      args:
+      - get-token
+      - --server-id
+      - server-a
+- name: user-b
+  user:
+    exec:
+      command: kubelogin
+      args:
+      - get-token
+      - --server-id
+      - server-b
+`))
+	if err == nil {
+		t.Fatal("expected ambiguous context error")
+	}
+	if !strings.Contains(err.Error(), "current-context is required when multiple contexts are present") {
+		t.Fatalf("error = %q, want deterministic ambiguous-context message", err)
 	}
 }
 

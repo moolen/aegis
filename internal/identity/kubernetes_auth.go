@@ -25,6 +25,7 @@ import (
 	"golang.org/x/oauth2/google"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/moolen/aegis/internal/config"
 )
@@ -455,12 +456,9 @@ func aksExecAuthTokenRequestParameters(rawKubeconfig []byte) (string, string, bo
 		return "", "", false, err
 	}
 
-	contextName := cfg.CurrentContext
-	if strings.TrimSpace(contextName) == "" {
-		for name := range cfg.Contexts {
-			contextName = name
-			break
-		}
+	contextName, err := aksContextName(cfg)
+	if err != nil {
+		return "", "", false, err
 	}
 
 	contextCfg, ok := cfg.Contexts[contextName]
@@ -485,6 +483,24 @@ func aksExecAuthTokenRequestParameters(rawKubeconfig []byte) (string, string, bo
 	}
 
 	return serverID, execArgValue(authInfo.Exec.Args, "--tenant-id"), true, nil
+}
+
+func aksContextName(cfg *clientcmdapi.Config) (string, error) {
+	contextName := strings.TrimSpace(cfg.CurrentContext)
+	if contextName != "" {
+		return contextName, nil
+	}
+
+	switch len(cfg.Contexts) {
+	case 0:
+		return "", fmt.Errorf("aks kubeconfig did not include a usable current context")
+	case 1:
+		for name := range cfg.Contexts {
+			return name, nil
+		}
+	}
+
+	return "", fmt.Errorf("aks kubeconfig current-context is required when multiple contexts are present")
 }
 
 func execArgValue(args []string, flag string) string {
