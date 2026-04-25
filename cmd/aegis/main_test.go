@@ -30,6 +30,56 @@ import (
 	"github.com/moolen/aegis/internal/proxy"
 )
 
+func runtimeTestKubernetesSubjects() config.PolicySubjectsConfig {
+	return config.PolicySubjectsConfig{
+		Kubernetes: &config.KubernetesSubjectConfig{
+			DiscoveryNames: []string{"cluster-a"},
+			Namespaces:     []string{"default"},
+			MatchLabels: map[string]string{
+				"app": "web",
+			},
+		},
+	}
+}
+
+func runtimeTestKubernetesDiscovery() config.DiscoveryConfig {
+	return config.DiscoveryConfig{
+		Kubernetes: []config.KubernetesDiscoveryConfig{{
+			Name: "cluster-a",
+			Auth: config.KubernetesAuthConfig{
+				Provider: "inCluster",
+			},
+		}},
+	}
+}
+
+func stubRuntimeKubernetesProvider(t *testing.T) {
+	t.Helper()
+
+	restoreProvider := newKubernetesRuntimeProvider
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreProvider
+	})
+
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		return identity.RuntimeProvider{
+			Name: cfg.Name,
+			Kind: "kubernetes",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{
+					Source:   "kubernetes",
+					Provider: cfg.Name,
+					Name:     "default/web",
+					Labels: map[string]string{
+						"kubernetes.io/namespace": "default",
+						"app":                     "web",
+					},
+				},
+			},
+		}, nil
+	}
+}
+
 func TestBuildIdentityResolverKeepsHealthyProvidersAfterStartupFailure(t *testing.T) {
 	restoreKubernetes := newKubernetesRuntimeProvider
 	restoreEC2 := newEC2RuntimeProvider
@@ -263,16 +313,15 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 		Proxy:   config.ProxyConfig{Listen: ":8080"},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
-			Name: "allow-example",
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
 			Egress: []config.EgressRuleConfig{{
 				FQDN:  "example.com",
 				Ports: []int{443},
 				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
 			}},
 		}},
-		Discovery: config.DiscoveryConfig{
-			Kubernetes: []config.KubernetesDiscoveryConfig{{Name: "cluster-a"}},
-		},
+		Discovery: runtimeTestKubernetesDiscovery(),
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("buildServers() error = %v", err)
@@ -303,8 +352,21 @@ func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
 	})
 
 	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
-		t.Fatalf("unexpected kubernetes provider build for %q", cfg.Name)
-		return identity.RuntimeProvider{}, nil
+		return identity.RuntimeProvider{
+			Name: cfg.Name,
+			Kind: "kubernetes",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{
+					Source:   "kubernetes",
+					Provider: cfg.Name,
+					Name:     "default/web",
+					Labels: map[string]string{
+						"kubernetes.io/namespace": "default",
+						"app":                     "web",
+					},
+				},
+			},
+		}, nil
 	}
 	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
 		t.Fatalf("unexpected ec2 provider build for %q", cfg.Name)
@@ -336,13 +398,15 @@ func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
 		},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
-			Name: "allow-example",
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
 			Egress: []config.EgressRuleConfig{{
 				FQDN:  "example.com",
 				Ports: []int{443},
 				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
 			}},
 		}},
+		Discovery: runtimeTestKubernetesDiscovery(),
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("buildServers() error = %v", err)
@@ -357,11 +421,30 @@ func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
 }
 
 func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
+	restoreKubernetesProvider := newKubernetesRuntimeProvider
 	restoreMITMEngine := newMITMEngineFromFiles
 	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetesProvider
 		newMITMEngineFromFiles = restoreMITMEngine
 	})
 
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		return identity.RuntimeProvider{
+			Name: cfg.Name,
+			Kind: "kubernetes",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{
+					Source:   "kubernetes",
+					Provider: cfg.Name,
+					Name:     "default/web",
+					Labels: map[string]string{
+						"kubernetes.io/namespace": "default",
+						"app":                     "web",
+					},
+				},
+			},
+		}, nil
+	}
 	newMITMEngineFromFiles = func(certFile string, keyFile string, logger *slog.Logger) (*proxy.MITMEngine, error) {
 		return nil, errors.New("bad ca")
 	}
@@ -376,13 +459,15 @@ func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
 		},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
-			Name: "allow-example",
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
 			Egress: []config.EgressRuleConfig{{
 				FQDN:  "example.com",
 				Ports: []int{443},
 				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
 			}},
 		}},
+		Discovery: runtimeTestKubernetesDiscovery(),
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil {
 		t.Fatal("expected buildServers() to fail")
@@ -392,7 +477,82 @@ func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
 	}
 }
 
+func TestRunBuildsPoliciesFromExplicitSubjectsSchema(t *testing.T) {
+	restoreKubernetesProvider := newKubernetesRuntimeProvider
+	restoreEC2Provider := newEC2RuntimeProvider
+	t.Cleanup(func() {
+		newKubernetesRuntimeProvider = restoreKubernetesProvider
+		newEC2RuntimeProvider = restoreEC2Provider
+	})
+
+	newEC2RuntimeProvider = func(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		t.Fatalf("unexpected ec2 provider build for %q", cfg.Name)
+		return identity.RuntimeProvider{}, nil
+	}
+	newKubernetesRuntimeProvider = func(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger) (identity.RuntimeProvider, error) {
+		if cfg.Name != "cluster-a" {
+			t.Fatalf("provider name = %q, want cluster-a", cfg.Name)
+		}
+		if cfg.Auth.Provider != "inCluster" {
+			t.Fatalf("auth provider = %q, want inCluster", cfg.Auth.Provider)
+		}
+		return identity.RuntimeProvider{
+			Name: "cluster-a",
+			Kind: "kubernetes",
+			Provider: fakeStartableResolver{
+				identity: &identity.Identity{
+					Source: "kubernetes",
+					Name:   "default/web",
+					Labels: map[string]string{
+						"kubernetes.io/namespace": "default",
+						"app":                     "web",
+					},
+				},
+			},
+		}, nil
+	}
+
+	configPath := writeRuntimeConfig(t, runtimeConfigYAML("policy-a", ":3128", ":9090", false, ""))
+	cfg, err := loadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+
+	deps, err := buildProxyDependencies(
+		context.Background(),
+		cfg,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appmetrics.New(prometheus.NewRegistry()),
+		proxy.NewDrainTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), nil),
+		proxy.NewConnectionLimiter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil),
+		proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	)
+	if err != nil {
+		t.Fatalf("buildProxyDependencies() error = %v", err)
+	}
+	if deps.PolicyEngine == nil {
+		t.Fatal("PolicyEngine was not built")
+	}
+	if deps.IdentityResolver == nil {
+		t.Fatal("IdentityResolver was not built")
+	}
+
+	id, err := deps.IdentityResolver.Resolve(net.ParseIP("10.0.0.10"))
+	if err != nil {
+		t.Fatalf("IdentityResolver.Resolve() error = %v", err)
+	}
+	if id == nil {
+		t.Fatal("IdentityResolver.Resolve() returned nil identity")
+	}
+
+	decision := deps.PolicyEngine.Evaluate(id, "example.com", 80, http.MethodGet, "/")
+	if decision == nil || !decision.Allowed || decision.Policy != "policy-a" {
+		t.Fatalf("decision = %#v, want allowed policy-a decision", decision)
+	}
+}
+
 func TestRuntimeManagerReloadSwapsHandlerAndCountsSuccess(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	restoreProxyServer := newProxyServer
 	t.Cleanup(func() {
 		newProxyServer = restoreProxyServer
@@ -443,6 +603,7 @@ func TestRuntimeManagerReloadSwapsHandlerAndCountsSuccess(t *testing.T) {
 }
 
 func TestRuntimeManagerReloadFailureKeepsCurrentHandlerAndCountsError(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	restoreProxyServer := newProxyServer
 	t.Cleanup(func() {
 		newProxyServer = restoreProxyServer
@@ -514,6 +675,7 @@ func TestRuntimeManagerShutdownGracePeriodFallsBackToDefault(t *testing.T) {
 }
 
 func TestRuntimeManagerReloadTracksMITMCARotationAndCacheReset(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	certA, keyA := writeTestCAFiles(t, "Aegis Test CA A")
 	certB, keyB := writeTestCAFiles(t, "Aegis Test CA B")
 
@@ -562,6 +724,7 @@ func TestRuntimeManagerReloadTracksMITMCARotationAndCacheReset(t *testing.T) {
 }
 
 func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	certFile, keyFile := writeTestCAFiles(t, "Aegis Test CA")
 
 	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithCA("policy-a", ":3128", ":9090", certFile, keyFile))
@@ -599,6 +762,7 @@ func TestRuntimeManagerReloadTracksUnchangedMITMCAAndCacheReset(t *testing.T) {
 }
 
 func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	issuerCert, issuerKey := writeTestCAFiles(t, "Issuer CA")
 	companionACert, companionAKey := writeTestCAFiles(t, "Companion A")
 	companionBCert, companionBKey := writeTestCAFiles(t, "Companion B")
@@ -669,6 +833,7 @@ func TestRuntimeManagerReloadTracksCompanionOnlyMITMCAChanges(t *testing.T) {
 }
 
 func TestRuntimeManagerReloadRejectsInvalidCompanionCA(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	issuerCert, issuerKey := writeTestCAFiles(t, "Issuer CA")
 	configPath := writeRuntimeConfig(t, runtimeConfigYAMLWithCA("policy-a", ":3128", ":9090", issuerCert, issuerKey))
 
@@ -706,6 +871,7 @@ func TestRuntimeManagerReloadRejectsInvalidCompanionCA(t *testing.T) {
 }
 
 func TestRuntimeManagerRuntimeStatusIncludesMITMCASet(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	certA, keyA := writeTestCAFiles(t, "Primary CA")
 	certB, keyB := writeTestCAFiles(t, "Companion CA")
 
@@ -739,6 +905,7 @@ func TestRuntimeManagerRuntimeStatusIncludesMITMCASet(t *testing.T) {
 }
 
 func TestRuntimeManagerEnforcementOverridePersistsAcrossReload(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
 	configPath := writeRuntimeConfig(t, runtimeConfigYAML("policy-a", ":3128", ":9090", false, ""))
 	reg := prometheus.NewRegistry()
 	m := appmetrics.New(reg)
@@ -836,16 +1003,18 @@ func TestRuntimeManagerSimulateHonorsPolicyLevelAudit(t *testing.T) {
 	}
 	manager.current.cfg = testRuntimeConfig()
 	manager.current.identityResolver = fakeIdentityResolver{identity: &identity.Identity{
-		Name:   "default/web",
-		Source: "kubernetes",
-		Labels: map[string]string{"app": "web"},
+		Name:     "default/web",
+		Source:   "kubernetes",
+		Provider: "cluster-a",
+		Labels: map[string]string{
+			"app":                     "web",
+			"kubernetes.io/namespace": "default",
+		},
 	}}
 	engine, err := policy.NewEngine([]config.PolicyConfig{{
 		Name:        "legacy-web",
 		Enforcement: config.EnforcementAudit,
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{"app": "web"},
-		},
+		Subjects:    runtimeTestKubernetesSubjects(),
 		Egress: []config.EgressRuleConfig{{
 			FQDN:  "example.com",
 			Ports: []int{80},
@@ -877,6 +1046,66 @@ func TestRuntimeManagerSimulateHonorsPolicyLevelAudit(t *testing.T) {
 	}
 	if resp.Decision == nil || resp.Decision.PolicyEnforcement != config.EnforcementAudit {
 		t.Fatalf("decision = %#v, want policy enforcement audit", resp.Decision)
+	}
+}
+
+func TestRuntimeSimulationReturnsProviderScopedDecision(t *testing.T) {
+	manager := &runtimeManager{
+		enforcement: proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	manager.current.cfg = testRuntimeConfig()
+	manager.current.identityResolver = identity.NewCompositeResolver([]identity.ProviderHandle{{
+		Name: "cluster-b",
+		Kind: "kubernetes",
+		Resolver: fakeIdentityResolver{identity: &identity.Identity{
+			Source: "kubernetes",
+			Name:   "default/web",
+			Labels: map[string]string{
+				"kubernetes.io/namespace": "default",
+				"app":                     "web",
+			},
+		}},
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	engine, err := policy.NewEngine([]config.PolicyConfig{{
+		Name: "allow-cluster-b",
+		Subjects: config.PolicySubjectsConfig{
+			Kubernetes: &config.KubernetesSubjectConfig{
+				DiscoveryNames: []string{"cluster-b"},
+				Namespaces:     []string{"default"},
+				MatchLabels: map[string]string{
+					"app": "web",
+				},
+			},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	manager.current.policyEngine = engine
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		SourceIP: "10.0.0.10",
+		FQDN:     "example.com",
+		Port:     443,
+		Protocol: "connect",
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Identity == nil || resp.Identity.Provider != "cluster-b" {
+		t.Fatalf("identity = %#v, want provider cluster-b", resp.Identity)
+	}
+	if resp.Action != "allow" || resp.Reason != "policy_allowed" {
+		t.Fatalf("response = %#v, want allow policy_allowed", resp)
+	}
+	if resp.Decision == nil || resp.Decision.Policy != "allow-cluster-b" {
+		t.Fatalf("decision = %#v, want allow-cluster-b", resp.Decision)
 	}
 }
 
@@ -974,10 +1203,19 @@ func runtimeConfigYAML(policyName string, proxyListen string, metricsListen stri
 		"  cache_ttl: 30s\n" +
 		"  timeout: 5s\n" +
 		"  servers: []\n" +
+		"discovery:\n" +
+		"  kubernetes:\n" +
+		"    - name: cluster-a\n" +
+		"      auth:\n" +
+		"        provider: inCluster\n" +
 		"policies:\n" +
 		"  - name: " + policyName + "\n" +
-		"    identitySelector:\n" +
-		"      matchLabels: {}\n" +
+		"    subjects:\n" +
+		"      kubernetes:\n" +
+		"        discoveryNames: [\"cluster-a\"]\n" +
+		"        namespaces: [\"default\"]\n" +
+		"        matchLabels:\n" +
+		"          app: web\n" +
 		"    egress:\n" +
 		"      - fqdn: \"example.com\"\n" +
 		"        ports: [80]\n" +
@@ -1000,10 +1238,19 @@ func runtimeConfigYAMLWithCA(policyName string, proxyListen string, metricsListe
 		"  cache_ttl: 30s\n" +
 		"  timeout: 5s\n" +
 		"  servers: []\n" +
+		"discovery:\n" +
+		"  kubernetes:\n" +
+		"    - name: cluster-a\n" +
+		"      auth:\n" +
+		"        provider: inCluster\n" +
 		"policies:\n" +
 		"  - name: " + policyName + "\n" +
-		"    identitySelector:\n" +
-		"      matchLabels: {}\n" +
+		"    subjects:\n" +
+		"      kubernetes:\n" +
+		"        discoveryNames: [\"cluster-a\"]\n" +
+		"        namespaces: [\"default\"]\n" +
+		"        matchLabels:\n" +
+		"          app: web\n" +
 		"    egress:\n" +
 		"      - fqdn: \"example.com\"\n" +
 		"        ports: [443]\n" +
@@ -1033,10 +1280,19 @@ func runtimeConfigYAMLWithAdditionalCAs(policyName string, proxyListen string, m
 		"  cache_ttl: 30s\n" +
 		"  timeout: 5s\n" +
 		"  servers: []\n" +
+		"discovery:\n" +
+		"  kubernetes:\n" +
+		"    - name: cluster-a\n" +
+		"      auth:\n" +
+		"        provider: inCluster\n" +
 		"policies:\n" +
 		"  - name: " + policyName + "\n" +
-		"    identitySelector:\n" +
-		"      matchLabels: {}\n" +
+		"    subjects:\n" +
+		"      kubernetes:\n" +
+		"        discoveryNames: [\"cluster-a\"]\n" +
+		"        namespaces: [\"default\"]\n" +
+		"        matchLabels:\n" +
+		"          app: web\n" +
 		"    egress:\n" +
 		"      - fqdn: \"example.com\"\n" +
 		"        ports: [443]\n" +
@@ -1063,8 +1319,10 @@ func testRuntimeConfig() config.Config {
 		Shutdown: config.ShutdownConfig{
 			GracePeriod: 10 * time.Second,
 		},
+		Discovery: runtimeTestKubernetesDiscovery(),
 		Policies: []config.PolicyConfig{{
-			Name: "allow-example",
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
 			Egress: []config.EgressRuleConfig{{
 				FQDN:  "example.com",
 				Ports: []int{80},

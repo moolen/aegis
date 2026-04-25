@@ -292,14 +292,25 @@ func TestServerReturnsIdentityDump(t *testing.T) {
 	}
 }
 
-func TestServerReturnsSimulationResult(t *testing.T) {
+func TestRuntimeSimulationReturnsProviderScopedDecision(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	admin := &enforcementAdminStub{
 		token: "secret",
 		simulation: SimulationResponse{
+			Identity: &IdentityRecord{
+				Source:   "kubernetes",
+				Provider: "cluster-b",
+				Kind:     "kubernetes",
+				Name:     "default/web",
+			},
 			Action:        "deny",
 			Reason:        "policy_denied",
 			EffectiveMode: "enforce",
+			Decision: &SimulationDecision{
+				Allowed:           false,
+				Policy:            "deny-cluster-a",
+				PolicyEnforcement: "enforce",
+			},
 		},
 	}
 	srv := NewServer(":0", reg, nil, admin)
@@ -323,6 +334,17 @@ func TestServerReturnsSimulationResult(t *testing.T) {
 	}
 	if admin.lastSimulation.SourceIP != "10.0.0.10" || admin.lastSimulation.Protocol != "connect" {
 		t.Fatalf("simulation request = %#v, want source IP and connect protocol", admin.lastSimulation)
+	}
+
+	var body SimulationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if body.Identity == nil || body.Identity.Provider != "cluster-b" {
+		t.Fatalf("identity = %#v, want provider cluster-b", body.Identity)
+	}
+	if body.Decision == nil || body.Decision.Policy != "deny-cluster-a" {
+		t.Fatalf("decision = %#v, want deny-cluster-a", body.Decision)
 	}
 }
 
