@@ -150,14 +150,25 @@ start_fixture() {
   local path="$4"
   local env_file="$5"
   local log_file="$6"
+  local -a required_keys=("LISTEN_ADDR")
 
   : >"$env_file"
   : >"$log_file"
 
+  case "$mode" in
+    passthrough|mitm)
+      required_keys+=("ROOT_CA_PEM_B64")
+      ;;
+  esac
+
   "$fixture_bin" -mode "$mode" -listen "$listen" -path "$path" >"$env_file" 2>"$log_file" &
   local pid=$!
   track_pid "$pid"
-  wait_for_env_key "$pid" "$env_file" "LISTEN_ADDR"
+
+  local key
+  for key in "${required_keys[@]}"; do
+    wait_for_env_key "$pid" "$env_file" "$key"
+  done
 }
 
 start_aegis() {

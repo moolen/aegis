@@ -10,13 +10,13 @@ resolve_go_bin
 require_executable "${REPO_ROOT}/bin/aegis"
 
 SCENARIO="http"
-TARGET_PATH="${TARGET_PATH:-/allowed}"
-TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
-TARGET_PORT="${TARGET_PORT:-18080}"
-PROXY_URL="${PROXY_URL:-http://127.0.0.1:3128}"
-METRICS_URL="${METRICS_URL:-http://127.0.0.1:9090}"
 CONFIG_PATH="perf/config/local-http.yaml"
 K6_SCRIPT="perf/k6/http.js"
+TARGET_PATH="/allowed"
+TARGET_HOST="127.0.0.1"
+TARGET_PORT="18080"
+PROXY_URL="http://127.0.0.1:3128"
+METRICS_URL="http://127.0.0.1:9090"
 
 RESULT_DIR="$(new_result_dir "$SCENARIO" "local")"
 FIXTURE_BIN="${RESULT_DIR}/fixtures"
