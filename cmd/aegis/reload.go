@@ -281,7 +281,7 @@ func (m *runtimeManager) Simulate(req appmetrics.SimulationRequest) (appmetrics.
 			id = resolved
 		}
 	}
-	resp.Identity = identityRecordFromIdentity(id, "", "")
+	resp.Identity = identityRecordFromIdentity(id, id.Provider, id.Source)
 	resp.UnknownIdentity = isUnknownIdentity(id)
 
 	if resp.UnknownIdentity && resp.UnknownIdentityPolicy == config.UnknownIdentityDeny {
@@ -518,9 +518,9 @@ func identityRecordFromIdentity(id *identity.Identity, provider string, kind str
 		labels[key] = value
 	}
 	return &appmetrics.IdentityRecord{
-		Source:   id.Source,
-		Provider: firstNonEmpty(id.Provider, provider),
-		Kind:     kind,
+		Source:   firstNonEmpty(kind, id.Source),
+		Provider: firstNonEmpty(provider, id.Provider),
+		Kind:     firstNonEmpty(kind, id.Source),
 		Name:     id.Name,
 		Labels:   labels,
 	}

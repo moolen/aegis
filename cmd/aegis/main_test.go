@@ -962,8 +962,22 @@ func TestRuntimeManagerDumpIdentitiesReturnsCompositeRecords(t *testing.T) {
 				IP:       "10.0.0.10",
 				Provider: "cluster-a",
 				Kind:     "kubernetes",
-				Identity: &identity.Identity{Name: "default/api", Source: "kubernetes"},
+				Identity: &identity.Identity{
+					Name:     "default/api",
+					Source:   "ec2",
+					Provider: "stale-provider",
+				},
 			},
+			Shadows: []identity.Mapping{{
+				IP:       "10.0.0.10",
+				Provider: "production-ec2",
+				Kind:     "ec2",
+				Identity: &identity.Identity{
+					Name:     "i-shadow",
+					Source:   "kubernetes",
+					Provider: "other-stale-provider",
+				},
+			}},
 		}},
 	}
 
@@ -973,6 +987,15 @@ func TestRuntimeManagerDumpIdentitiesReturnsCompositeRecords(t *testing.T) {
 	}
 	if records[0].Effective == nil || records[0].Effective.Name != "default/api" {
 		t.Fatalf("effective identity = %#v, want default/api", records[0].Effective)
+	}
+	if records[0].Effective.Provider != "cluster-a" || records[0].Effective.Source != "kubernetes" || records[0].Effective.Kind != "kubernetes" {
+		t.Fatalf("effective record = %#v, want authoritative provider/source/kind", records[0].Effective)
+	}
+	if len(records[0].Shadows) != 1 {
+		t.Fatalf("shadows = %#v, want one shadow", records[0].Shadows)
+	}
+	if records[0].Shadows[0].Provider != "production-ec2" || records[0].Shadows[0].Source != "ec2" || records[0].Shadows[0].Kind != "ec2" {
+		t.Fatalf("shadow record = %#v, want authoritative provider/source/kind", records[0].Shadows[0])
 	}
 }
 
@@ -1058,8 +1081,9 @@ func TestRuntimeSimulationReturnsProviderScopedDecision(t *testing.T) {
 		Name: "cluster-b",
 		Kind: "kubernetes",
 		Resolver: fakeIdentityResolver{identity: &identity.Identity{
-			Source: "kubernetes",
-			Name:   "default/web",
+			Source:   "ec2",
+			Provider: "stale-provider",
+			Name:     "default/web",
 			Labels: map[string]string{
 				"kubernetes.io/namespace": "default",
 				"app":                     "web",
@@ -1098,8 +1122,11 @@ func TestRuntimeSimulationReturnsProviderScopedDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Simulate() error = %v", err)
 	}
-	if resp.Identity == nil || resp.Identity.Provider != "cluster-b" {
-		t.Fatalf("identity = %#v, want provider cluster-b", resp.Identity)
+	if resp.Identity == nil {
+		t.Fatal("identity = nil, want bound identity")
+	}
+	if resp.Identity.Provider != "cluster-b" || resp.Identity.Source != "kubernetes" || resp.Identity.Kind != "kubernetes" {
+		t.Fatalf("identity = %#v, want authoritative provider/source/kind", resp.Identity)
 	}
 	if resp.Action != "allow" || resp.Reason != "policy_allowed" {
 		t.Fatalf("response = %#v, want allow policy_allowed", resp)

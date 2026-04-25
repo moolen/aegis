@@ -105,11 +105,18 @@ func bindIdentityToProvider(id *Identity, provider ProviderHandle) *Identity {
 	if provider.Name != "" {
 		bound.Provider = provider.Name
 	}
-	if bound.Source == "" && provider.Kind != "" {
+	if provider.Kind != "" {
 		bound.Source = provider.Kind
 	}
 
 	return bound
+}
+
+func bindMappingToProvider(mapping Mapping, provider ProviderHandle) Mapping {
+	mapping.Provider = provider.Name
+	mapping.Kind = provider.Kind
+	mapping.Identity = bindIdentityToProvider(mapping.Identity, provider)
+	return mapping
 }
 
 func (r *CompositeResolver) ProviderStatuses() []ProviderStatus {
@@ -160,8 +167,7 @@ func (r *CompositeResolver) IdentityDump() []DumpEntry {
 			continue
 		}
 		for _, mapping := range snapshotter.IdentityMappings() {
-			mapping.Provider = provider.Name
-			mapping.Kind = provider.Kind
+			mapping = bindMappingToProvider(mapping, provider)
 
 			entry := byIP[mapping.IP]
 			if entry == nil {
