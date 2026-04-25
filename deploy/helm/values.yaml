@@ -91,6 +91,15 @@ config:
   #         http:
   #           allowedMethods: ["GET"]
   #           allowedPaths: ["/*"]
+  #   - name: allow-office
+  #     subjects:
+  #       cidrs:
+  #         - "10.20.0.0/16"
+  #     egress:
+  #       - fqdn: "api.example.com"
+  #         ports: [443]
+  #         tls:
+  #           mode: passthrough
 
 # Bootstrap status: this chart renders a valid starter config with discovery
 # and policy bindings disabled by default. Uncomment a discovery provider and
@@ -116,5 +125,6 @@ config:
 # per-identity abuse-control guardrail across HTTP requests and CONNECT tunnels.
 # Policy subjects bind rules to named discovery providers. Use
 # config.policies[].subjects.kubernetes.discoveryNames or
-# config.policies[].subjects.ec2.discoveryNames to scope each rule, then
+# config.policies[].subjects.ec2.discoveryNames to scope each rule, or use
+# config.policies[].subjects.cidrs for direct source-network matches, then
 # tighten Kubernetes namespaces and labels as needed.

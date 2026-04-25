@@ -140,6 +140,7 @@ type IdentitySelectorConfig struct {
 type PolicySubjectsConfig struct {
 	Kubernetes *KubernetesSubjectConfig `yaml:"kubernetes,omitempty"`
 	EC2        *EC2SubjectConfig        `yaml:"ec2,omitempty"`
+	CIDRs      []string                 `yaml:"cidrs,omitempty"`
 }
 
 type KubernetesSubjectConfig struct {
@@ -204,7 +205,9 @@ func Load(r io.Reader) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
-	cfg.normalizeDiscoveryBindings()
+	if err := cfg.normalizeDiscoveryBindings(); err != nil {
+		return Config{}, err
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -313,8 +316,9 @@ func (c Config) Validate() error {
 		}
 		hasKubernetesSubjects := policy.Subjects.Kubernetes != nil && len(policy.Subjects.Kubernetes.DiscoveryNames) > 0
 		hasEC2Subjects := policy.Subjects.EC2 != nil && len(policy.Subjects.EC2.DiscoveryNames) > 0
-		if !hasKubernetesSubjects && !hasEC2Subjects {
-			return fmt.Errorf("policies[%d].subjects must reference at least one discovery provider", i)
+		hasCIDRSubjects := len(policy.Subjects.CIDRs) > 0
+		if !hasKubernetesSubjects && !hasEC2Subjects && !hasCIDRSubjects {
+			return fmt.Errorf("policies[%d].subjects must reference at least one discovery provider or CIDR", i)
 		}
 		if policy.Subjects.Kubernetes != nil {
 			if len(policy.Subjects.Kubernetes.DiscoveryNames) == 0 {
@@ -342,6 +346,11 @@ func (c Config) Validate() error {
 				if strings.TrimSpace(discoveryName) == "" {
 					return fmt.Errorf("policies[%d].subjects.ec2.discoveryNames[%d] must not be empty", i, j)
 				}
+			}
+		}
+		for j, cidr := range policy.Subjects.CIDRs {
+			if cidr == "" {
+				return fmt.Errorf("policies[%d].subjects.cidrs[%d] must not be empty", i, j)
 			}
 		}
 		for j, rule := range policy.Egress {
@@ -495,7 +504,7 @@ func normalizeDiscoveryBindingName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-func (c *Config) normalizeDiscoveryBindings() {
+func (c *Config) normalizeDiscoveryBindings() error {
 	for i := range c.Discovery.Kubernetes {
 		c.Discovery.Kubernetes[i].Name = normalizeDiscoveryBindingName(c.Discovery.Kubernetes[i].Name)
 	}
@@ -513,7 +522,16 @@ func (c *Config) normalizeDiscoveryBindings() {
 				c.Policies[i].Subjects.EC2.DiscoveryNames[j] = normalizeDiscoveryBindingName(c.Policies[i].Subjects.EC2.DiscoveryNames[j])
 			}
 		}
+		for j := range c.Policies[i].Subjects.CIDRs {
+			normalizedCIDR, err := normalizeCIDRSubject(c.Policies[i].Subjects.CIDRs[j])
+			if err != nil {
+				return fmt.Errorf("policies[%d].subjects.cidrs[%d] must be a valid CIDR: %w", i, j, err)
+			}
+			c.Policies[i].Subjects.CIDRs[j] = normalizedCIDR
+		}
 	}
+
+	return nil
 }
 
 func (c *Config) hydrateCompatibilityFields() {
@@ -538,4 +556,16 @@ func cloneStringMap(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+func normalizeCIDRSubject(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", fmt.Errorf("must not be empty")
+	}
+	prefix, err := netip.ParsePrefix(trimmed)
+	if err != nil {
+		return "", err
+	}
+	return prefix.String(), nil
 }

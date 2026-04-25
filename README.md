@@ -129,8 +129,9 @@ or the managed-cluster variants `eks`, `gke`, or `aks` with their
 provider-specific fields. Policies now bind explicitly through
 `policies[].subjects`, so each policy must reference one or more named
 discovery providers through
-`subjects.kubernetes.discoveryNames` or `subjects.ec2.discoveryNames`. To
-enable EC2 discovery, add a provider entry under `discovery.ec2`, set the
+`subjects.kubernetes.discoveryNames` or `subjects.ec2.discoveryNames`, or one
+or more source CIDRs through `subjects.cidrs`. To enable EC2 discovery, add a
+provider entry under `discovery.ec2`, set the
 target AWS `region`, and define the tag filters that scope instance discovery.
 To enable TLS MITM for `CONNECT`, provide a proxy CA certificate and key
 through `proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs
@@ -149,6 +150,22 @@ proxy:
     additional:
       - certFile: /etc/aegis/ca/old-ca.crt
         keyFile: /etc/aegis/ca/old-ca.key
+```
+
+A CIDR-only policy is also valid when you want to scope rules directly to
+source networks instead of discovery-backed identities:
+
+```yaml
+policies:
+  - name: allow-office
+    subjects:
+      cidrs:
+        - "10.20.0.0/16"
+    egress:
+      - fqdn: "api.example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
 ```
 
 For migration, set `proxy.enforcement: audit` to shadow policy decisions

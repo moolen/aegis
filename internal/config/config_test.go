@@ -262,6 +262,94 @@ discovery:
 	}
 }
 
+func TestLoadAcceptsCIDRPolicySubjects(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-office-and-cluster
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels:
+          app: web
+      cidrs:
+        - " 10.20.0.1/16 "
+        - "2001:db8:0:0::/64"
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got := cfg.Policies[0].Subjects.CIDRs
+	want := []string{"10.20.0.1/16", "2001:db8::/64"}
+	if len(got) != len(want) {
+		t.Fatalf("subjects.cidrs length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("subjects.cidrs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoadRejectsInvalidCIDRPolicySubjects(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: bad-cidrs
+    subjects:
+      cidrs:
+        - " "
+        - "not-a-cidr"
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "subjects.cidrs") {
+		t.Fatalf("error = %v, want subjects.cidrs validation error", err)
+	}
+}
+
+func TestLoadAcceptsCIDROnlyPolicySubjects(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: allow-office
+    subjects:
+      cidrs:
+        - "10.20.0.0/16"
+    egress:
+      - fqdn: "api.example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("policies = %d, want 1", len(cfg.Policies))
+	}
+	if len(cfg.Policies[0].Subjects.CIDRs) != 1 || cfg.Policies[0].Subjects.CIDRs[0] != "10.20.0.0/16" {
+		t.Fatalf("subjects.cidrs = %v, want [10.20.0.0/16]", cfg.Policies[0].Subjects.CIDRs)
+	}
+}
+
 func TestLoadRejectsInvalidTLSMode(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"

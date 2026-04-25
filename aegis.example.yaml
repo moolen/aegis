@@ -72,3 +72,12 @@ policies: []
 #       http:
 #         allowedMethods: ["GET"]
 #         allowedPaths: ["/*"]
+# - name: allow-office
+#   subjects:
+#     cidrs:
+#       - "10.20.0.0/16"
+#   egress:
+#     - fqdn: "api.example.com"
+#       ports: [443]
+#       tls:
+#         mode: passthrough
