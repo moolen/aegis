@@ -178,6 +178,51 @@ func TestCONNECTAuditModeAllowsDeniedTargets(t *testing.T) {
 	}
 }
 
+func TestCONNECTPolicyLevelAuditAllowsDeniedTargets(t *testing.T) {
+	const (
+		allowedHost = "allowed.internal"
+		targetHost  = "policy-audit-denied.internal"
+	)
+
+	tempDir := t.TempDir()
+	upstreamCA := newTestCA(t, tempDir, "upstream-policy-audit-connect")
+	serverCert := issueServerCertificate(t, upstreamCA, targetHost)
+	upstream := startTLSServer(t, serverCert, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	dnsServer := startStaticDNSServer(t, map[string]net.IP{targetHost: net.ParseIP("127.0.0.1")})
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configPath := filepath.Join(tempDir, "aegis.yaml")
+	writeConfig(t, configPath, proxyConfigYAML(proxyConfigSpec{
+		ProxyAddr:           proxyAddr,
+		MetricsAddr:         metricsAddr,
+		DNSServers:          []string{dnsServer},
+		AllowedHostPatterns: []string{"*.internal"},
+		PolicyEnforcement:   "audit",
+		PolicyName:          "allow-other",
+		PolicyFQDN:          allowedHost,
+		PolicyPort:          mustPort(t, upstream.Listener.Addr().String()),
+		TLSMode:             "passthrough",
+	}))
+
+	startAegis(t, configPath)
+
+	client := httpsProxyClient(proxyAddr, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    upstreamCA.RootPool,
+	})
+	resp, err := client.Get(fmt.Sprintf("https://%s:%d/allowed", targetHost, mustPort(t, upstream.Listener.Addr().String())))
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
 func TestCONNECTAdminEnforcementKillSwitchAllowsDeniedTargets(t *testing.T) {
 	const (
 		adminToken  = "test-admin-token"
@@ -694,7 +739,9 @@ type proxyConfigSpec struct {
 	AllowedHostPatterns      []string
 	AllowedCIDRs             []string
 	Enforcement              string
+	UnknownIdentityPolicy    string
 	PolicyBypass             bool
+	PolicyEnforcement        string
 	MaxConcurrentPerIdentity int
 	ProxyCACertFile          string
 	ProxyCAKeyFile           string
@@ -711,6 +758,9 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 	fmt.Fprintf(&b, "proxy:\n  listen: %q\n", spec.ProxyAddr)
 	if spec.Enforcement != "" {
 		fmt.Fprintf(&b, "  enforcement: %s\n", spec.Enforcement)
+	}
+	if spec.UnknownIdentityPolicy != "" {
+		fmt.Fprintf(&b, "  unknownIdentityPolicy: %s\n", spec.UnknownIdentityPolicy)
 	}
 	if spec.MaxConcurrentPerIdentity > 0 {
 		fmt.Fprintf(&b, "  connectionLimits:\n    maxConcurrentPerIdentity: %d\n", spec.MaxConcurrentPerIdentity)
@@ -729,6 +779,9 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 	fmt.Fprintf(&b, "    allowedHostPatterns: %s\n", yamlStringList(spec.AllowedHostPatterns))
 	fmt.Fprintf(&b, "    allowedCIDRs: %s\n", yamlStringList(spec.AllowedCIDRs))
 	fmt.Fprintf(&b, "policies:\n  - name: %s\n", spec.PolicyName)
+	if spec.PolicyEnforcement != "" {
+		fmt.Fprintf(&b, "    enforcement: %s\n", spec.PolicyEnforcement)
+	}
 	if spec.PolicyBypass {
 		fmt.Fprint(&b, "    bypass: true\n")
 	}

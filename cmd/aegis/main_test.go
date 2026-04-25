@@ -25,6 +25,7 @@ import (
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/policy"
 	"github.com/moolen/aegis/internal/proxy"
 )
 
@@ -642,6 +643,102 @@ func TestRuntimeManagerEnforcementOverridePersistsAcrossReload(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerDumpIdentitiesReturnsCompositeRecords(t *testing.T) {
+	manager := &runtimeManager{
+		enforcement: proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	manager.current.identityResolver = fakeDumpResolver{
+		entries: []identity.DumpEntry{{
+			IP: "10.0.0.10",
+			Effective: &identity.Mapping{
+				IP:       "10.0.0.10",
+				Provider: "cluster-a",
+				Kind:     "kubernetes",
+				Identity: &identity.Identity{Name: "default/api", Source: "kubernetes"},
+			},
+		}},
+	}
+
+	records := manager.DumpIdentities()
+	if len(records) != 1 || records[0].IP != "10.0.0.10" {
+		t.Fatalf("records = %#v, want one dump record", records)
+	}
+	if records[0].Effective == nil || records[0].Effective.Name != "default/api" {
+		t.Fatalf("effective identity = %#v, want default/api", records[0].Effective)
+	}
+}
+
+func TestRuntimeManagerSimulateDeniesUnknownIdentityWhenConfigured(t *testing.T) {
+	manager := &runtimeManager{
+		enforcement: proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	manager.current.cfg = testRuntimeConfig()
+	manager.current.cfg.Proxy.UnknownIdentityPolicy = config.UnknownIdentityDeny
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		SourceIP: "10.0.0.10",
+		FQDN:     "example.com",
+		Port:     443,
+		Protocol: "connect",
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Action != "deny" || resp.Reason != "unknown_identity" {
+		t.Fatalf("response = %#v, want deny unknown_identity", resp)
+	}
+}
+
+func TestRuntimeManagerSimulateHonorsPolicyLevelAudit(t *testing.T) {
+	manager := &runtimeManager{
+		enforcement: proxy.NewEnforcementOverrideController(slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	manager.current.cfg = testRuntimeConfig()
+	manager.current.identityResolver = fakeIdentityResolver{identity: &identity.Identity{
+		Name:   "default/web",
+		Source: "kubernetes",
+		Labels: map[string]string{"app": "web"},
+	}}
+	engine, err := policy.NewEngine([]config.PolicyConfig{{
+		Name:        "legacy-web",
+		Enforcement: config.EnforcementAudit,
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "web"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "example.com",
+			Ports: []int{80},
+			TLS:   config.TLSRuleConfig{Mode: "mitm"},
+			HTTP: &config.HTTPRuleConfig{
+				AllowedMethods: []string{"POST"},
+				AllowedPaths:   []string{"/*"},
+			},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	manager.current.policyEngine = engine
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		SourceIP: "10.0.0.10",
+		FQDN:     "example.com",
+		Port:     80,
+		Protocol: "http",
+		Method:   http.MethodGet,
+		Path:     "/blocked",
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Action != "allow" || resp.Reason != "audit_policy_denied" {
+		t.Fatalf("response = %#v, want allow audit_policy_denied", resp)
+	}
+	if resp.Decision == nil || resp.Decision.PolicyEnforcement != config.EnforcementAudit {
+		t.Fatalf("decision = %#v, want policy enforcement audit", resp.Decision)
+	}
+}
+
 func TestBuildIdentityResolverUsesHealthyEC2Provider(t *testing.T) {
 	restoreKubernetes := newKubernetesRuntimeProvider
 	restoreEC2 := newEC2RuntimeProvider
@@ -919,6 +1016,27 @@ func (r fakeStartableResolver) Start(ctx context.Context, startupTimeout time.Du
 
 func (r fakeStartableResolver) Resolve(net.IP) (*identity.Identity, error) {
 	return r.identity, nil
+}
+
+type fakeIdentityResolver struct {
+	identity *identity.Identity
+	err      error
+}
+
+func (r fakeIdentityResolver) Resolve(net.IP) (*identity.Identity, error) {
+	return r.identity, r.err
+}
+
+type fakeDumpResolver struct {
+	entries []identity.DumpEntry
+}
+
+func (r fakeDumpResolver) Resolve(net.IP) (*identity.Identity, error) {
+	return nil, nil
+}
+
+func (r fakeDumpResolver) IdentityDump() []identity.DumpEntry {
+	return r.entries
 }
 
 type fakeHandlerProvider struct {

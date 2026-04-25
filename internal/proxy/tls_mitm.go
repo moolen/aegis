@@ -24,15 +24,16 @@ const (
 )
 
 type MITMEngine struct {
-	ca          tls.Certificate
-	caLeaf      *x509.Certificate
-	fingerprint string
-	logger      *slog.Logger
-	metrics     *metrics.Metrics
-	now         func() time.Time
-	mu          sync.Mutex
-	cache       map[string]cachedMITMCertificate
-	validFor    time.Duration
+	ca                     tls.Certificate
+	caLeaf                 *x509.Certificate
+	fingerprint            string
+	additionalFingerprints []string
+	logger                 *slog.Logger
+	metrics                *metrics.Metrics
+	now                    func() time.Time
+	mu                     sync.Mutex
+	cache                  map[string]cachedMITMCertificate
+	validFor               time.Duration
 }
 
 type cachedMITMCertificate struct {
@@ -50,29 +51,18 @@ func NewMITMEngineFromFiles(certFile string, keyFile string, logger *slog.Logger
 }
 
 func NewMITMEngine(ca tls.Certificate, logger *slog.Logger) (*MITMEngine, error) {
-	if len(ca.Certificate) == 0 {
-		return nil, fmt.Errorf("mitm ca certificate chain is empty")
-	}
-
-	caLeaf, err := x509.ParseCertificate(ca.Certificate[0])
+	caLeaf, fingerprint, err := parseMITMCA(ca)
 	if err != nil {
-		return nil, fmt.Errorf("parse mitm ca certificate: %w", err)
-	}
-	if !caLeaf.IsCA {
-		return nil, fmt.Errorf("mitm ca certificate is not a certificate authority")
-	}
-	if ca.PrivateKey == nil {
-		return nil, fmt.Errorf("mitm ca private key is required")
+		return nil, err
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	fingerprint := sha256.Sum256(caLeaf.Raw)
 
 	return &MITMEngine{
 		ca:          ca,
 		caLeaf:      caLeaf,
-		fingerprint: hex.EncodeToString(fingerprint[:]),
+		fingerprint: fingerprint,
 		logger:      logger,
 		now:         time.Now,
 		cache:       make(map[string]cachedMITMCertificate),
@@ -116,6 +106,29 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, str
 
 func (e *MITMEngine) Fingerprint() string {
 	return e.fingerprint
+}
+
+func (e *MITMEngine) Fingerprints() []string {
+	fingerprints := []string{e.fingerprint}
+	fingerprints = append(fingerprints, e.additionalFingerprints...)
+	return fingerprints
+}
+
+func (e *MITMEngine) AddAdditionalCA(ca tls.Certificate) error {
+	_, fingerprint, err := parseMITMCA(ca)
+	if err != nil {
+		return err
+	}
+	e.additionalFingerprints = append(e.additionalFingerprints, fingerprint)
+	return nil
+}
+
+func (e *MITMEngine) AddAdditionalCAFromFiles(certFile string, keyFile string) error {
+	ca, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return fmt.Errorf("load x509 key pair: %w", err)
+	}
+	return e.AddAdditionalCA(ca)
 }
 
 func (e *MITMEngine) CacheEntries() int {
@@ -189,4 +202,23 @@ func (e *MITMEngine) recordCacheEviction(reason string, count int) {
 	}
 
 	e.metrics.MITMCertificateCacheEvictions.WithLabelValues(reason).Add(float64(count))
+}
+
+func parseMITMCA(ca tls.Certificate) (*x509.Certificate, string, error) {
+	if len(ca.Certificate) == 0 {
+		return nil, "", fmt.Errorf("mitm ca certificate chain is empty")
+	}
+
+	caLeaf, err := x509.ParseCertificate(ca.Certificate[0])
+	if err != nil {
+		return nil, "", fmt.Errorf("parse mitm ca certificate: %w", err)
+	}
+	if !caLeaf.IsCA {
+		return nil, "", fmt.Errorf("mitm ca certificate is not a certificate authority")
+	}
+	if ca.PrivateKey == nil {
+		return nil, "", fmt.Errorf("mitm ca private key is required")
+	}
+	fingerprint := sha256.Sum256(caLeaf.Raw)
+	return caLeaf, hex.EncodeToString(fingerprint[:]), nil
 }

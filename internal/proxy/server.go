@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
 	"github.com/moolen/aegis/internal/metrics"
 	"github.com/moolen/aegis/internal/policy"
@@ -35,18 +36,19 @@ type PolicyEngine interface {
 }
 
 type Dependencies struct {
-	Resolver          Resolver
-	DestinationGuard  *DestinationGuard
-	DrainTracker      *DrainTracker
-	ConnectionLimiter *ConnectionLimiter
-	EnforcementMode   string
-	Enforcement       *EnforcementOverrideController
-	IdentityResolver  IdentityResolver
-	PolicyEngine      PolicyEngine
-	MITM              *MITMEngine
-	UpstreamTLSConfig *tls.Config
-	Metrics           *metrics.Metrics
-	Logger            *slog.Logger
+	Resolver              Resolver
+	DestinationGuard      *DestinationGuard
+	DrainTracker          *DrainTracker
+	ConnectionLimiter     *ConnectionLimiter
+	EnforcementMode       string
+	Enforcement           *EnforcementOverrideController
+	UnknownIdentityPolicy string
+	IdentityResolver      IdentityResolver
+	PolicyEngine          PolicyEngine
+	MITM                  *MITMEngine
+	UpstreamTLSConfig     *tls.Config
+	Metrics               *metrics.Metrics
+	Logger                *slog.Logger
 }
 
 type Server struct {
@@ -109,10 +111,21 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	reqIdentity := identity.Unknown()
 	var decision *policy.Decision
 	audit := auditOutcome{}
+	unknownIdentityBlocked := false
 	if s.needsRequestIdentity() {
 		reqIdentity = s.resolveRequestIdentity(r)
+		if s.denyUnknownIdentity(reqIdentity) {
+			unknownIdentityBlocked = true
+			audit = s.recordUnknownIdentityAuditDecision("http", reqIdentity, host)
+			if !audit.Enabled {
+				s.recordRequestDecision("http", "deny", "none", "unknown_identity")
+				s.logRequestDecision(slog.LevelWarn, "http", "deny", "unknown_identity", reqIdentity, host, port, nil, r.Method, requestPolicyPath(r), auditOutcome{})
+				s.writeError(w, http.StatusForbidden, "request denied for unknown identity", "identity")
+				return
+			}
+		}
 	}
-	if s.deps.PolicyEngine != nil {
+	if !unknownIdentityBlocked && s.deps.PolicyEngine != nil {
 		decision = s.evaluatePolicy("http", func() *policy.Decision {
 			return s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
 		})
@@ -194,10 +207,22 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	reqIdentity := identity.Unknown()
 	var decision *policy.Decision
 	audit := auditOutcome{}
+	unknownIdentityBlocked := false
 	if s.needsRequestIdentity() {
 		reqIdentity = s.resolveRequestIdentity(r)
+		if s.denyUnknownIdentity(reqIdentity) {
+			unknownIdentityBlocked = true
+			audit = s.recordUnknownIdentityAuditDecision("connect", reqIdentity, host)
+			if !audit.Enabled {
+				s.recordConnectResult("passthrough", "unknown_identity")
+				s.recordRequestDecision("connect", "deny", "none", "unknown_identity")
+				s.logRequestDecision(slog.LevelWarn, "connect", "deny", "unknown_identity", reqIdentity, host, port, nil, http.MethodConnect, "", auditOutcome{})
+				s.writeError(w, http.StatusForbidden, "connect target denied for unknown identity", "identity")
+				return
+			}
+		}
 	}
-	if s.deps.PolicyEngine != nil {
+	if !unknownIdentityBlocked && s.deps.PolicyEngine != nil {
 		decision = s.evaluatePolicy("connect", func() *policy.Decision {
 			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
 		})
@@ -604,7 +629,9 @@ func (s *Server) resolveRequestIdentity(r *http.Request) *identity.Identity {
 }
 
 func (s *Server) needsRequestIdentity() bool {
-	return s.deps.PolicyEngine != nil || (s.deps.ConnectionLimiter != nil && s.deps.ConnectionLimiter.Enabled())
+	return s.deps.PolicyEngine != nil ||
+		(s.deps.ConnectionLimiter != nil && s.deps.ConnectionLimiter.Enabled()) ||
+		config.NormalizeUnknownIdentityPolicy(s.deps.UnknownIdentityPolicy) == config.UnknownIdentityDeny
 }
 
 func (s *Server) acquireIdentityConnection(protocol string, reqIdentity *identity.Identity) (func(), *ErrConnectionLimitExceeded) {
@@ -872,7 +899,7 @@ func (s *Server) auditMode() bool {
 }
 
 func (s *Server) shadowMode(decision *policy.Decision) bool {
-	return s.auditMode() || (decision != nil && decision.Bypass)
+	return s.auditMode() || (decision != nil && (decision.Bypass || decision.PolicyEnforcement == config.EnforcementAudit))
 }
 
 func (s *Server) recordAuditPolicyDecision(protocol string, reqIdentity *identity.Identity, fqdn string, decision *policy.Decision) auditOutcome {
@@ -895,11 +922,36 @@ func (s *Server) recordAuditPolicyDecision(protocol string, reqIdentity *identit
 	return outcome
 }
 
+func (s *Server) recordUnknownIdentityAuditDecision(protocol string, reqIdentity *identity.Identity, fqdn string) auditOutcome {
+	if !s.auditMode() {
+		return auditOutcome{}
+	}
+	outcome := auditOutcome{
+		Enabled:     true,
+		WouldAction: "would_deny",
+		WouldBlock:  true,
+		WouldReason: "unknown_identity",
+	}
+	s.recordAuditDecision(protocol, outcome.WouldAction, reqIdentity, fqdn, "", outcome.WouldReason)
+	return outcome
+}
+
+func (s *Server) denyUnknownIdentity(id *identity.Identity) bool {
+	return config.NormalizeUnknownIdentityPolicy(s.deps.UnknownIdentityPolicy) == config.UnknownIdentityDeny && isUnknownIdentity(id)
+}
+
+func isUnknownIdentity(id *identity.Identity) bool {
+	return id == nil || id.Source == "unknown" || id.Name == identity.Unknown().Name
+}
+
 func auditActualReason(audit auditOutcome) string {
 	if !audit.Enabled {
 		return "policy_allowed"
 	}
 	if audit.WouldBlock {
+		if audit.WouldReason == "unknown_identity" {
+			return "audit_unknown_identity"
+		}
 		return "audit_policy_denied"
 	}
 	return "audit_policy_allowed"

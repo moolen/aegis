@@ -169,6 +169,39 @@ func TestPolicyEnforcementBlocksDeniedHTTPRequests(t *testing.T) {
 	}
 }
 
+func TestPolicyLevelAuditAllowsDeniedHTTPRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/allowed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "aegis.yaml")
+
+	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/other", policyConfigOptions{PolicyEnforcement: "audit"}))
+	startAegis(t, configPath)
+
+	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
 func TestPolicyBypassAllowsDeniedHTTPRequests(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/allowed" {
@@ -295,6 +328,36 @@ func TestAdminEnforcementKillSwitchFlipsHTTPTrafficWithoutReload(t *testing.T) {
 		defer enforceResp.Body.Close()
 		return enforceResp.StatusCode == http.StatusForbidden
 	})
+}
+
+func TestUnknownIdentityDenyBlocksHTTPRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not be reached")
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "aegis.yaml")
+
+	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", policyConfigOptions{UnknownIdentityPolicy: "deny"}))
+	startAegis(t, configPath)
+
+	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
 }
 
 func TestHTTPConnectionLimitRejectsSecondConcurrentRequest(t *testing.T) {
@@ -594,8 +657,10 @@ func policyConfigYAMLWithEnforcement(proxyAddr string, metricsAddr string, host 
 
 type policyConfigOptions struct {
 	Enforcement              string
+	PolicyEnforcement        string
 	Bypass                   bool
 	AdminToken               string
+	UnknownIdentityPolicy    string
 	MaxConcurrentPerIdentity int
 }
 
@@ -608,9 +673,17 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
 	if opts.MaxConcurrentPerIdentity > 0 {
 		connectionLimitBlock = fmt.Sprintf("  connectionLimits:\n    maxConcurrentPerIdentity: %d\n", opts.MaxConcurrentPerIdentity)
 	}
+	unknownIdentityBlock := ""
+	if opts.UnknownIdentityPolicy != "" {
+		unknownIdentityBlock = "  unknownIdentityPolicy: " + opts.UnknownIdentityPolicy + "\n"
+	}
 	bypassBlock := ""
 	if opts.Bypass {
 		bypassBlock = "    bypass: true\n"
+	}
+	policyEnforcementBlock := ""
+	if opts.PolicyEnforcement != "" {
+		policyEnforcementBlock = "    enforcement: " + opts.PolicyEnforcement + "\n"
 	}
 	adminBlock := ""
 	if opts.AdminToken != "" {
@@ -619,7 +692,7 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
 
 	return fmt.Sprintf(`proxy:
   listen: "%s"
-%s%smetrics:
+%s%s%smetrics:
   listen: "%s"
 %sdns:
   cache_ttl: 30s
@@ -629,7 +702,7 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
     allowedCIDRs: ["127.0.0.0/8"]
 policies:
   - name: allow-http
-%s    identitySelector:
+%s%s    identitySelector:
       matchLabels: {}
     egress:
       - fqdn: "%s"
@@ -639,7 +712,7 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["%s"]
-`, proxyAddr, enforcementBlock, connectionLimitBlock, metricsAddr, adminBlock, bypassBlock, host, port, allowedPath)
+`, proxyAddr, enforcementBlock, unknownIdentityBlock, connectionLimitBlock, metricsAddr, adminBlock, bypassBlock, policyEnforcementBlock, host, port, allowedPath)
 }
 
 func mitmConfigYAML(proxyAddr string, metricsAddr string, certFile string, keyFile string) string {

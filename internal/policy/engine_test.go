@@ -170,6 +170,33 @@ func TestEvaluateCarriesBypassPolicyState(t *testing.T) {
 	}
 }
 
+func TestEvaluateCarriesPolicyLevelEnforcementState(t *testing.T) {
+	engine, err := NewEngine([]config.PolicyConfig{{
+		Name:        "legacy-reporting",
+		Enforcement: "audit",
+		IdentitySelector: config.IdentitySelectorConfig{
+			MatchLabels: map[string]string{"app": "reporting"},
+		},
+		Egress: []config.EgressRuleConfig{{
+			FQDN:  "reports.example.com",
+			Ports: []int{443},
+			TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	decision := engine.EvaluateConnect(
+		&identity.Identity{Labels: map[string]string{"app": "reporting"}},
+		"denied.example.com",
+		443,
+	)
+	if decision.PolicyEnforcement != "audit" {
+		t.Fatalf("decision.PolicyEnforcement = %q, want audit", decision.PolicyEnforcement)
+	}
+}
+
 func TestEvaluateAllowsNestedPathMatch(t *testing.T) {
 	engine, err := NewEngine([]config.PolicyConfig{{
 		Name: "allow-web",

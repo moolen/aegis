@@ -24,10 +24,17 @@ Implemented in this bootstrap:
 - Live `SIGHUP` config reload for policy, DNS, discovery, and MITM CA changes.
 - Global `proxy.enforcement: audit` mode for migration, with would-allow /
   would-deny metrics and logs while traffic keeps flowing.
+- Per-policy `enforcement: audit|enforce` so rollout can stay selective even
+  when the global mode remains `enforce`.
 - Token-protected `POST /admin/enforcement?mode=audit|enforce|config` on the
   metrics port for an immediate global audit/enforce override without reload.
 - Per-policy `bypass: true` shadowing so a matching policy can emit would-allow
   / would-deny signals without blocking traffic.
+- Configurable `proxy.unknownIdentityPolicy: allow|deny` for production
+  hard-deny behavior when a source IP cannot be resolved to a known identity.
+- Admin tooling on the metrics port for identity dump and policy simulation,
+  plus CLI subcommands for `validate`, `diff`, `dump-identities`, and
+  `simulate`.
 - Optional per-identity concurrent connection limits across plain HTTP requests
   and `CONNECT` tunnels.
 - Configurable graceful shutdown with explicit CONNECT tunnel draining and
@@ -65,20 +72,29 @@ Current runtime behavior:
   emits audit metrics/logs, but it does not block policy-denied traffic. To
   keep migration traffic transparent, audit-mode `CONNECT` stays in raw
   passthrough rather than active MITM inspection.
+- When a matching policy sets `enforcement: audit`, that policy stays in shadow
+  mode even while the global effective mode is `enforce`.
 - When `admin.token` is configured, the metrics port also exposes a protected
   enforcement admin endpoint. `POST /admin/enforcement?mode=audit` forces
   global audit mode immediately, `mode=enforce` forces blocking immediately,
   and `mode=config` clears the override and returns to the configured
   `proxy.enforcement` value. `GET /admin/enforcement` reports the configured,
-  override, and effective modes, and `aegis_enforcement_mode` exposes them in
-  Prometheus.
+  override, and effective modes, `/admin/identities` returns the live
+  discovery map, `/admin/simulate` evaluates a hypothetical request against the
+  active runtime state, and `aegis_enforcement_mode` exposes the effective mode
+  in Prometheus.
 - When a matching policy sets `bypass: true`, that policy behaves like a
   scoped shadow rule: Aegis records would-allow / would-deny outcomes for the
   match but still forwards the traffic. As with global audit mode, bypassed
   `CONNECT` requests stay in transparent passthrough rather than active MITM.
+- When `proxy.unknownIdentityPolicy: deny` is set, requests from unresolved
+  source IPs are denied in enforce mode and recorded as would-deny in audit
+  mode before any upstream dial happens.
 - TLS MITM requires `proxy.ca.certFile` and `proxy.ca.keyFile`; once
   configured, Aegis terminates client TLS, verifies upstream TLS, and evaluates
-  decrypted HTTP requests before forwarding them.
+  decrypted HTTP requests before forwarding them. During CA rotation windows,
+  `proxy.ca.additional` can load previous CA keypairs alongside the active
+  issuing CA so the runtime tracks the full CA set across reloads.
 - When `proxy.proxyProtocol.enabled` is set, the proxy listener requires Proxy
   Protocol v2 on inbound connections and uses the forwarded source IP for
   request identity resolution.
@@ -114,13 +130,18 @@ NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
 the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
 discovery changes without restarting the process, send `SIGHUP` to Aegis.
 For migration, set `proxy.enforcement: audit` to shadow policy decisions
-without blocking traffic. For a narrower escape hatch, set `bypass: true` on a
-specific policy instead. To enable the global kill switch, set `admin.token`
-and call the metrics-port admin endpoint with `Authorization: Bearer <token>`.
+without blocking traffic. For staged rollout, keep the global mode enforced and
+set `policies[].enforcement: audit` on the workloads that still need shadow
+mode. For a narrower escape hatch, set `bypass: true` on a specific policy
+instead. To enable the global kill switch and the admin tooling endpoints, set
+`admin.token` and call the metrics-port admin endpoint with
+`Authorization: Bearer <token>`.
 By default, Aegis also blocks loopback, private, and link-local upstream
 addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
 `dns.rebindingProtection.allowedHostPatterns` or
 `dns.rebindingProtection.allowedCIDRs` for explicit internal destinations.
+Set `proxy.unknownIdentityPolicy: deny` when you want production default-deny
+behavior for traffic whose source IP does not map to a known identity.
 Set `proxy.connectionLimits.maxConcurrentPerIdentity` to cap concurrent
 upstream usage per resolved identity during migration or steady-state rollout.
 Use `shutdown.gracePeriod` to control how long Aegis drains in-flight traffic
@@ -140,6 +161,10 @@ curl http://127.0.0.1:9090/healthz
 curl http://127.0.0.1:9090/readyz
 curl http://127.0.0.1:9090/metrics
 curl -H 'Authorization: Bearer replace-me' \
+  'http://127.0.0.1:9090/admin/identities'
+curl -H 'Authorization: Bearer replace-me' \
+  'http://127.0.0.1:9090/admin/simulate?sourceIP=10.0.0.10&fqdn=api.stripe.com&port=443&protocol=connect'
+curl -H 'Authorization: Bearer replace-me' \
   -X POST 'http://127.0.0.1:9090/admin/enforcement?mode=audit'
 ```
 
@@ -155,13 +180,21 @@ Available commands:
 - `make fmt`
 - `make docker`
 
+CLI tooling:
+
+- `./bin/aegis validate --config aegis.example.yaml`
+- `./bin/aegis diff --current old.yaml --next new.yaml`
+- `./bin/aegis dump-identities --admin http://127.0.0.1:9090 --token replace-me`
+- `./bin/aegis simulate --admin http://127.0.0.1:9090 --token replace-me --source-ip 10.0.0.10 --fqdn api.stripe.com --port 443 --protocol connect`
+
 `make e2e` runs the lightweight tagged cross-process suite in `e2e/`.
 It exercises the built `aegis` binary as a subprocess across reload-sensitive
 runtime behavior and the main HTTPS protocol matrix: passthrough allow/deny,
 no-SNI and SNI-mismatch blocking, MITM certificate generation, MITM inner HTTP
 policy denial, client trust failure, upstream TLS validation, and audit-mode
-plus per-policy-bypass allow-on-deny behavior for both HTTP and `CONNECT`, as
-well as concurrent-connection enforcement for both protocols. The
+plus per-policy audit and bypass allow-on-deny behavior for both HTTP and
+`CONNECT`, unknown-identity deny handling, and concurrent-connection
+enforcement for both protocols. The
 heavier cluster-aware
 suite from the original design doc is split out into
 `make e2e-kind`, which creates a Kind cluster, loads a locally built Aegis
@@ -193,10 +226,14 @@ optional `proxyCA.existingSecret` mount for the CA files referenced by
 `config.proxy.ca`, and optional `serviceAccount` / `rbac` scaffolding so
 in-cluster Kubernetes discovery can watch pods when you enable
 `config.discovery.kubernetes`. Both `config.proxy.enforcement: audit` and
-per-policy `config.policies[].bypass: true` are supported for migration
-rollouts, `config.admin.token` enables the metrics-port global kill switch,
-and `config.proxy.connectionLimits.maxConcurrentPerIdentity` can be used as a
-simple abuse-control guardrail. The Fargate scaffold also exposes an
+per-policy `config.policies[].enforcement: audit` or
+`config.policies[].bypass: true` are supported for migration rollouts,
+`config.admin.token` enables the metrics-port global kill switch and admin
+tooling endpoints, `config.proxy.unknownIdentityPolicy` controls default-deny
+behavior for unresolved sources, `config.proxy.ca.additional` supports dual-CA
+rotation windows, and `config.proxy.connectionLimits.maxConcurrentPerIdentity`
+can be used as a simple abuse-control guardrail. The Fargate scaffold also
+exposes an
 `enable_proxy_protocol_v2` switch on the NLB target group so source IP
 preservation can be paired with `config.proxy.proxyProtocol.enabled`.
 

@@ -206,6 +206,83 @@ func TestServerUpdatesAdminEnforcementMode(t *testing.T) {
 	}
 }
 
+func TestServerReturnsIdentityDump(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	admin := &enforcementAdminStub{
+		token: "secret",
+		identities: []IdentityDumpRecord{{
+			IP: "10.0.0.10",
+			Effective: &IdentityRecord{
+				Source:   "kubernetes",
+				Provider: "cluster-a",
+				Kind:     "kubernetes",
+				Name:     "default/api",
+			},
+		}},
+	}
+	srv := NewServer(":0", reg, nil, admin)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/admin/identities", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var records []IdentityDumpRecord
+	if err := json.NewDecoder(resp.Body).Decode(&records); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(records) != 1 || records[0].IP != "10.0.0.10" {
+		t.Fatalf("records = %#v, want one identity dump record", records)
+	}
+}
+
+func TestServerReturnsSimulationResult(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	admin := &enforcementAdminStub{
+		token: "secret",
+		simulation: SimulationResponse{
+			Action:        "deny",
+			Reason:        "policy_denied",
+			EffectiveMode: "enforce",
+		},
+	}
+	srv := NewServer(":0", reg, nil, admin)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/admin/simulate?sourceIP=10.0.0.10&fqdn=example.com&port=443&protocol=connect", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if admin.lastSimulation.SourceIP != "10.0.0.10" || admin.lastSimulation.Protocol != "connect" {
+		t.Fatalf("simulation request = %#v, want source IP and connect protocol", admin.lastSimulation)
+	}
+}
+
 type readyCheckerFunc func() error
 
 func (f readyCheckerFunc) CheckReadiness() error {
@@ -213,9 +290,12 @@ func (f readyCheckerFunc) CheckReadiness() error {
 }
 
 type enforcementAdminStub struct {
-	token    string
-	status   EnforcementStatus
-	lastMode string
+	token          string
+	status         EnforcementStatus
+	lastMode       string
+	identities     []IdentityDumpRecord
+	simulation     SimulationResponse
+	lastSimulation SimulationRequest
 }
 
 func (s *enforcementAdminStub) AdminToken() string {
@@ -236,4 +316,13 @@ func (s *enforcementAdminStub) SetEnforcementMode(mode string) (EnforcementStatu
 		s.status.Effective = mode
 	}
 	return s.status, nil
+}
+
+func (s *enforcementAdminStub) DumpIdentities() []IdentityDumpRecord {
+	return s.identities
+}
+
+func (s *enforcementAdminStub) Simulate(req SimulationRequest) (SimulationResponse, error) {
+	s.lastSimulation = req
+	return s.simulation, nil
 }

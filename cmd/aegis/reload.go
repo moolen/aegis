@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/moolen/aegis/internal/config"
+	"github.com/moolen/aegis/internal/identity"
 	appmetrics "github.com/moolen/aegis/internal/metrics"
+	"github.com/moolen/aegis/internal/policy"
 	"github.com/moolen/aegis/internal/proxy"
 )
 
@@ -46,10 +49,12 @@ type runtimeManager struct {
 }
 
 type runtimeGeneration struct {
-	cfg          config.Config
-	cancel       context.CancelFunc
-	mitm         *proxy.MITMEngine
-	readyChecker appmetrics.ReadyChecker
+	cfg              config.Config
+	cancel           context.CancelFunc
+	mitm             *proxy.MITMEngine
+	readyChecker     appmetrics.ReadyChecker
+	identityResolver proxy.IdentityResolver
+	policyEngine     proxy.PolicyEngine
 }
 
 func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler, drain *proxy.DrainTracker) *runtimeManager {
@@ -129,9 +134,11 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		m.current.cancel()
 	}
 	m.current = runtimeGeneration{
-		cfg:    cfg,
-		cancel: cancel,
-		mitm:   deps.MITM,
+		cfg:              cfg,
+		cancel:           cancel,
+		mitm:             deps.MITM,
+		identityResolver: deps.IdentityResolver,
+		policyEngine:     deps.PolicyEngine,
 	}
 	if checker, ok := deps.IdentityResolver.(appmetrics.ReadyChecker); ok {
 		m.current.readyChecker = checker
@@ -196,6 +203,132 @@ func (m *runtimeManager) SetEnforcementMode(mode string) (appmetrics.Enforcement
 	return status, nil
 }
 
+func (m *runtimeManager) DumpIdentities() []appmetrics.IdentityDumpRecord {
+	m.mu.RLock()
+	resolver := m.current.identityResolver
+	m.mu.RUnlock()
+
+	dumper, ok := resolver.(interface{ IdentityDump() []identity.DumpEntry })
+	if !ok {
+		return nil
+	}
+
+	entries := dumper.IdentityDump()
+	out := make([]appmetrics.IdentityDumpRecord, 0, len(entries))
+	for _, entry := range entries {
+		record := appmetrics.IdentityDumpRecord{
+			IP:        entry.IP,
+			Effective: identityRecordFromMapping(entry.Effective),
+		}
+		for _, shadow := range entry.Shadows {
+			record.Shadows = append(record.Shadows, *identityRecordFromMapping(&shadow))
+		}
+		out = append(out, record)
+	}
+	return out
+}
+
+func (m *runtimeManager) Simulate(req appmetrics.SimulationRequest) (appmetrics.SimulationResponse, error) {
+	sourceIP := net.ParseIP(req.SourceIP)
+	if sourceIP == nil {
+		return appmetrics.SimulationResponse{}, fmt.Errorf("sourceIP must be a valid IP address")
+	}
+
+	m.mu.RLock()
+	generation := m.current
+	status := enforcementStatusForConfig(generation.cfg, m.enforcement)
+	m.mu.RUnlock()
+
+	resp := appmetrics.SimulationResponse{
+		UnknownIdentityPolicy: config.NormalizeUnknownIdentityPolicy(generation.cfg.Proxy.UnknownIdentityPolicy),
+		ConfiguredMode:        status.Configured,
+		OverrideMode:          status.Override,
+		EffectiveMode:         status.Effective,
+		Protocol:              req.Protocol,
+		FQDN:                  req.FQDN,
+		Port:                  req.Port,
+		Method:                req.Method,
+		Path:                  req.Path,
+	}
+
+	id := identity.Unknown()
+	if generation.identityResolver != nil {
+		resolved, err := generation.identityResolver.Resolve(sourceIP)
+		if err != nil {
+			return appmetrics.SimulationResponse{}, fmt.Errorf("resolve source identity: %w", err)
+		}
+		if resolved != nil {
+			id = resolved
+		}
+	}
+	resp.Identity = identityRecordFromIdentity(id, "", "")
+	resp.UnknownIdentity = isUnknownIdentity(id)
+
+	if resp.UnknownIdentity && resp.UnknownIdentityPolicy == config.UnknownIdentityDeny {
+		if status.Effective == config.EnforcementAudit {
+			resp.Action = "allow"
+			resp.Reason = "audit_unknown_identity"
+			resp.WouldAction = "would_deny"
+			resp.WouldReason = "unknown_identity"
+			resp.WouldBlock = true
+			return resp, nil
+		}
+		resp.Action = "deny"
+		resp.Reason = "unknown_identity"
+		return resp, nil
+	}
+
+	var decision *policy.Decision
+	switch req.Protocol {
+	case "connect":
+		if generation.policyEngine != nil {
+			decision = generation.policyEngine.EvaluateConnect(id, req.FQDN, req.Port)
+		}
+	case "http", "":
+		if generation.policyEngine != nil {
+			decision = generation.policyEngine.Evaluate(id, req.FQDN, req.Port, req.Method, req.Path)
+		}
+	default:
+		return appmetrics.SimulationResponse{}, fmt.Errorf("protocol must be http or connect")
+	}
+	if decision != nil {
+		resp.Decision = &appmetrics.SimulationDecision{
+			Allowed:           decision.Allowed,
+			Policy:            decision.Policy,
+			Rule:              decision.Rule,
+			TLSMode:           decision.TLSMode,
+			Bypass:            decision.Bypass,
+			PolicyEnforcement: decision.PolicyEnforcement,
+		}
+	}
+
+	shadow := status.Effective == config.EnforcementAudit || (decision != nil && (decision.Bypass || decision.PolicyEnforcement == config.EnforcementAudit))
+	if shadow {
+		resp.Action = "allow"
+		if decision == nil || !decision.Allowed {
+			resp.Reason = "audit_policy_denied"
+			resp.WouldAction = "would_deny"
+			resp.WouldReason = "policy_denied"
+			resp.WouldBlock = true
+		} else {
+			resp.Reason = "audit_policy_allowed"
+			resp.WouldAction = "would_allow"
+			resp.WouldReason = "policy_allowed"
+		}
+		return resp, nil
+	}
+
+	if decision == nil || !decision.Allowed {
+		resp.Action = "deny"
+		resp.Reason = "policy_denied"
+		return resp, nil
+	}
+
+	resp.Action = "allow"
+	resp.Reason = "policy_allowed"
+	return resp, nil
+}
+
 func (m *runtimeManager) recordReloadResult(result string) {
 	if m.metrics == nil {
 		return
@@ -244,7 +377,7 @@ func (m *runtimeManager) recordMITMLifecycle(previous *proxy.MITMEngine, next *p
 		}
 	case previous != nil && next == nil:
 		result = "disabled"
-	case previous.Fingerprint() == next.Fingerprint():
+	case sameMITMCASet(previous, next):
 		result = "unchanged"
 	default:
 		result = "rotated"
@@ -256,15 +389,15 @@ func (m *runtimeManager) recordMITMLifecycle(previous *proxy.MITMEngine, next *p
 
 	switch result {
 	case "initial":
-		m.logger.Info("mitm ca loaded", "fingerprint", next.Fingerprint())
+		m.logger.Info("mitm ca loaded", "fingerprints", next.Fingerprints())
 	case "enabled":
-		m.logger.Info("mitm ca enabled", "fingerprint", next.Fingerprint())
+		m.logger.Info("mitm ca enabled", "fingerprints", next.Fingerprints())
 	case "disabled":
 		m.logger.Info("mitm ca disabled")
 	case "unchanged":
-		m.logger.Info("mitm ca reloaded without fingerprint change", "fingerprint", next.Fingerprint())
+		m.logger.Info("mitm ca reloaded without fingerprint change", "fingerprints", next.Fingerprints())
 	case "rotated":
-		m.logger.Info("mitm ca rotated", "previous_fingerprint", previous.Fingerprint(), "fingerprint", next.Fingerprint())
+		m.logger.Info("mitm ca rotated", "previous_fingerprints", previous.Fingerprints(), "fingerprints", next.Fingerprints())
 	}
 
 	if previous != nil {
@@ -340,4 +473,55 @@ func normalizeOverrideMode(mode string) string {
 		return "none"
 	}
 	return mode
+}
+
+func identityRecordFromMapping(mapping *identity.Mapping) *appmetrics.IdentityRecord {
+	if mapping == nil {
+		return nil
+	}
+	return identityRecordFromIdentity(mapping.Identity, mapping.Provider, mapping.Kind)
+}
+
+func identityRecordFromIdentity(id *identity.Identity, provider string, kind string) *appmetrics.IdentityRecord {
+	if id == nil {
+		return nil
+	}
+	labels := make(map[string]string, len(id.Labels))
+	for key, value := range id.Labels {
+		labels[key] = value
+	}
+	return &appmetrics.IdentityRecord{
+		Source:   id.Source,
+		Provider: firstNonEmpty(id.Provider, provider),
+		Kind:     kind,
+		Name:     id.Name,
+		Labels:   labels,
+	}
+}
+
+func isUnknownIdentity(id *identity.Identity) bool {
+	return id == nil || id.Source == "unknown" || id.Name == identity.Unknown().Name
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sameMITMCASet(left *proxy.MITMEngine, right *proxy.MITMEngine) bool {
+	leftFingerprints := left.Fingerprints()
+	rightFingerprints := right.Fingerprints()
+	if len(leftFingerprints) != len(rightFingerprints) {
+		return false
+	}
+	for i := range leftFingerprints {
+		if leftFingerprints[i] != rightFingerprints[i] {
+			return false
+		}
+	}
+	return true
 }

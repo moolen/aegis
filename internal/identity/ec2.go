@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +141,31 @@ func (p *EC2Provider) Resolve(ip net.IP) (*Identity, error) {
 	}
 
 	return cloneIdentity(id), nil
+}
+
+func (p *EC2Provider) IdentityMappings() []Mapping {
+	current, _ := p.state.Load().(map[string]*Identity)
+	ips := make([]string, 0, len(current))
+	for ip := range current {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+
+	mappings := make([]Mapping, 0, len(ips))
+	for _, ip := range ips {
+		id := current[ip]
+		if id == nil {
+			continue
+		}
+		mappings = append(mappings, Mapping{
+			IP:       ip,
+			Provider: p.name,
+			Kind:     "ec2",
+			Identity: cloneIdentity(id),
+		})
+	}
+
+	return mappings
 }
 
 func (p *EC2Provider) poll(ctx context.Context) {

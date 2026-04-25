@@ -1,6 +1,7 @@
 proxy:
   listen: ":3128"
   # enforcement: audit   # audit | enforce
+  # unknownIdentityPolicy: deny   # allow | deny
   # connectionLimits:
   #   maxConcurrentPerIdentity: 100
   # Uncomment when Aegis sits behind an L4 load balancer that injects
@@ -13,6 +14,9 @@ proxy:
   # ca:
   #   certFile: /etc/aegis/ca/ca.crt
   #   keyFile: /etc/aegis/ca/ca.key
+  #   additional:
+  #     - certFile: /etc/aegis/ca/old-ca.crt
+  #       keyFile: /etc/aegis/ca/old-ca.key
 admin:
   # token: "replace-me"   # enables the metrics-port admin kill switch
 metrics:
@@ -46,6 +50,7 @@ discovery:
   #     pollInterval: 30s
 policies:
   - name: allow-example
+    # enforcement: audit   # policy-level audit | enforce
     # bypass: true   # shadow this policy without blocking matching traffic
     identitySelector:
       matchLabels: {}

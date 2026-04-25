@@ -18,6 +18,8 @@ const (
 	defaultGracePeriod   = 10 * time.Second
 	EnforcementEnforce   = "enforce"
 	EnforcementAudit     = "audit"
+	UnknownIdentityAllow = "allow"
+	UnknownIdentityDeny  = "deny"
 )
 
 type Config struct {
@@ -31,14 +33,21 @@ type Config struct {
 }
 
 type ProxyConfig struct {
-	Enforcement      string                 `yaml:"enforcement"`
-	Listen           string                 `yaml:"listen"`
-	CA               CAConfig               `yaml:"ca"`
-	ProxyProtocol    ProxyProtocolConfig    `yaml:"proxyProtocol"`
-	ConnectionLimits ConnectionLimitsConfig `yaml:"connectionLimits"`
+	Enforcement           string                 `yaml:"enforcement"`
+	UnknownIdentityPolicy string                 `yaml:"unknownIdentityPolicy"`
+	Listen                string                 `yaml:"listen"`
+	CA                    CAConfig               `yaml:"ca"`
+	ProxyProtocol         ProxyProtocolConfig    `yaml:"proxyProtocol"`
+	ConnectionLimits      ConnectionLimitsConfig `yaml:"connectionLimits"`
 }
 
 type CAConfig struct {
+	CertFile   string         `yaml:"certFile"`
+	KeyFile    string         `yaml:"keyFile"`
+	Additional []AdditionalCA `yaml:"additional"`
+}
+
+type AdditionalCA struct {
 	CertFile string `yaml:"certFile"`
 	KeyFile  string `yaml:"keyFile"`
 }
@@ -102,6 +111,7 @@ type EC2TagFilterConfig struct {
 
 type PolicyConfig struct {
 	Name             string                 `yaml:"name"`
+	Enforcement      string                 `yaml:"enforcement"`
 	Bypass           bool                   `yaml:"bypass"`
 	IdentitySelector IdentitySelectorConfig `yaml:"identitySelector"`
 	Egress           []EgressRuleConfig     `yaml:"egress"`
@@ -130,7 +140,8 @@ type HTTPRuleConfig struct {
 func Load(r io.Reader) (Config, error) {
 	cfg := Config{
 		Proxy: ProxyConfig{
-			Enforcement: EnforcementEnforce,
+			Enforcement:           EnforcementEnforce,
+			UnknownIdentityPolicy: UnknownIdentityAllow,
 		},
 		Metrics: MetricsConfig{Listen: defaultMetricsListen},
 		DNS: DNSConfig{
@@ -175,8 +186,24 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("proxy.enforcement must be audit or enforce")
 	}
+	switch NormalizeUnknownIdentityPolicy(c.Proxy.UnknownIdentityPolicy) {
+	case UnknownIdentityAllow, UnknownIdentityDeny:
+	default:
+		return fmt.Errorf("proxy.unknownIdentityPolicy must be allow or deny")
+	}
 	if (c.Proxy.CA.CertFile == "") != (c.Proxy.CA.KeyFile == "") {
 		return fmt.Errorf("proxy.ca.certFile and proxy.ca.keyFile must be set together")
+	}
+	if len(c.Proxy.CA.Additional) > 0 && c.Proxy.CA.CertFile == "" {
+		return fmt.Errorf("proxy.ca.additional requires proxy.ca.certFile and proxy.ca.keyFile")
+	}
+	for i, additional := range c.Proxy.CA.Additional {
+		if (additional.CertFile == "") != (additional.KeyFile == "") {
+			return fmt.Errorf("proxy.ca.additional[%d].certFile and proxy.ca.additional[%d].keyFile must be set together", i, i)
+		}
+		if additional.CertFile == "" {
+			return fmt.Errorf("proxy.ca.additional[%d].certFile is required", i)
+		}
 	}
 	if c.Proxy.ProxyProtocol.HeaderTimeout != nil && *c.Proxy.ProxyProtocol.HeaderTimeout <= 0 {
 		return fmt.Errorf("proxy.proxyProtocol.headerTimeout must be greater than zero")
@@ -220,9 +247,19 @@ func (c Config) Validate() error {
 			return fmt.Errorf("dns.rebindingProtection.allowedCIDRs[%d] must be a valid CIDR: %w", i, err)
 		}
 	}
+	policyNames := make(map[string]struct{}, len(c.Policies))
 	for i, policy := range c.Policies {
 		if strings.TrimSpace(policy.Name) == "" {
 			return fmt.Errorf("policies[%d].name is required", i)
+		}
+		if _, exists := policyNames[policy.Name]; exists {
+			return fmt.Errorf("policies[%d].name %q must be unique", i, policy.Name)
+		}
+		policyNames[policy.Name] = struct{}{}
+		switch NormalizeEnforcementMode(policy.Enforcement) {
+		case EnforcementEnforce, EnforcementAudit:
+		default:
+			return fmt.Errorf("policies[%d].enforcement must be audit or enforce", i)
 		}
 		for j, rule := range policy.Egress {
 			if strings.TrimSpace(rule.FQDN) == "" {
@@ -258,10 +295,15 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	discoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes)+len(c.Discovery.EC2))
 	for i, discovery := range c.Discovery.Kubernetes {
 		if strings.TrimSpace(discovery.Name) == "" {
 			return fmt.Errorf("discovery.kubernetes[%d].name is required", i)
 		}
+		if _, exists := discoveryNames[discovery.Name]; exists {
+			return fmt.Errorf("discovery.kubernetes[%d].name %q must be unique across discovery providers", i, discovery.Name)
+		}
+		discoveryNames[discovery.Name] = struct{}{}
 		for j, namespace := range discovery.Namespaces {
 			if strings.TrimSpace(namespace) == "" {
 				return fmt.Errorf("discovery.kubernetes[%d].namespaces[%d] must not be empty", i, j)
@@ -275,6 +317,10 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(discovery.Name) == "" {
 			return fmt.Errorf("discovery.ec2[%d].name is required", i)
 		}
+		if _, exists := discoveryNames[discovery.Name]; exists {
+			return fmt.Errorf("discovery.ec2[%d].name %q must be unique across discovery providers", i, discovery.Name)
+		}
+		discoveryNames[discovery.Name] = struct{}{}
 		if strings.TrimSpace(discovery.Region) == "" {
 			return fmt.Errorf("discovery.ec2[%d].region is required", i)
 		}
@@ -301,4 +347,11 @@ func NormalizeEnforcementMode(mode string) string {
 		return EnforcementEnforce
 	}
 	return strings.ToLower(strings.TrimSpace(mode))
+}
+
+func NormalizeUnknownIdentityPolicy(policy string) string {
+	if strings.TrimSpace(policy) == "" {
+		return UnknownIdentityAllow
+	}
+	return strings.ToLower(strings.TrimSpace(policy))
 }

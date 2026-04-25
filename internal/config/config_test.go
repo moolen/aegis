@@ -135,6 +135,29 @@ func TestLoadRejectsInvalidProxyEnforcementMode(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidUnknownIdentityPolicy(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  unknownIdentityPolicy: maybe
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadAcceptsUnknownIdentityDenyPolicy(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  unknownIdentityPolicy: deny
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Proxy.UnknownIdentityPolicy != "deny" {
+		t.Fatalf("unknown identity policy = %q, want deny", cfg.Proxy.UnknownIdentityPolicy)
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"
@@ -262,6 +285,67 @@ policies:
           mode: passthrough
         http:
           allowedMethods: ["GET"]
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadAcceptsPolicyLevelEnforcement(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: audited
+    enforcement: audit
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Policies[0].Enforcement != "audit" {
+		t.Fatalf("policy enforcement = %q, want audit", cfg.Policies[0].Enforcement)
+	}
+}
+
+func TestLoadRejectsDuplicatePolicyNames(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+policies:
+  - name: duplicate
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [80]
+        tls:
+          mode: mitm
+  - name: duplicate
+    identitySelector:
+      matchLabels: {}
+    egress:
+      - fqdn: "example.org"
+        ports: [80]
+        tls:
+          mode: mitm
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsAdditionalCAWithoutPrimaryCA(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  ca:
+    additional:
+      - certFile: /tmp/old.crt
+        keyFile: /tmp/old.key
 `)))
 	if err == nil {
 		t.Fatal("expected validation error")

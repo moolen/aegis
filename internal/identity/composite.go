@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 
 	"github.com/moolen/aegis/internal/metrics"
 )
@@ -126,4 +127,53 @@ func (r *CompositeResolver) CheckReadiness() error {
 		return fmt.Errorf("discovery not ready: %w", err)
 	}
 	return nil
+}
+
+func (r *CompositeResolver) IdentityDump() []DumpEntry {
+	type aggregate struct {
+		ip        string
+		effective *Mapping
+		shadows   []Mapping
+	}
+
+	byIP := make(map[string]*aggregate)
+	for _, provider := range r.providers {
+		snapshotter, ok := provider.Resolver.(Snapshotter)
+		if !ok {
+			continue
+		}
+		for _, mapping := range snapshotter.IdentityMappings() {
+			mapping.Provider = provider.Name
+			mapping.Kind = provider.Kind
+
+			entry := byIP[mapping.IP]
+			if entry == nil {
+				entry = &aggregate{ip: mapping.IP}
+				byIP[mapping.IP] = entry
+			}
+			if entry.effective == nil {
+				effective := mapping
+				entry.effective = &effective
+				continue
+			}
+			entry.shadows = append(entry.shadows, mapping)
+		}
+	}
+
+	ips := make([]string, 0, len(byIP))
+	for ip := range byIP {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+
+	out := make([]DumpEntry, 0, len(ips))
+	for _, ip := range ips {
+		entry := byIP[ip]
+		out = append(out, DumpEntry{
+			IP:        ip,
+			Effective: entry.effective,
+			Shadows:   append([]Mapping(nil), entry.shadows...),
+		})
+	}
+	return out
 }

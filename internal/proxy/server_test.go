@@ -475,6 +475,113 @@ func TestProxyAuditModeAllowsDeniedHTTPRequestsAndRecordsWouldDeny(t *testing.T)
 	}
 }
 
+func TestProxyPolicyLevelAuditAllowsDeniedHTTPRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:        "legacy-web",
+			Enforcement: "audit",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"POST"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		Metrics: m,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/blocked", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "allow",
+		"policy":   "legacy-web",
+		"reason":   "audit_policy_denied",
+	}); got != 1 {
+		t.Fatalf("actual decision metric = %v, want 1", got)
+	}
+}
+
+func TestProxyUnknownIdentityDenyBlocksHTTPRequests(t *testing.T) {
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		UnknownIdentityPolicy: "deny",
+		Metrics:               m,
+		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com%s/allowed", hostPortSuffix(upstreamURL.Host)), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if upstreamHits.Load() != 0 {
+		t.Fatalf("upstreamHits = %d, want 0", upstreamHits.Load())
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "deny",
+		"policy":   "none",
+		"reason":   "unknown_identity",
+	}); got != 1 {
+		t.Fatalf("decision metric = %v, want 1", got)
+	}
+}
+
 func TestProxyBypassPolicyAllowsDeniedHTTPRequestsAndRecordsWouldDeny(t *testing.T) {
 	var upstreamHits atomic.Int32
 

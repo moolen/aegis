@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -46,19 +45,26 @@ var discoveryProviderStartupTimeout = 30 * time.Second
 var proxyProtocolHeaderTimeout = 5 * time.Second
 
 func main() {
-	os.Exit(run())
+	os.Exit(runCLI(os.Args[1:]))
 }
 
 func run() int {
-	var configPath string
-	flag.StringVar(&configPath, "config", "aegis.example.yaml", "Path to the Aegis configuration file.")
-	flag.Parse()
+	return runServe(os.Args[1:])
+}
+
+func runServe(args []string) int {
+	fs := newFlagSet("aegis")
+	configPath := fs.String("config", "aegis.example.yaml", "Path to the Aegis configuration file.")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	cfg, err := loadRuntimeConfig(configPath)
+	cfg, err := loadRuntimeConfig(*configPath)
 	if err != nil {
-		logger.Error("load config failed", "path", configPath, "error", err)
+		logger.Error("load config failed", "path", *configPath, "error", err)
 		return 1
 	}
 
@@ -69,7 +75,7 @@ func run() int {
 	m := appmetrics.New(registry)
 	drainTracker := proxy.NewDrainTracker(logger, m)
 	reloadableHandler := &reloadableProxyHandler{}
-	runtime := newRuntimeManager(ctx, logger, m, configPath, reloadableHandler, drainTracker)
+	runtime := newRuntimeManager(ctx, logger, m, *configPath, reloadableHandler, drainTracker)
 	defer runtime.Close()
 	if err := runtime.LoadInitial(cfg); err != nil {
 		logger.Error("build runtime failed", "error", err)
@@ -105,10 +111,10 @@ func run() int {
 			return 0
 		case <-reloadCh:
 			if err := runtime.ReloadFromFile(); err != nil {
-				logger.Error("reload config failed", "path", configPath, "error", err)
+				logger.Error("reload config failed", "path", *configPath, "error", err)
 				continue
 			}
-			logger.Info("config reloaded", "path", configPath)
+			logger.Info("config reloaded", "path", *configPath)
 		case <-ctx.Done():
 			logger.Info("shutdown signal received")
 			goto shutdown
@@ -191,6 +197,11 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		if err != nil {
 			return proxy.Dependencies{}, fmt.Errorf("load mitm engine: %w", err)
 		}
+		for i, additional := range cfg.Proxy.CA.Additional {
+			if err := mitmEngine.AddAdditionalCAFromFiles(additional.CertFile, additional.KeyFile); err != nil {
+				return proxy.Dependencies{}, fmt.Errorf("load proxy.ca.additional[%d]: %w", i, err)
+			}
+		}
 		mitmEngine.AttachMetrics(m)
 	}
 	identityResolver, err := buildIdentityResolver(ctx, cfg.Discovery, logger, m)
@@ -199,17 +210,18 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 	}
 
 	return proxy.Dependencies{
-		Resolver:          resolver,
-		DestinationGuard:  destinationGuard,
-		DrainTracker:      drainTracker,
-		ConnectionLimiter: connectionLimiter,
-		EnforcementMode:   cfg.Proxy.Enforcement,
-		Enforcement:       enforcement,
-		IdentityResolver:  identityResolver,
-		PolicyEngine:      engine,
-		MITM:              mitmEngine,
-		Metrics:           m,
-		Logger:            logger,
+		Resolver:              resolver,
+		DestinationGuard:      destinationGuard,
+		DrainTracker:          drainTracker,
+		ConnectionLimiter:     connectionLimiter,
+		EnforcementMode:       cfg.Proxy.Enforcement,
+		Enforcement:           enforcement,
+		UnknownIdentityPolicy: cfg.Proxy.UnknownIdentityPolicy,
+		IdentityResolver:      identityResolver,
+		PolicyEngine:          engine,
+		MITM:                  mitmEngine,
+		Metrics:               m,
+		Logger:                logger,
 	}, nil
 }
 

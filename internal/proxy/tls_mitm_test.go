@@ -116,6 +116,27 @@ func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
 	}
 }
 
+func TestMITMEngineSupportsAdditionalCAs(t *testing.T) {
+	primary := newMITMTestCA(t)
+	secondary := newMITMTestCA(t)
+
+	engine, err := NewMITMEngine(primary.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+	if err := engine.AddAdditionalCA(secondary.certificate); err != nil {
+		t.Fatalf("AddAdditionalCA() error = %v", err)
+	}
+
+	fingerprints := engine.Fingerprints()
+	if len(fingerprints) != 2 {
+		t.Fatalf("fingerprints = %#v, want primary and secondary fingerprints", fingerprints)
+	}
+	if fingerprints[0] == fingerprints[1] {
+		t.Fatalf("fingerprints = %#v, want distinct fingerprints", fingerprints)
+	}
+}
+
 func TestProxyConnectMITMDeniesHTTPRequest(t *testing.T) {
 	ca := newMITMTestCA(t)
 	mitmEngine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))

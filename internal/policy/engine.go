@@ -13,18 +13,20 @@ type Engine struct {
 }
 
 type Decision struct {
-	Allowed bool
-	Policy  string
-	Rule    string
-	TLSMode string
-	Bypass  bool
+	Allowed           bool
+	Policy            string
+	Rule              string
+	TLSMode           string
+	Bypass            bool
+	PolicyEnforcement string
 }
 
 type Policy struct {
-	name     string
-	bypass   bool
-	selector map[string]string
-	egress   []Rule
+	name        string
+	enforcement string
+	bypass      bool
+	selector    map[string]string
+	egress      []Rule
 }
 
 type Rule struct {
@@ -58,7 +60,7 @@ func (e *Engine) Evaluate(id *identity.Identity, fqdn string, port int, method s
 			continue
 		}
 
-		decision := &Decision{Policy: policy.name, Bypass: policy.bypass}
+		decision := &Decision{Policy: policy.name, Bypass: policy.bypass, PolicyEnforcement: policy.enforcement}
 		for _, rule := range policy.egress {
 			if !rule.matches(fqdn, port, method, reqPath) {
 				continue
@@ -82,7 +84,7 @@ func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *
 			continue
 		}
 
-		decision := &Decision{Policy: policy.name, Bypass: policy.bypass}
+		decision := &Decision{Policy: policy.name, Bypass: policy.bypass, PolicyEnforcement: policy.enforcement}
 		for _, rule := range policy.egress {
 			if !rule.matchesConnect(fqdn, port) {
 				continue
@@ -102,10 +104,11 @@ func (e *Engine) EvaluateConnect(id *identity.Identity, fqdn string, port int) *
 
 func compilePolicy(cfg config.PolicyConfig) (Policy, error) {
 	policy := Policy{
-		name:     cfg.Name,
-		bypass:   cfg.Bypass,
-		selector: cloneStringMap(cfg.IdentitySelector.MatchLabels),
-		egress:   make([]Rule, 0, len(cfg.Egress)),
+		name:        cfg.Name,
+		enforcement: config.NormalizeEnforcementMode(cfg.Enforcement),
+		bypass:      cfg.Bypass,
+		selector:    cloneStringMap(cfg.IdentitySelector.MatchLabels),
+		egress:      make([]Rule, 0, len(cfg.Egress)),
 	}
 
 	for _, ruleCfg := range cfg.Egress {

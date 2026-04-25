@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -219,6 +220,33 @@ func (p *KubernetesProvider) Resolve(ip net.IP) (*Identity, error) {
 	}
 
 	return cloneIdentity(id), nil
+}
+
+func (p *KubernetesProvider) IdentityMappings() []Mapping {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	ips := make([]string, 0, len(p.byIP))
+	for ip := range p.byIP {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+
+	mappings := make([]Mapping, 0, len(ips))
+	for _, ip := range ips {
+		id := p.byIP[ip]
+		if id == nil {
+			continue
+		}
+		mappings = append(mappings, Mapping{
+			IP:       ip,
+			Provider: p.name,
+			Kind:     "kubernetes",
+			Identity: cloneIdentity(id),
+		})
+	}
+
+	return mappings
 }
 
 func (p *KubernetesProvider) ProviderStatus() ProviderStatus {

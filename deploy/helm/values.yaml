@@ -27,6 +27,7 @@ config:
   proxy:
     listen: ":3128"
     # enforcement: audit
+    # unknownIdentityPolicy: deny
     # connectionLimits:
     #   maxConcurrentPerIdentity: 100
     # proxyProtocol:
@@ -35,6 +36,9 @@ config:
     # ca:
     #   certFile: /etc/aegis/ca/ca.crt
     #   keyFile: /etc/aegis/ca/ca.key
+    #   additional:
+    #     - certFile: /etc/aegis/ca/old-ca.crt
+    #       keyFile: /etc/aegis/ca/old-ca.key
   admin: {}
   # admin:
   #   token: replace-me
@@ -51,6 +55,7 @@ config:
       allowedCIDRs: []
   policies:
     - name: allow-example
+      # enforcement: audit
       # bypass: true
       identitySelector:
         matchLabels: {}
@@ -71,10 +76,16 @@ config:
 # Set config.proxy.enforcement: audit to shadow policy decisions without
 # blocking traffic during migration. In audit mode, CONNECT stays transparent
 # passthrough, so inner HTTPS method/path rules are not actively inspected.
+# Set config.policies[].enforcement: audit for a narrower staged rollout where
+# specific matched policies stay in shadow mode while the rest enforce.
+# Set config.proxy.unknownIdentityPolicy: deny to refuse traffic from source
+# IPs that do not resolve to a known identity.
 # Set config.admin.token to enable POST /admin/enforcement?mode=audit|enforce|config
 # on the metrics port as a protected global kill switch.
 # Set config.policies[].bypass: true for a narrower per-policy shadow mode with
 # the same transparent CONNECT behavior.
+# Set config.proxy.ca.additional for dual-CA rollout periods where Aegis should
+# load a previous CA alongside the active issuing CA.
 # Set config.proxy.connectionLimits.maxConcurrentPerIdentity for a simple
 # per-identity abuse-control guardrail across HTTP requests and CONNECT tunnels.
 # The default empty identitySelector.matchLabels is a safe starter policy that
