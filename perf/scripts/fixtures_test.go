@@ -10,10 +10,33 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLocalPerfConfigTemplatesExist(t *testing.T) {
+	paths := []string{
+		"../config/local-http.yaml",
+		"../config/local-connect-passthrough.yaml",
+		"../config/local-connect-mitm.yaml",
+		"../k6/http.js",
+		"../k6/connect_passthrough.js",
+		"../k6/connect_mitm.js",
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("os.Stat(%q) error = %v", path, err)
+			}
+		})
+	}
+}
 
 func TestHTTPFixtureServesConfiguredPath(t *testing.T) {
 	srv := newHTTPFixture("/allowed", http.StatusNoContent)

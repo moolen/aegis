@@ -1,0 +1,34 @@
+proxy:
+  listen: "127.0.0.1:3128"
+  enforcement: enforce
+  unknownIdentityPolicy: deny
+metrics:
+  listen: "127.0.0.1:9090"
+shutdown:
+  gracePeriod: 10s
+dns:
+  cache_ttl: 30s
+  timeout: 5s
+  servers: []
+  rebindingProtection:
+    allowedHostPatterns: []
+    allowedCIDRs:
+      - "127.0.0.0/8"
+      - "::1/128"
+discovery:
+  kubernetes: []
+  ec2: []
+policies:
+  - name: local-http-allow
+    subjects:
+      cidrs:
+        - "127.0.0.0/8"
+        - "::1/128"
+    egress:
+      - fqdn: "127.0.0.1"
+        ports: [18080]
+        tls:
+          mode: mitm
+        http:
+          allowedMethods: ["GET"]
+          allowedPaths: ["/allowed"]
