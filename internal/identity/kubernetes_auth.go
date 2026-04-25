@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -187,6 +188,14 @@ func buildAKSRESTConfig(ctx context.Context, subscriptionID string, resourceGrou
 	restCfg, err := clientcmd.RESTConfigFromKubeConfig(rawKubeconfig)
 	if err != nil {
 		return nil, err
+	}
+
+	_, _, requiresAmbientToken, err := aksExecAuthTokenRequestParameters(rawKubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	if !requiresAmbientToken {
+		return restCfg, nil
 	}
 
 	tokenSource, err := deps.tokenSource(ctx, rawKubeconfig)
@@ -429,9 +438,21 @@ func gkeClusterResourceName(project string, location string, clusterName string)
 }
 
 func aksTokenRequestParameters(rawKubeconfig []byte) (string, string, error) {
-	cfg, err := clientcmd.Load(rawKubeconfig)
+	serverID, tenantID, ok, err := aksExecAuthTokenRequestParameters(rawKubeconfig)
 	if err != nil {
 		return "", "", err
+	}
+	if !ok {
+		return "", "", fmt.Errorf("aks kubeconfig did not include exec auth configuration")
+	}
+
+	return serverID, tenantID, nil
+}
+
+func aksExecAuthTokenRequestParameters(rawKubeconfig []byte) (string, string, bool, error) {
+	cfg, err := clientcmd.Load(rawKubeconfig)
+	if err != nil {
+		return "", "", false, err
 	}
 
 	contextName := cfg.CurrentContext
@@ -444,20 +465,26 @@ func aksTokenRequestParameters(rawKubeconfig []byte) (string, string, error) {
 
 	contextCfg, ok := cfg.Contexts[contextName]
 	if !ok || contextCfg == nil {
-		return "", "", fmt.Errorf("aks kubeconfig did not include a usable current context")
+		return "", "", false, fmt.Errorf("aks kubeconfig did not include a usable current context")
 	}
 
 	authInfo, ok := cfg.AuthInfos[contextCfg.AuthInfo]
-	if !ok || authInfo == nil || authInfo.Exec == nil {
-		return "", "", fmt.Errorf("aks kubeconfig did not include exec auth configuration")
+	if !ok || authInfo == nil {
+		return "", "", false, fmt.Errorf("aks kubeconfig did not include auth info for context %q", contextName)
+	}
+	if authInfo.Exec == nil {
+		return "", "", false, nil
+	}
+	if !isAKSKubeloginExec(authInfo.Exec.Command) {
+		return "", "", false, nil
 	}
 
 	serverID := execArgValue(authInfo.Exec.Args, "--server-id")
 	if strings.TrimSpace(serverID) == "" {
-		return "", "", fmt.Errorf("aks kubeconfig did not include --server-id in exec args")
+		return "", "", false, fmt.Errorf("aks kubeconfig did not include --server-id in exec args")
 	}
 
-	return serverID, execArgValue(authInfo.Exec.Args, "--tenant-id"), nil
+	return serverID, execArgValue(authInfo.Exec.Args, "--tenant-id"), true, nil
 }
 
 func execArgValue(args []string, flag string) string {
@@ -471,6 +498,11 @@ func execArgValue(args []string, flag string) string {
 	}
 
 	return ""
+}
+
+func isAKSKubeloginExec(command string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	return base == "kubelogin" || base == "kubelogin.exe"
 }
 
 func normalizeKubernetesHost(host string) string {

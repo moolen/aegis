@@ -354,6 +354,10 @@ users:
     exec:
       apiVersion: client.authentication.k8s.io/v1beta1
       command: kubelogin
+      args:
+      - get-token
+      - --server-id
+      - server-app-id
 `)
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "aks-token"})
 
@@ -395,6 +399,87 @@ users:
 	authHeader := authorizationHeader(t, cfg)
 	if authHeader != "Bearer aks-token" {
 		t.Fatalf("authorization header = %q, want Bearer aks-token", authHeader)
+	}
+}
+
+func TestBuildAKSRESTConfigKeepsNonExecKubeconfigAuth(t *testing.T) {
+	kubeconfig := []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YWtzLWNh
+    server: https://aks.example
+  name: cluster
+contexts:
+- context:
+    cluster: cluster
+    user: user
+  name: context
+current-context: context
+kind: Config
+users:
+- name: user
+  user:
+    token: direct-token
+`)
+
+	cfg, err := buildAKSRESTConfig(context.Background(), "sub-123", "rg-platform", "cluster-c", aksRESTConfigDeps{
+		loadKubeconfig: func(context.Context, string, string, string) ([]byte, error) {
+			return kubeconfig, nil
+		},
+		tokenSource: func(context.Context, []byte) (oauth2.TokenSource, error) {
+			t.Fatal("tokenSource should not be called for non-exec kubeconfig")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildAKSRESTConfig() error = %v", err)
+	}
+	if cfg.Host != "https://aks.example" {
+		t.Fatalf("config host = %q, want https://aks.example", cfg.Host)
+	}
+	if cfg.BearerToken != "direct-token" {
+		t.Fatalf("config bearer token = %q, want direct-token", cfg.BearerToken)
+	}
+}
+
+func TestBuildAKSRESTConfigRejectsMalformedExecKubeconfig(t *testing.T) {
+	kubeconfig := []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: YWtzLWNh
+    server: https://aks.example
+  name: cluster
+contexts:
+- context:
+    cluster: cluster
+    user: user
+  name: context
+current-context: context
+kind: Config
+users:
+- name: user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubelogin
+`)
+
+	_, err := buildAKSRESTConfig(context.Background(), "sub-123", "rg-platform", "cluster-c", aksRESTConfigDeps{
+		loadKubeconfig: func(context.Context, string, string, string) ([]byte, error) {
+			return kubeconfig, nil
+		},
+		tokenSource: func(context.Context, []byte) (oauth2.TokenSource, error) {
+			t.Fatal("tokenSource should not be called when exec kubeconfig is malformed")
+			return nil, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected malformed exec kubeconfig error")
+	}
+	if !strings.Contains(err.Error(), "--server-id") {
+		t.Fatalf("error = %q, want missing server-id message", err)
 	}
 }
 
