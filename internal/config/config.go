@@ -302,6 +302,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("policies[%d].subjects must reference at least one discovery provider", i)
 		}
 		if policy.Subjects.Kubernetes != nil {
+			if len(policy.Subjects.Kubernetes.Namespaces) == 0 {
+				return fmt.Errorf("policies[%d].subjects.kubernetes.namespaces must contain at least one namespace", i)
+			}
 			for j, discoveryName := range policy.Subjects.Kubernetes.DiscoveryNames {
 				if strings.TrimSpace(discoveryName) == "" {
 					return fmt.Errorf("policies[%d].subjects.kubernetes.discoveryNames[%d] must not be empty", i, j)

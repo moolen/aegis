@@ -1180,23 +1180,6 @@ policies:
 `,
 		},
 		{
-			name: "empty kubernetes subject",
-			yaml: `proxy:
-  listen: ":3128"
-policies:
-  - name: empty-kubernetes
-    subjects:
-      kubernetes:
-        namespaces: ["default"]
-        matchLabels: {}
-    egress:
-      - fqdn: "example.com"
-        ports: [443]
-        tls:
-          mode: passthrough
-`,
-		},
-		{
 			name: "empty ec2 subject",
 			yaml: `proxy:
   listen: ":3128"
@@ -1223,6 +1206,35 @@ policies:
 				t.Fatalf("unexpected error = %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsKubernetesPolicySubjectsWithoutNamespaces(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
+policies:
+  - name: missing-namespaces
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        matchLabels:
+          app: web
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "policies[0].subjects.kubernetes.namespaces must contain at least one namespace") {
+		t.Fatalf("unexpected error = %v", err)
 	}
 }
 
