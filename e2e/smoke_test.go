@@ -86,6 +86,59 @@ func TestPolicyReloadAppliesWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestPolicyAuditModeAllowsDeniedHTTPRequests(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/allowed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "aegis.yaml")
+
+	writeConfig(t, configPath, policyConfigYAMLWithEnforcement(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/other", "audit"))
+	startAegis(t, configPath)
+
+	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	metricsBody := fetchMetrics(t, "http://"+metricsAddr)
+	if got := metricValue(t, metricsBody, "aegis_request_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "allow",
+		"policy":   "allow-http",
+		"reason":   "audit_policy_denied",
+	}); got != 1 {
+		t.Fatalf("actual decision metric = %v, want 1", got)
+	}
+	if got := metricValue(t, metricsBody, "aegis_audit_decisions_total", map[string]string{
+		"protocol": "http",
+		"action":   "would_deny",
+		"identity": "unknown",
+		"fqdn":     "127.0.0.1",
+		"policy":   "allow-http",
+		"reason":   "policy_denied",
+	}); got != 1 {
+		t.Fatalf("audit decision metric = %v, want 1", got)
+	}
+}
+
 func TestMITMCARotationIsVisibleInMetrics(t *testing.T) {
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
@@ -286,9 +339,18 @@ func writeConfig(t *testing.T, path string, contents string) {
 }
 
 func policyConfigYAML(proxyAddr string, metricsAddr string, host string, port int, allowedPath string) string {
+	return policyConfigYAMLWithEnforcement(proxyAddr, metricsAddr, host, port, allowedPath, "")
+}
+
+func policyConfigYAMLWithEnforcement(proxyAddr string, metricsAddr string, host string, port int, allowedPath string, enforcement string) string {
+	enforcementBlock := ""
+	if enforcement != "" {
+		enforcementBlock = "  enforcement: " + enforcement + "\n"
+	}
+
 	return fmt.Sprintf(`proxy:
   listen: "%s"
-metrics:
+%smetrics:
   listen: "%s"
 dns:
   cache_ttl: 30s
@@ -308,7 +370,7 @@ policies:
         http:
           allowedMethods: ["GET"]
           allowedPaths: ["%s"]
-`, proxyAddr, metricsAddr, host, port, allowedPath)
+`, proxyAddr, enforcementBlock, metricsAddr, host, port, allowedPath)
 }
 
 func mitmConfigYAML(proxyAddr string, metricsAddr string, certFile string, keyFile string) string {

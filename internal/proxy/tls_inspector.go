@@ -32,7 +32,7 @@ func readClientHello(r *bufio.Reader) ([]byte, string, error) {
 	clientHello := append(recordHeader, recordBody...)
 	sni, err := parseClientHelloSNI(recordBody)
 	if err != nil {
-		return nil, "", err
+		return clientHello, "", err
 	}
 
 	return clientHello, sni, nil

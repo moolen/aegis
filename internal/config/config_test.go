@@ -67,6 +67,28 @@ metrics:
 	}
 }
 
+func TestLoadDefaultsProxyEnforcementToEnforce(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Proxy.Enforcement != EnforcementEnforce {
+		t.Fatalf("proxy enforcement = %q, want %q", cfg.Proxy.Enforcement, EnforcementEnforce)
+	}
+}
+
+func TestLoadRejectsInvalidProxyEnforcementMode(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  enforcement: block
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"

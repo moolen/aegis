@@ -22,6 +22,8 @@ Implemented in this bootstrap:
 - Optional Proxy Protocol v2 support on the proxy listener so identity
   resolution can use the original client IP behind an L4 load balancer.
 - Live `SIGHUP` config reload for policy, DNS, discovery, and MITM CA changes.
+- Global `proxy.enforcement: audit` mode for migration, with would-allow /
+  would-deny metrics and logs while traffic keeps flowing.
 - Configurable graceful shutdown with explicit CONNECT tunnel draining and
   force-close accounting when the grace period expires.
 - Structured JSON logging with `slog`.
@@ -48,6 +50,10 @@ Current runtime behavior:
 - `CONNECT` requests resolve identity, evaluate policy, require a TLS
   ClientHello with matching SNI, and then run in passthrough or MITM mode
   depending on the matched rule.
+- When `proxy.enforcement: audit` is set, Aegis still evaluates policy and
+  emits audit metrics/logs, but it does not block policy-denied traffic. To
+  keep migration traffic transparent, audit-mode `CONNECT` stays in raw
+  passthrough rather than active MITM inspection.
 - TLS MITM requires `proxy.ca.certFile` and `proxy.ca.keyFile`; once
   configured, Aegis terminates client TLS, verifies upstream TLS, and evaluates
   decrypted HTTP requests before forwarding them.
@@ -82,6 +88,8 @@ TLS MITM for `CONNECT`, provide a proxy CA certificate and key through
 NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled` and configure
 the balancer to emit Proxy Protocol v2 on the proxy port. To reload policy or
 discovery changes without restarting the process, send `SIGHUP` to Aegis.
+For migration, set `proxy.enforcement: audit` to shadow policy decisions
+without blocking traffic.
 By default, Aegis also blocks loopback, private, and link-local upstream
 addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
 `dns.rebindingProtection.allowedHostPatterns` or
@@ -119,8 +127,9 @@ Available commands:
 It exercises the built `aegis` binary as a subprocess across reload-sensitive
 runtime behavior and the main HTTPS protocol matrix: passthrough allow/deny,
 no-SNI and SNI-mismatch blocking, MITM certificate generation, MITM inner HTTP
-policy denial, client trust failure, and upstream TLS validation. The heavier
-cluster-aware suite from the original design doc is split out into
+policy denial, client trust failure, upstream TLS validation, and audit-mode
+allow-on-deny behavior for both HTTP and `CONNECT`. The heavier cluster-aware
+suite from the original design doc is split out into
 `make e2e-kind`, which creates a Kind cluster, loads a locally built Aegis
 image, installs the shipped Helm chart, and verifies in-cluster proxy
 allow/deny behavior plus Kubernetes-discovery-driven identity enforcement.

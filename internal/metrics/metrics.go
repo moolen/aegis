@@ -5,6 +5,7 @@ import "github.com/prometheus/client_golang/prometheus"
 type Metrics struct {
 	RequestsTotal                  *prometheus.CounterVec
 	RequestDecisionsTotal          *prometheus.CounterVec
+	AuditDecisionsTotal            *prometheus.CounterVec
 	ErrorsTotal                    *prometheus.CounterVec
 	RequestDuration                *prometheus.HistogramVec
 	PolicyEvaluationDuration       *prometheus.HistogramVec
@@ -46,6 +47,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Total number of proxy allow or deny decisions.",
 			},
 			[]string{"protocol", "action", "policy", "reason"},
+		),
+		AuditDecisionsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_audit_decisions_total",
+				Help: "Total number of audit-mode would-allow or would-deny decisions.",
+			},
+			[]string{"protocol", "action", "identity", "fqdn", "policy", "reason"},
 		),
 		ErrorsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -219,6 +227,7 @@ func New(reg prometheus.Registerer) *Metrics {
 	reg.MustRegister(
 		m.RequestsTotal,
 		m.RequestDecisionsTotal,
+		m.AuditDecisionsTotal,
 		m.ErrorsTotal,
 		m.RequestDuration,
 		m.PolicyEvaluationDuration,

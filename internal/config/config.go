@@ -16,6 +16,8 @@ const (
 	defaultDNSCacheTTL   = 30 * time.Second
 	defaultDNSTimeout    = 5 * time.Second
 	defaultGracePeriod   = 10 * time.Second
+	EnforcementEnforce   = "enforce"
+	EnforcementAudit     = "audit"
 )
 
 type Config struct {
@@ -28,6 +30,7 @@ type Config struct {
 }
 
 type ProxyConfig struct {
+	Enforcement   string              `yaml:"enforcement"`
 	Listen        string              `yaml:"listen"`
 	CA            CAConfig            `yaml:"ca"`
 	ProxyProtocol ProxyProtocolConfig `yaml:"proxyProtocol"`
@@ -115,6 +118,9 @@ type HTTPRuleConfig struct {
 
 func Load(r io.Reader) (Config, error) {
 	cfg := Config{
+		Proxy: ProxyConfig{
+			Enforcement: EnforcementEnforce,
+		},
 		Metrics: MetricsConfig{Listen: defaultMetricsListen},
 		DNS: DNSConfig{
 			CacheTTL: defaultDNSCacheTTL,
@@ -152,6 +158,11 @@ func LoadFile(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.Proxy.Listen == "" {
 		return fmt.Errorf("proxy.listen is required")
+	}
+	switch NormalizeEnforcementMode(c.Proxy.Enforcement) {
+	case EnforcementEnforce, EnforcementAudit:
+	default:
+		return fmt.Errorf("proxy.enforcement must be audit or enforce")
 	}
 	if (c.Proxy.CA.CertFile == "") != (c.Proxy.CA.KeyFile == "") {
 		return fmt.Errorf("proxy.ca.certFile and proxy.ca.keyFile must be set together")
@@ -266,4 +277,11 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func NormalizeEnforcementMode(mode string) string {
+	if strings.TrimSpace(mode) == "" {
+		return EnforcementEnforce
+	}
+	return strings.ToLower(strings.TrimSpace(mode))
 }

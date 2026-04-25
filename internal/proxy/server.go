@@ -38,6 +38,7 @@ type Dependencies struct {
 	Resolver          Resolver
 	DestinationGuard  *DestinationGuard
 	DrainTracker      *DrainTracker
+	AuditMode         bool
 	IdentityResolver  IdentityResolver
 	PolicyEngine      PolicyEngine
 	MITM              *MITMEngine
@@ -48,6 +49,15 @@ type Dependencies struct {
 
 type Server struct {
 	deps Dependencies
+}
+
+type auditOutcome struct {
+	Enabled               bool
+	WouldAction           string
+	WouldBlock            bool
+	WouldReason           string
+	EffectiveTLSMode      string
+	MITMInspectionSkipped bool
 }
 
 func NewServer(deps Dependencies) *Server {
@@ -95,14 +105,16 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	reqIdentity := identity.Unknown()
 	var decision *policy.Decision
+	audit := auditOutcome{}
 	if s.deps.PolicyEngine != nil {
 		reqIdentity = s.resolveRequestIdentity(r)
 		decision = s.evaluatePolicy("http", func() *policy.Decision {
 			return s.deps.PolicyEngine.Evaluate(reqIdentity, host, port, r.Method, requestPolicyPath(r))
 		})
-		if decision == nil || !decision.Allowed {
+		audit = s.recordAuditPolicyDecision("http", reqIdentity, host, decision)
+		if !s.auditMode() && (decision == nil || !decision.Allowed) {
 			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "policy_denied")
-			s.logRequestDecision(slog.LevelWarn, "http", "deny", "policy_denied", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r))
+			s.logRequestDecision(slog.LevelWarn, "http", "deny", "policy_denied", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), auditOutcome{})
 			s.writeError(w, http.StatusForbidden, "request denied by policy", "policy")
 			return
 		}
@@ -112,15 +124,19 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if IsDestinationBlocked(err) {
 			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "destination_blocked")
-			s.logRequestDecision(slog.LevelWarn, "http", "deny", "destination_blocked", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r))
+			s.logRequestDecision(slog.LevelWarn, "http", "deny", "destination_blocked", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), audit)
 			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
 			return
 		}
 		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
 		return
 	}
-	s.recordRequestDecision("http", "allow", decisionPolicyName(decision), "policy_allowed")
-	s.logRequestDecision(slog.LevelInfo, "http", "allow", "policy_allowed", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r))
+	reason := "policy_allowed"
+	if audit.Enabled {
+		reason = auditActualReason(audit)
+	}
+	s.recordRequestDecision("http", "allow", decisionPolicyName(decision), reason)
+	s.logRequestDecision(auditLogLevel(audit), "http", "allow", reason, reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), audit)
 
 	outReq := r.Clone(r.Context())
 	outReq.RequestURI = ""
@@ -164,19 +180,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	reqIdentity := identity.Unknown()
 	var decision *policy.Decision
+	audit := auditOutcome{}
 	if s.deps.PolicyEngine != nil {
 		reqIdentity = s.resolveRequestIdentity(r)
 		decision = s.evaluatePolicy("connect", func() *policy.Decision {
 			return s.deps.PolicyEngine.EvaluateConnect(reqIdentity, host, port)
 		})
-		if decision == nil || !decision.Allowed {
+		audit = s.recordAuditPolicyDecision("connect", reqIdentity, host, decision)
+		if !s.auditMode() && (decision == nil || !decision.Allowed) {
 			s.recordConnectResult(connectDecisionMode(decision), "policy_denied")
 			s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "policy_denied")
-			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "policy_denied", reqIdentity, host, port, decision, http.MethodConnect, "")
+			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "policy_denied", reqIdentity, host, port, decision, http.MethodConnect, "", auditOutcome{})
 			s.writeError(w, http.StatusForbidden, "connect target denied by policy", "policy")
 			return
 		}
-		if decision.TLSMode == "mitm" && s.deps.MITM == nil {
+		if !s.auditMode() && decision.TLSMode == "mitm" && s.deps.MITM == nil {
 			s.recordConnectResult("mitm", "configuration_error")
 			s.writeError(w, http.StatusInternalServerError, "connect tls mitm requires proxy.ca cert and key configuration", "tls")
 			return
@@ -184,13 +202,20 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mode := connectResolvedMode(decision)
+	if s.auditMode() {
+		mode = "passthrough"
+		if decision != nil && decision.TLSMode == "mitm" {
+			audit.MITMInspectionSkipped = true
+			audit.EffectiveTLSMode = "passthrough"
+		}
+	}
 
 	targetAddr, err := s.resolveAddr(r.Context(), host, port)
 	if err != nil {
 		if IsDestinationBlocked(err) {
 			s.recordConnectResult(mode, "destination_blocked")
 			s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "destination_blocked")
-			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "destination_blocked", reqIdentity, host, port, decision, http.MethodConnect, "")
+			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "destination_blocked", reqIdentity, host, port, decision, http.MethodConnect, "", audit)
 			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
 			return
 		}
@@ -230,6 +255,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	releaseTunnel := s.trackConnectTunnel(mode, clientConn, upstreamConn)
 	defer releaseTunnel()
 
+	if s.auditMode() {
+		s.recordConnectResult(mode, "established")
+		reason := auditActualReason(audit)
+		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), reason)
+		s.logRequestDecision(auditLogLevel(audit), "connect", "allow", reason, reqIdentity, host, port, decision, http.MethodConnect, "", audit)
+		s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
+		return
+	}
+
 	if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		s.deps.Logger.Debug("set connect client read deadline failed", "error", err)
 	}
@@ -254,21 +288,25 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	if decision != nil && decision.TLSMode == "mitm" {
 		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), "policy_allowed")
-		s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "")
+		s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "", audit)
 		s.handleConnectMITM(clientConn, buf.Reader, clientHello, upstreamConn, reqIdentity, sni, port)
 		return
 	}
 
 	if _, err := upstreamConn.Write(clientHello); err != nil {
-		s.recordConnectResult("passthrough", "upstream_error")
+		s.recordConnectResult(mode, "tls_blocked")
 		clientConn.Close()
 		upstreamConn.Close()
 		return
 	}
 
-	s.recordConnectResult("passthrough", "established")
-	s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), "policy_allowed")
-	s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "")
+	s.recordConnectResult(mode, "established")
+	reason := "policy_allowed"
+	if audit.Enabled {
+		reason = auditActualReason(audit)
+	}
+	s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), reason)
+	s.logRequestDecision(auditLogLevel(audit), "connect", "allow", reason, reqIdentity, host, port, decision, http.MethodConnect, "", audit)
 	s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
 }
 
@@ -313,16 +351,21 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 			decision := s.evaluatePolicy("mitm_http", func() *policy.Decision {
 				return s.deps.PolicyEngine.Evaluate(reqIdentity, serverName, port, req.Method, requestPolicyPath(req))
 			})
-			if decision == nil || !decision.Allowed {
+			audit := s.recordAuditPolicyDecision("mitm_http", reqIdentity, serverName, decision)
+			if !s.auditMode() && (decision == nil || !decision.Allowed) {
 				s.recordPolicyError()
 				s.recordRequestDecision("mitm_http", "deny", decisionPolicyName(decision), "policy_denied")
-				s.logRequestDecision(slog.LevelWarn, "mitm_http", "deny", "policy_denied", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req))
+				s.logRequestDecision(slog.LevelWarn, "mitm_http", "deny", "policy_denied", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), auditOutcome{})
 				s.deps.Logger.Warn("connect mitm request denied by policy", "server_name", serverName, "method", req.Method, "path", requestPolicyPath(req))
 				_ = writeMITMErrorResponse(clientTLSConn, http.StatusForbidden, "request denied by policy")
 				return
 			}
-			s.recordRequestDecision("mitm_http", "allow", decisionPolicyName(decision), "policy_allowed")
-			s.logRequestDecision(slog.LevelInfo, "mitm_http", "allow", "policy_allowed", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req))
+			reason := "policy_allowed"
+			if audit.Enabled {
+				reason = auditActualReason(audit)
+			}
+			s.recordRequestDecision("mitm_http", "allow", decisionPolicyName(decision), reason)
+			s.logRequestDecision(auditLogLevel(audit), "mitm_http", "allow", reason, reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), audit)
 		}
 
 		req.RequestURI = ""
@@ -470,6 +513,20 @@ func (s *Server) recordRequestDecision(protocol string, action string, policyNam
 		return
 	}
 	s.deps.Metrics.RequestDecisionsTotal.WithLabelValues(protocol, action, normalizePolicyName(policyName), reason).Inc()
+}
+
+func (s *Server) recordAuditDecision(protocol string, action string, reqIdentity *identity.Identity, fqdn string, policyName string, reason string) {
+	if s.deps.Metrics == nil {
+		return
+	}
+	s.deps.Metrics.AuditDecisionsTotal.WithLabelValues(
+		protocol,
+		action,
+		normalizeIdentityName(reqIdentity),
+		strings.ToLower(fqdn),
+		normalizePolicyName(policyName),
+		reason,
+	).Inc()
 }
 
 func (s *Server) evaluatePolicy(protocol string, fn func() *policy.Decision) *policy.Decision {
@@ -671,7 +728,7 @@ func connectResolvedMode(decision *policy.Decision) string {
 	return decision.TLSMode
 }
 
-func (s *Server) logRequestDecision(level slog.Level, protocol string, action string, reason string, reqIdentity *identity.Identity, host string, port int, decision *policy.Decision, method string, path string) {
+func (s *Server) logRequestDecision(level slog.Level, protocol string, action string, reason string, reqIdentity *identity.Identity, host string, port int, decision *policy.Decision, method string, path string, audit auditOutcome) {
 	fields := []any{
 		"protocol", protocol,
 		"action", action,
@@ -688,6 +745,20 @@ func (s *Server) logRequestDecision(level slog.Level, protocol string, action st
 	}
 	if decision != nil && decision.TLSMode != "" {
 		fields = append(fields, "tls_mode", decision.TLSMode)
+	}
+	if audit.Enabled {
+		fields = append(fields,
+			"audit", true,
+			"would_action", audit.WouldAction,
+			"would_block", audit.WouldBlock,
+			"would_reason", audit.WouldReason,
+		)
+		if audit.EffectiveTLSMode != "" {
+			fields = append(fields, "effective_tls_mode", audit.EffectiveTLSMode)
+		}
+		if audit.MITMInspectionSkipped {
+			fields = append(fields, "mitm_inspection_skipped", true)
+		}
 	}
 	if reqIdentity != nil {
 		fields = append(fields,
@@ -711,4 +782,51 @@ func normalizePolicyName(name string) string {
 		return "none"
 	}
 	return name
+}
+
+func normalizeIdentityName(id *identity.Identity) string {
+	if id == nil || id.Name == "" {
+		return identity.Unknown().Name
+	}
+	return id.Name
+}
+
+func (s *Server) auditMode() bool {
+	return s.deps.AuditMode
+}
+
+func (s *Server) recordAuditPolicyDecision(protocol string, reqIdentity *identity.Identity, fqdn string, decision *policy.Decision) auditOutcome {
+	if !s.auditMode() {
+		return auditOutcome{}
+	}
+
+	outcome := auditOutcome{
+		Enabled:     true,
+		WouldAction: "would_allow",
+		WouldReason: "policy_allowed",
+	}
+	if decision == nil || !decision.Allowed {
+		outcome.WouldAction = "would_deny"
+		outcome.WouldBlock = true
+		outcome.WouldReason = "policy_denied"
+	}
+	s.recordAuditDecision(protocol, outcome.WouldAction, reqIdentity, fqdn, decisionPolicyName(decision), outcome.WouldReason)
+	return outcome
+}
+
+func auditActualReason(audit auditOutcome) string {
+	if !audit.Enabled {
+		return "policy_allowed"
+	}
+	if audit.WouldBlock {
+		return "audit_policy_denied"
+	}
+	return "audit_policy_allowed"
+}
+
+func auditLogLevel(audit auditOutcome) slog.Level {
+	if audit.Enabled && audit.WouldBlock {
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
 }

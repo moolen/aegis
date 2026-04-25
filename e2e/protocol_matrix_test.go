@@ -113,6 +113,71 @@ func TestCONNECTPassthroughDenied(t *testing.T) {
 	}
 }
 
+func TestCONNECTAuditModeAllowsDeniedTargets(t *testing.T) {
+	const (
+		allowedHost = "allowed.internal"
+		targetHost  = "audit-denied.internal"
+	)
+
+	tempDir := t.TempDir()
+	upstreamCA := newTestCA(t, tempDir, "upstream-audit-connect")
+	serverCert := issueServerCertificate(t, upstreamCA, targetHost)
+	upstream := startTLSServer(t, serverCert, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	dnsServer := startStaticDNSServer(t, map[string]net.IP{targetHost: net.ParseIP("127.0.0.1")})
+
+	proxyAddr := reserveTCPAddr(t)
+	metricsAddr := reserveTCPAddr(t)
+	configPath := filepath.Join(tempDir, "aegis.yaml")
+	writeConfig(t, configPath, proxyConfigYAML(proxyConfigSpec{
+		ProxyAddr:           proxyAddr,
+		MetricsAddr:         metricsAddr,
+		DNSServers:          []string{dnsServer},
+		AllowedHostPatterns: []string{"*.internal"},
+		Enforcement:         "audit",
+		PolicyName:          "allow-other",
+		PolicyFQDN:          allowedHost,
+		PolicyPort:          mustPort(t, upstream.Listener.Addr().String()),
+		TLSMode:             "passthrough",
+	}))
+
+	startAegis(t, configPath)
+
+	client := httpsProxyClient(proxyAddr, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    upstreamCA.RootPool,
+	})
+	resp, err := client.Get(fmt.Sprintf("https://%s:%d/allowed", targetHost, mustPort(t, upstream.Listener.Addr().String())))
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	metricsBody := fetchMetrics(t, "http://"+metricsAddr)
+	if got := metricValue(t, metricsBody, "aegis_request_decisions_total", map[string]string{
+		"protocol": "connect",
+		"action":   "allow",
+		"policy":   "allow-other",
+		"reason":   "audit_policy_denied",
+	}); got != 1 {
+		t.Fatalf("actual decision metric = %v, want 1", got)
+	}
+	if got := metricValue(t, metricsBody, "aegis_audit_decisions_total", map[string]string{
+		"protocol": "connect",
+		"action":   "would_deny",
+		"identity": "unknown",
+		"fqdn":     targetHost,
+		"policy":   "allow-other",
+		"reason":   "policy_denied",
+	}); got != 1 {
+		t.Fatalf("audit decision metric = %v, want 1", got)
+	}
+}
+
 func TestTLSNoSNIBlocked(t *testing.T) {
 	const host = "nosni.internal"
 
@@ -430,6 +495,7 @@ type proxyConfigSpec struct {
 	DNSServers          []string
 	AllowedHostPatterns []string
 	AllowedCIDRs        []string
+	Enforcement         string
 	ProxyCACertFile     string
 	ProxyCAKeyFile      string
 	PolicyName          string
@@ -443,6 +509,9 @@ type proxyConfigSpec struct {
 func proxyConfigYAML(spec proxyConfigSpec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "proxy:\n  listen: %q\n", spec.ProxyAddr)
+	if spec.Enforcement != "" {
+		fmt.Fprintf(&b, "  enforcement: %s\n", spec.Enforcement)
+	}
 	if spec.ProxyCACertFile != "" || spec.ProxyCAKeyFile != "" {
 		fmt.Fprintf(&b, "  ca:\n    certFile: %q\n    keyFile: %q\n", spec.ProxyCACertFile, spec.ProxyCAKeyFile)
 	}

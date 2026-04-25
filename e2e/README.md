@@ -13,6 +13,7 @@ reload-sensitive runtime behavior plus the core HTTPS protocol matrix that is
 awkward to prove in package-local tests:
 
 - `CONNECT` passthrough allow and deny behavior
+- audit-mode allow-on-deny behavior for HTTP and `CONNECT`
 - no-SNI and SNI-mismatch blocking
 - MITM certificate issuance and inner HTTP policy enforcement
 - client trust-store failure when the proxy CA is missing

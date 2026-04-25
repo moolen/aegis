@@ -26,6 +26,7 @@ resources: {}
 config:
   proxy:
     listen: ":3128"
+    # enforcement: audit
     # proxyProtocol:
     #   enabled: true
     #   headerTimeout: 2s
@@ -57,9 +58,13 @@ config:
             allowedPaths: ["/*"]
 
 # Bootstrap status: this chart now renders a runnable default policy config.
-# Plain HTTP requests are policy-enforced, Kubernetes and EC2 discovery can be
-# wired at runtime, and CONNECT supports both SNI-validated passthrough and
-# CA-backed TLS MITM when config.proxy.ca is set and a CA secret is mounted.
+# Plain HTTP requests are policy-enforced by default, Kubernetes and EC2
+# discovery can be wired at runtime, and CONNECT supports both SNI-validated
+# passthrough and CA-backed TLS MITM when config.proxy.ca is set and a CA
+# secret is mounted.
+# Set config.proxy.enforcement: audit to shadow policy decisions without
+# blocking traffic during migration. In audit mode, CONNECT stays transparent
+# passthrough, so inner HTTPS method/path rules are not actively inspected.
 # The default empty identitySelector.matchLabels is a safe starter policy that
 # matches any discovered identity; tighten it once you know the workload labels
 # you want to authorize.

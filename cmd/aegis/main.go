@@ -199,6 +199,7 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		Resolver:         resolver,
 		DestinationGuard: destinationGuard,
 		DrainTracker:     drainTracker,
+		AuditMode:        config.NormalizeEnforcementMode(cfg.Proxy.Enforcement) == config.EnforcementAudit,
 		IdentityResolver: identityResolver,
 		PolicyEngine:     engine,
 		MITM:             mitmEngine,
