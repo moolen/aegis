@@ -14,7 +14,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/moolen/aegis/internal/config"
 )
@@ -25,7 +24,7 @@ type StartableResolver interface {
 }
 
 type kubernetesRuntimeProviderDeps struct {
-	loadRESTConfig         func(string) (*rest.Config, error)
+	authDeps               kubernetesAuthDeps
 	newKubernetesPodSource func(*rest.Config) (KubernetesPodSource, error)
 	newKubernetesProvider  func(KubernetesProviderConfig, *slog.Logger) (StartableResolver, error)
 }
@@ -34,13 +33,6 @@ type ec2RuntimeProviderDeps struct {
 	loadAWSConfig  func(context.Context, string) (aws.Config, error)
 	newEC2Source   func(aws.Config) (EC2InstanceSource, error)
 	newEC2Provider func(EC2ProviderConfig, *slog.Logger) (StartableResolver, error)
-}
-
-var loadRESTConfig = func(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return rest.InClusterConfig()
 }
 
 var newKubernetesPodSource = func(restCfg *rest.Config) (KubernetesPodSource, error) {
@@ -70,7 +62,7 @@ var newEC2Provider = func(cfg EC2ProviderConfig, logger *slog.Logger) (Startable
 
 func defaultKubernetesRuntimeProviderDeps() kubernetesRuntimeProviderDeps {
 	return kubernetesRuntimeProviderDeps{
-		loadRESTConfig:         loadRESTConfig,
+		authDeps:               defaultKubernetesAuthDeps(),
 		newKubernetesPodSource: newKubernetesPodSource,
 		newKubernetesProvider:  newKubernetesProvider,
 	}
@@ -127,7 +119,7 @@ func NewEC2RuntimeProvider(cfg config.EC2DiscoveryConfig, logger *slog.Logger) (
 }
 
 func newKubernetesRuntimeProvider(cfg config.KubernetesDiscoveryConfig, logger *slog.Logger, deps kubernetesRuntimeProviderDeps) (RuntimeProvider, error) {
-	restCfg, err := deps.loadRESTConfig(cfg.Kubeconfig)
+	restCfg, err := buildKubernetesRESTConfig(context.Background(), cfg, deps.authDeps)
 	if err != nil {
 		return RuntimeProvider{}, fmt.Errorf("load kubernetes rest config for %s: %w", cfg.Name, err)
 	}
