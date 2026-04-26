@@ -49,15 +49,32 @@ The deployed-shape HTTP path is healthy at the tested VU levels:
 | HTTP | 10 | 8,717 | 1.010 | 1.377 | 10.431 | 0.00% |
 | HTTP | 25 | 11,799 | 1.954 | 2.837 | 21.748 | 0.00% |
 | CONNECT passthrough | 10 | 8,352 | 1.049 | 1.404 | 6.753 | 0.00% |
+| CONNECT passthrough | 50 | 39,026 | 1.034 | 1.953 | 82.463 | 0.00% |
+| CONNECT passthrough | 100 | 43,062 | 2.183 | 3.797 | 89.678 | 0.00% |
+| CONNECT passthrough | 200 | 51,356 | 4.195 | 7.230 | 90.127 | 0.00% |
 | CONNECT MITM | 10 | 11,102 | 0.744 | 1.074 | 9.267 | 0.00% |
 | CONNECT MITM | 25 | 14,958 | 1.395 | 2.372 | 384.886 | 0.00% |
+| CONNECT MITM | 50 | 17,464 | 2.708 | 4.834 | 79.419 | 0.00% |
+| CONNECT MITM | 100 | 19,552 | 3.597 | 9.180 | 86.893 | 0.00% |
+| CONNECT MITM | 150 | 22,209 | 4.915 | 12.888 | 89.911 | 0.00% |
+| CONNECT MITM | 200 | 22,779 | 8.413 | 17.141 | 96.562 | 0.00% |
 
 ### Kind Tunnel Status
 
-All three deployed-shape traffic modes are now benchmarkable. The key fix was
-removing `kubectl port-forward` from the proxy data path and switching the Kind
-perf harness to fixed `NodePort` mappings, which avoids the websocket-forwarder
-becoming the bottleneck under concurrent `CONNECT` load.
+All three deployed-shape traffic modes are now benchmarkable. The key fixes
+were:
+
+- removing `kubectl port-forward` from the proxy data path and switching the
+  Kind perf harness to fixed `NodePort` mappings
+- reusing pooled upstream transports for HTTP and MITM
+- lowering normal allow-decision logs to `DEBUG`
+- bounding per-host upstream connections on the pooled transport
+
+With those changes, the deployed MITM path stays healthy through `200 VUs` on
+this single-node Kind shape. The next knee is between `200` and `300 VUs`:
+`300 VUs` still collapses with `dial tcp ... connect: cannot assign requested
+address`, which indicates the next limiter is upstream socket pressure rather
+than policy evaluation.
 
 ## Practical First-Pass Guidance
 
@@ -68,11 +85,12 @@ becoming the bottleneck under concurrent `CONNECT` load.
 - For the current Kind single-node deployment shape, plain HTTP is healthy at
   least through `~11.8k req/s` at `25 VUs`.
 - For the current Kind single-node deployment shape, `CONNECT` passthrough is
-  healthy at least through `~8.35k req/s` at `10 VUs`.
+  healthy through `~51.4k req/s` at `200 VUs`.
 - For the current Kind single-node deployment shape, `CONNECT` MITM is healthy
-  at least through `~15.0k req/s` at `25 VUs`.
-- The next useful benchmark step is extending the same deployed-shape matrix to
-  higher VU counts now that the MITM path is no longer blocked by the harness.
+  through `~22.8k req/s` at `200 VUs`.
+- On this environment, `200 VUs` is a reasonable first capacity target for Kind
+  MITM. `300 VUs` is beyond the safe operating point without further upstream
+  socket tuning.
 
 ## Artifacts
 
@@ -95,6 +113,12 @@ Representative result directories:
   - `perf/results/20260426T092759Z-http-kind`
 - Kind CONNECT passthrough healthy baseline:
   - `perf/results/20260426T093930Z-connect-passthrough-kind`
+  - `perf/results/20260426T093452Z-connect-passthrough-kind`
+  - `perf/results/20260426T094308Z-connect-passthrough-kind`
 - Kind CONNECT MITM healthy baselines:
   - `perf/results/20260426T105942Z-connect-mitm-kind`
   - `perf/results/20260426T110230Z-connect-mitm-kind`
+  - `perf/results/20260426T124259Z-connect-mitm-kind`
+  - `perf/results/20260426T125207Z-connect-mitm-kind`
+  - `perf/results/20260426T125636Z-connect-mitm-kind`
+  - `perf/results/20260426T130238Z-connect-mitm-kind`

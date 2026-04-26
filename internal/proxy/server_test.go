@@ -191,6 +191,37 @@ func TestProxyAllowsHTTPRequestsWhenPolicyMatches(t *testing.T) {
 	}
 }
 
+func TestAuditLogLevelUsesDebugForNormalAllow(t *testing.T) {
+	if got := auditLogLevel(auditOutcome{}); got != slog.LevelDebug {
+		t.Fatalf("auditLogLevel(normal allow) = %v, want %v", got, slog.LevelDebug)
+	}
+}
+
+func TestAuditLogLevelUsesInfoForAuditAllow(t *testing.T) {
+	if got := auditLogLevel(auditOutcome{Enabled: true, WouldBlock: false}); got != slog.LevelInfo {
+		t.Fatalf("auditLogLevel(audit allow) = %v, want %v", got, slog.LevelInfo)
+	}
+}
+
+func TestAuditLogLevelUsesWarnForAuditBlock(t *testing.T) {
+	if got := auditLogLevel(auditOutcome{Enabled: true, WouldBlock: true}); got != slog.LevelWarn {
+		t.Fatalf("auditLogLevel(audit block) = %v, want %v", got, slog.LevelWarn)
+	}
+}
+
+func TestNewUpstreamHTTPTransportSetsConnectionBounds(t *testing.T) {
+	transport := NewUpstreamHTTPTransport()
+	if transport.MaxIdleConns != 1024 {
+		t.Fatalf("MaxIdleConns = %d, want 1024", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 256 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 256", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 128 {
+		t.Fatalf("MaxConnsPerHost = %d, want 128", transport.MaxConnsPerHost)
+	}
+}
+
 func TestProxyReusesUpstreamHTTPConnectionAcrossRequests(t *testing.T) {
 	var upstreamConnections atomic.Int32
 

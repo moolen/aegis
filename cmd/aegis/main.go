@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
@@ -234,6 +236,10 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 	if err != nil {
 		return proxy.Dependencies{}, fmt.Errorf("build identity resolver: %w", err)
 	}
+	upstreamTLSConfig, err := buildUpstreamTLSConfig()
+	if err != nil {
+		return proxy.Dependencies{}, fmt.Errorf("build upstream tls config: %w", err)
+	}
 
 	return proxy.Dependencies{
 		Resolver:              resolver,
@@ -248,8 +254,36 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		IdentityResolver:      identityResolver,
 		PolicyEngine:          engine,
 		MITM:                  mitmEngine,
+		UpstreamTLSConfig:     upstreamTLSConfig,
 		Metrics:               m,
 		Logger:                logger,
+	}, nil
+}
+
+func buildUpstreamTLSConfig() (*tls.Config, error) {
+	certFile := os.Getenv("SSL_CERT_FILE")
+	if certFile == "" {
+		return nil, nil
+	}
+
+	pemData, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, fmt.Errorf("read SSL_CERT_FILE %q: %w", certFile, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("load system cert pool: %w", err)
+	}
+	if pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if ok := pool.AppendCertsFromPEM(pemData); !ok {
+		return nil, fmt.Errorf("append certificates from SSL_CERT_FILE %q: no certificates found", certFile)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
 	}, nil
 }
 

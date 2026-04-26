@@ -148,6 +148,39 @@ func TestBuildIdentityResolverKeepsHealthyProvidersAfterStartupFailure(t *testin
 	}
 }
 
+func TestBuildUpstreamTLSConfigLoadsSSLCertFile(t *testing.T) {
+	caPEM, _ := generateTestCA(t)
+
+	tmpDir := t.TempDir()
+	certFile := filepath.Join(tmpDir, "roots.pem")
+	if err := os.WriteFile(certFile, caPEM, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	previous := os.Getenv("SSL_CERT_FILE")
+	if err := os.Setenv("SSL_CERT_FILE", certFile); err != nil {
+		t.Fatalf("Setenv() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if previous == "" {
+			_ = os.Unsetenv("SSL_CERT_FILE")
+			return
+		}
+		_ = os.Setenv("SSL_CERT_FILE", previous)
+	})
+
+	cfg, err := buildUpstreamTLSConfig()
+	if err != nil {
+		t.Fatalf("buildUpstreamTLSConfig() error = %v", err)
+	}
+	if cfg == nil || cfg.RootCAs == nil {
+		t.Fatal("expected upstream TLS config with root CAs")
+	}
+	if got := len(cfg.RootCAs.Subjects()); got == 0 {
+		t.Fatal("expected SSL_CERT_FILE roots to be loaded")
+	}
+}
+
 func TestBuildIdentityResolverKeepsHealthyProvidersAfterStartupTimeout(t *testing.T) {
 	restoreProvider := newKubernetesRuntimeProvider
 	restoreTimeout := discoveryProviderStartupTimeout
@@ -1767,4 +1800,38 @@ func hasLabels(metric *dto.Metric, want map[string]string) bool {
 	}
 
 	return true
+}
+
+func generateTestCA(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "test-ca",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate() error = %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyBytes, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("MarshalECPrivateKey() error = %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	return certPEM, keyPEM
 }

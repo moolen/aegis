@@ -10,6 +10,8 @@ spec:
       app.kubernetes.io/name: aegis
   template:
     metadata:
+      annotations:
+        checksum/config: {{ toYaml .Values.config | sha256sum }}
       labels:
         app.kubernetes.io/name: aegis
     spec:

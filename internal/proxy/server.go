@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"net/textproto"
 	"strconv"
 	"strings"
@@ -79,7 +81,16 @@ func NewServer(deps Dependencies) *Server {
 	if deps.UpstreamHTTPTransport == nil {
 		deps.UpstreamHTTPTransport = NewUpstreamHTTPTransport()
 	}
-	return &Server{deps: deps}
+	server := &Server{deps: deps}
+	server.deps.UpstreamHTTPTransport.Proxy = nil
+	server.deps.UpstreamHTTPTransport.DialContext = server.dialUpstreamContext
+	if server.deps.UpstreamTLSConfig != nil {
+		server.deps.UpstreamHTTPTransport.TLSClientConfig = server.deps.UpstreamTLSConfig.Clone()
+		if server.deps.UpstreamHTTPTransport.TLSClientConfig.MinVersion == 0 {
+			server.deps.UpstreamHTTPTransport.TLSClientConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	return server
 }
 
 func NewUpstreamHTTPTransport() *http.Transport {
@@ -87,7 +98,7 @@ func NewUpstreamHTTPTransport() *http.Transport {
 	transport.Proxy = nil
 	transport.MaxIdleConns = 1024
 	transport.MaxIdleConnsPerHost = 256
-	transport.MaxConnsPerHost = 0
+	transport.MaxConnsPerHost = 128
 	transport.IdleConnTimeout = 90 * time.Second
 	return transport
 }
@@ -190,6 +201,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	outReq.RequestURI = ""
 	outReq.Host = r.Host
 	outReq.URL.Host = targetAddr
+	outReq.Close = false
 	removeHopByHopHeaders(outReq.Header)
 
 	resp, err := s.deps.UpstreamHTTPTransport.RoundTrip(outReq)
@@ -290,18 +302,23 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamConn, err := (&net.Dialer{}).DialContext(r.Context(), "tcp", targetAddr)
-	if err != nil {
-		s.recordConnectResult(mode, "upstream_dial_error")
-		s.deps.Logger.Warn("connect upstream dial failed", "host", host, "port", port, "target_addr", targetAddr, "error", err)
-		s.writeError(w, http.StatusBadGateway, "upstream connection failed", "dial")
-		return
+	var upstreamConn net.Conn
+	if decision == nil || decision.TLSMode != "mitm" || s.shadowMode(decision) {
+		upstreamConn, err = (&net.Dialer{}).DialContext(r.Context(), "tcp", targetAddr)
+		if err != nil {
+			s.recordConnectResult(mode, "upstream_dial_error")
+			s.deps.Logger.Warn("connect upstream dial failed", "host", host, "port", port, "target_addr", targetAddr, "error", err)
+			s.writeError(w, http.StatusBadGateway, "upstream connection failed", "dial")
+			return
+		}
 	}
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		s.recordConnectResult(mode, "server_error")
-		upstreamConn.Close()
+		if upstreamConn != nil {
+			upstreamConn.Close()
+		}
 		s.deps.Logger.Error("connect response writer does not support hijacking")
 		s.writeError(w, http.StatusInternalServerError, "internal proxy error", "server")
 		return
@@ -310,7 +327,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	clientConn, buf, err := hijacker.Hijack()
 	if err != nil {
 		s.recordConnectResult(mode, "server_error")
-		upstreamConn.Close()
+		if upstreamConn != nil {
+			upstreamConn.Close()
+		}
 		s.deps.Logger.Error("connect hijack failed", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "internal proxy error", "server")
 		return
@@ -318,7 +337,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		clientConn.Close()
-		upstreamConn.Close()
+		if upstreamConn != nil {
+			upstreamConn.Close()
+		}
 		return
 	}
 	releaseTunnel := s.trackConnectTunnel(mode, clientConn, upstreamConn)
@@ -343,7 +364,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		s.recordTLSConnectBlock(err)
 		s.deps.Logger.Warn("connect tls inspection failed", "target", host, "error", err)
 		clientConn.Close()
-		upstreamConn.Close()
+		if upstreamConn != nil {
+			upstreamConn.Close()
+		}
 		return
 	}
 	if !strings.EqualFold(sni, host) {
@@ -351,14 +374,16 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		s.recordTLSConnectBlock(nil)
 		s.deps.Logger.Warn("connect tls sni mismatch", "target", host, "sni", sni)
 		clientConn.Close()
-		upstreamConn.Close()
+		if upstreamConn != nil {
+			upstreamConn.Close()
+		}
 		return
 	}
 
 	if decision != nil && decision.TLSMode == "mitm" {
 		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), "policy_allowed")
-		s.logRequestDecision(slog.LevelInfo, "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "", audit)
-		s.handleConnectMITM(clientConn, buf.Reader, clientHello, upstreamConn, reqIdentity, sourceIP, sni, port)
+		s.logRequestDecision(auditLogLevel(audit), "connect", "allow", "policy_allowed", reqIdentity, host, port, decision, http.MethodConnect, "", audit)
+		s.handleConnectMITM(clientConn, buf.Reader, clientHello, reqIdentity, sourceIP, sni, port)
 		return
 	}
 
@@ -379,33 +404,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.spliceConnectTunnel(s.wrapIdleConn(clientConn), s.wrapIdleConn(upstreamConn), s.wrapIdleReader(clientConn, buf.Reader))
 }
 
-func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, upstreamConn net.Conn, reqIdentity *identity.Identity, sourceIP netip.Addr, serverName string, port int) {
+func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, reqIdentity *identity.Identity, sourceIP netip.Addr, serverName string, port int) {
 	clientTLSConn, err := s.handshakeClientMITM(clientConn, clientReader, clientHello, serverName)
 	if err != nil {
 		s.recordConnectResult("mitm", "client_tls_error")
 		s.recordTLSError()
 		s.deps.Logger.Warn("connect mitm client handshake failed", "server_name", serverName, "error", err)
 		clientConn.Close()
-		upstreamConn.Close()
 		return
 	}
 	defer clientTLSConn.Close()
 
-	upstreamTLSConn, err := s.handshakeUpstreamTLS(upstreamConn, serverName)
-	if err != nil {
-		s.recordConnectResult("mitm", "upstream_tls_error")
-		s.recordTLSError()
-		s.deps.Logger.Warn("connect mitm upstream handshake failed", "server_name", serverName, "error", err)
-		return
-	}
-	defer upstreamTLSConn.Close()
-
 	s.recordConnectResult("mitm", "established")
 
 	clientConn = s.wrapIdleConn(clientTLSConn)
-	upstreamConn = s.wrapIdleConn(upstreamTLSConn)
 	clientReaderTLS := bufio.NewReader(clientConn)
-	upstreamReaderTLS := bufio.NewReader(upstreamConn)
 
 	for {
 		req, err := http.ReadRequest(clientReaderTLS)
@@ -439,19 +452,13 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 			s.logRequestDecision(auditLogLevel(audit), "mitm_http", "allow", reason, reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), audit)
 		}
 
-		req.RequestURI = ""
-		removeHopByHopHeaders(req.Header)
-		if err := req.Write(upstreamTLSConn); err != nil {
-			s.recordTLSError()
-			s.deps.Logger.Warn("connect mitm write upstream request failed", "server_name", serverName, "error", err)
-			_ = writeMITMErrorResponse(clientTLSConn, http.StatusBadGateway, "upstream request failed")
-			return
-		}
-
-		resp, err := http.ReadResponse(upstreamReaderTLS, req)
+		resp, err := s.roundTripMITMRequest(req, serverName, port)
 		if err != nil {
 			s.recordTLSError()
-			s.deps.Logger.Warn("connect mitm read upstream response failed", "server_name", serverName, "error", err)
+			if isUpstreamTLSHandshakeError(err) {
+				s.recordUpstreamTLSError("handshake")
+			}
+			s.deps.Logger.Warn("connect mitm upstream round trip failed", "server_name", serverName, "error", err)
 			_ = writeMITMErrorResponse(clientConn, http.StatusBadGateway, "upstream response failed")
 			return
 		}
@@ -468,6 +475,21 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 		}
 		resp.Body.Close()
 	}
+}
+
+func (s *Server) roundTripMITMRequest(req *http.Request, serverName string, port int) (*http.Response, error) {
+	outReq := req.Clone(req.Context())
+	outReq.RequestURI = ""
+	outReq.Close = false
+	outReq.URL = cloneRequestURL(req.URL)
+	outReq.URL.Scheme = "https"
+	outReq.URL.Host = net.JoinHostPort(serverName, strconv.Itoa(port))
+	if outReq.Host == "" {
+		outReq.Host = serverName
+	}
+	removeHopByHopHeaders(outReq.Header)
+
+	return s.deps.UpstreamHTTPTransport.RoundTrip(outReq)
 }
 
 func (s *Server) handshakeClientMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, serverName string) (*tls.Conn, error) {
@@ -513,6 +535,25 @@ func (s *Server) handshakeUpstreamTLS(upstreamConn net.Conn, serverName string) 
 	}
 
 	return tlsConn, nil
+}
+
+func (s *Server) dialUpstreamContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, portValue, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		return nil, err
+	}
+	targetAddr, err := s.resolveAddr(ctx, host, port)
+	if err != nil {
+		return nil, err
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, targetAddr)
 }
 
 func (s *Server) spliceConnectTunnel(clientConn net.Conn, upstreamConn net.Conn, clientReader io.Reader) {
@@ -788,6 +829,44 @@ func splitTarget(hostport string, scheme string) (string, int, error) {
 	default:
 		return "", 0, fmt.Errorf("unsupported scheme %q", scheme)
 	}
+}
+
+func cloneRequestURL(in *url.URL) *url.URL {
+	if in == nil {
+		return &url.URL{}
+	}
+	cloned := *in
+	return &cloned
+}
+
+func isUpstreamTLSHandshakeError(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+
+	var (
+		certVerificationErr *tls.CertificateVerificationError
+		certInvalidErr      x509.CertificateInvalidError
+		unknownAuthorityErr x509.UnknownAuthorityError
+		hostnameErr         x509.HostnameError
+		recordHeaderErr     tls.RecordHeaderError
+	)
+	switch {
+	case errors.As(err, &certVerificationErr):
+		return true
+	case errors.As(err, &certInvalidErr):
+		return true
+	case errors.As(err, &unknownAuthorityErr):
+		return true
+	case errors.As(err, &hostnameErr):
+		return true
+	case errors.As(err, &recordHeaderErr):
+		return true
+	}
+
+	message := err.Error()
+	return strings.Contains(message, "tls:") || strings.Contains(message, "x509:")
 }
 
 func copyHeader(dst, src http.Header) {
@@ -1073,5 +1152,8 @@ func auditLogLevel(audit auditOutcome) slog.Level {
 	if audit.Enabled && audit.WouldBlock {
 		return slog.LevelWarn
 	}
-	return slog.LevelInfo
+	if audit.Enabled {
+		return slog.LevelInfo
+	}
+	return slog.LevelDebug
 }

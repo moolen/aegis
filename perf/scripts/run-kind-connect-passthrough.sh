@@ -191,6 +191,7 @@ spec:
     - port: 443
       targetPort: 8443
 EOF
+  kctl -n "$NAMESPACE" rollout restart deployment/echo-tls >/dev/null
   kctl -n "$NAMESPACE" rollout status deployment/echo-tls --timeout=180s
 }
 
