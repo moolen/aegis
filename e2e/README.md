@@ -19,17 +19,25 @@ awkward to prove in package-local tests:
 - client trust-store failure when the proxy CA is missing
 - upstream TLS validation failure on the MITM path
 
-The deployment-facing Kind/Helm smoke tests run with:
+The deployment-facing Kind/Helm matrix runs with:
 
 ```bash
-go test -tags kind_e2e -timeout 30m ./e2e/...
+go test -tags kind_e2e -timeout 45m ./e2e/...
 ```
 
-That suite creates a Kind cluster, loads a locally built Aegis image, installs
-the shipped Helm chart, and verifies both live proxy traffic through the
-in-cluster service and Kubernetes-discovery-driven identity enforcement with
-real pod labels. It requires Docker, `kind`, `kubectl`, and `helm`.
+That suite uses one shared Kind cluster and one shared locally built Aegis
+image for the whole `go test` process, then runs deployment-shaped scenarios in
+isolated namespaces and Helm releases. The current matrix is focused on the
+shipped Helm deployment path rather than a single catch-all smoke test:
 
-The broader cluster-aware suite described in `aegis-design-doc.md` can grow on
-top of this base, but the core Helm deployment path is no longer just
-scaffolding.
+- shared-cluster/run-name isolation helpers
+- Helm deployment plus in-cluster HTTP allow/deny checks
+- CIDR-based policy enforcement
+- Kubernetes-discovery identity enforcement with real pod labels
+- readiness, health, metrics, and admin simulation checks along the deployed path
+
+It requires Docker, `kind`, `kubectl`, and `helm`.
+
+CI now runs the subprocess `e2e` suite in the fast `ci` job and the heavier
+`kind_e2e` deployment matrix in a dedicated `kind-e2e` job on every push and
+pull request.

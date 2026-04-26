@@ -236,6 +236,10 @@ func (m *runtimeManager) SetEnforcementMode(mode string) (appmetrics.Enforcement
 	return status, nil
 }
 
+func (m *runtimeManager) Reload() error {
+	return m.ReloadFromFile()
+}
+
 func (m *runtimeManager) DumpIdentities() []appmetrics.IdentityDumpRecord {
 	m.mu.RLock()
 	resolver := m.current.identityResolver

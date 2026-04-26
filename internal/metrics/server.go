@@ -26,6 +26,7 @@ type AdminAPI interface {
 	EnforcementStatus() EnforcementStatus
 	RuntimeStatus() RuntimeStatus
 	SetEnforcementMode(mode string) (EnforcementStatus, error)
+	Reload() error
 	DumpIdentities() []IdentityDumpRecord
 	Simulate(SimulationRequest) (SimulationResponse, error)
 }
@@ -171,6 +172,21 @@ func NewAdminServer(addr string, adminAPI AdminAPI) *Server {
 			return
 		}
 		writeJSON(w, adminAPI.RuntimeStatus())
+	})
+	mux.HandleFunc("/admin/reload", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeAdminEndpoint(w, r, adminAPI) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := adminAPI.Reload(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/admin/simulate", func(w http.ResponseWriter, r *http.Request) {
 		if !authorizeAdminEndpoint(w, r, adminAPI) {

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/moolen/aegis/internal/config"
 )
 
 func TestDeploymentChangesConfigChecksumWhenConfigChanges(t *testing.T) {
@@ -67,6 +69,74 @@ func TestDeploymentChangesConfigChecksumWhenConfigChanges(t *testing.T) {
 	}
 }
 
+func TestRenderedConfigRejectsNonLocalhostAdminListen(t *testing.T) {
+	t.Parallel()
+
+	rendered := helmTemplateString(t, `config:
+  proxy:
+    listen: ":3128"
+  admin:
+    enabled: true
+    listen: "0.0.0.0:9091"
+    token: "secret"
+  metrics:
+    listen: ":9090"
+  dns:
+    cache_ttl: 30s
+    timeout: 5s
+    servers: []
+    rebindingProtection:
+      allowedHostPatterns: []
+      allowedCIDRs: []
+  discovery:
+    kubernetes: []
+    ec2: []
+  policies: []
+`)
+
+	_, err := config.Load(strings.NewReader(renderedConfigYAML(t, rendered)))
+	if err == nil || !strings.Contains(err.Error(), "admin.listen must be localhost-only") {
+		t.Fatalf("config.Load() error = %v, want localhost-only admin listen validation", err)
+	}
+}
+
+func TestRenderedConfigRejectsProxyMetricsListenerCollision(t *testing.T) {
+	t.Parallel()
+
+	rendered := helmTemplateString(t, `config:
+  proxy:
+    listen: ":3128"
+  metrics:
+    listen: ":3128"
+  dns:
+    cache_ttl: 30s
+    timeout: 5s
+    servers: []
+    rebindingProtection:
+      allowedHostPatterns: []
+      allowedCIDRs: []
+  discovery:
+    kubernetes: []
+    ec2: []
+  policies: []
+`)
+
+	_, err := config.Load(strings.NewReader(renderedConfigYAML(t, rendered)))
+	if err == nil || !strings.Contains(err.Error(), "metrics.listen must differ from proxy.listen") {
+		t.Fatalf("config.Load() error = %v, want proxy/metrics listener collision validation", err)
+	}
+}
+
+func helmTemplateString(t *testing.T, values string) string {
+	t.Helper()
+
+	valuesFile := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(valuesFile, []byte(values), 0o644); err != nil {
+		t.Fatalf("write values file: %v", err)
+	}
+	return helmTemplate(t, valuesFile)
+}
+
 func helmTemplate(t *testing.T, valuesFile string) string {
 	t.Helper()
 
@@ -89,6 +159,37 @@ func deploymentConfigChecksum(t *testing.T, rendered string) string {
 		return ""
 	}
 	return strings.TrimSpace(match[1])
+}
+
+func renderedConfigYAML(t *testing.T, rendered string) string {
+	t.Helper()
+
+	configMapDoc := yamlDocument(rendered, "ConfigMap", "aegis-config")
+	if configMapDoc == "" {
+		t.Fatal("expected aegis-config ConfigMap in rendered chart")
+	}
+
+	lines := strings.Split(configMapDoc, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "aegis.yaml: |" {
+			continue
+		}
+
+		var block []string
+		for _, blockLine := range lines[i+1:] {
+			if !strings.HasPrefix(blockLine, "    ") {
+				break
+			}
+			block = append(block, strings.TrimPrefix(blockLine, "    "))
+		}
+		if len(block) == 0 {
+			t.Fatal("rendered aegis.yaml block was empty")
+		}
+		return strings.Join(block, "\n") + "\n"
+	}
+
+	t.Fatal("expected aegis.yaml block in rendered ConfigMap")
+	return ""
 }
 
 func yamlDocument(rendered, kind, name string) string {

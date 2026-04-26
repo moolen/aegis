@@ -245,6 +245,32 @@ func TestAdminServerUpdatesAdminEnforcementMode(t *testing.T) {
 	}
 }
 
+func TestAdminServerTriggersReload(t *testing.T) {
+	admin := &enforcementAdminStub{token: "secret"}
+	srv := NewAdminServer("127.0.0.1:0", admin)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/reload", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if admin.reloadCalls != 1 {
+		t.Fatalf("reloadCalls = %d, want %d", admin.reloadCalls, 1)
+	}
+}
+
 func TestAdminServerReturnsIdentityDump(t *testing.T) {
 	admin := &enforcementAdminStub{
 		token: "secret",
@@ -353,6 +379,7 @@ type enforcementAdminStub struct {
 	status         EnforcementStatus
 	runtime        RuntimeStatus
 	lastMode       string
+	reloadCalls    int
 	identities     []IdentityDumpRecord
 	simulation     SimulationResponse
 	lastSimulation SimulationRequest
@@ -380,6 +407,11 @@ func (s *enforcementAdminStub) SetEnforcementMode(mode string) (EnforcementStatu
 		s.status.Effective = mode
 	}
 	return s.status, nil
+}
+
+func (s *enforcementAdminStub) Reload() error {
+	s.reloadCalls++
+	return nil
 }
 
 func (s *enforcementAdminStub) DumpIdentities() []IdentityDumpRecord {
