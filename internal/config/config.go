@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -13,9 +14,11 @@ import (
 
 const (
 	defaultMetricsListen = ":9090"
+	defaultAdminListen   = "127.0.0.1:9091"
 	defaultDNSCacheTTL   = 30 * time.Second
 	defaultDNSTimeout    = 5 * time.Second
 	defaultGracePeriod   = 10 * time.Second
+	defaultProxyIdleTTL  = 2 * time.Minute
 	EnforcementEnforce   = "enforce"
 	EnforcementAudit     = "audit"
 	UnknownIdentityAllow = "allow"
@@ -36,6 +39,7 @@ type ProxyConfig struct {
 	Enforcement           string                 `yaml:"enforcement"`
 	UnknownIdentityPolicy string                 `yaml:"unknownIdentityPolicy"`
 	Listen                string                 `yaml:"listen"`
+	IdleTimeout           time.Duration          `yaml:"idleTimeout"`
 	CA                    CAConfig               `yaml:"ca"`
 	ProxyProtocol         ProxyProtocolConfig    `yaml:"proxyProtocol"`
 	ConnectionLimits      ConnectionLimitsConfig `yaml:"connectionLimits"`
@@ -72,7 +76,9 @@ type MetricsConfig struct {
 }
 
 type AdminConfig struct {
-	Token string `yaml:"token"`
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	Token   string `yaml:"token"`
 }
 
 type ShutdownConfig struct {
@@ -194,6 +200,10 @@ func Load(r io.Reader) (Config, error) {
 		Proxy: ProxyConfig{
 			Enforcement:           EnforcementEnforce,
 			UnknownIdentityPolicy: UnknownIdentityAllow,
+			IdleTimeout:           defaultProxyIdleTTL,
+		},
+		Admin: AdminConfig{
+			Listen: defaultAdminListen,
 		},
 		Metrics: MetricsConfig{Listen: defaultMetricsListen},
 		DNS: DNSConfig{
@@ -250,6 +260,9 @@ func (c Config) Validate() error {
 	if (c.Proxy.CA.CertFile == "") != (c.Proxy.CA.KeyFile == "") {
 		return fmt.Errorf("proxy.ca.certFile and proxy.ca.keyFile must be set together")
 	}
+	if c.Proxy.IdleTimeout <= 0 {
+		return fmt.Errorf("proxy.idleTimeout must be greater than zero")
+	}
 	if len(c.Proxy.CA.Additional) > 0 && c.Proxy.CA.CertFile == "" {
 		return fmt.Errorf("proxy.ca.additional requires proxy.ca.certFile and proxy.ca.keyFile")
 	}
@@ -284,8 +297,28 @@ func (c Config) Validate() error {
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")
 	}
+	if c.Metrics.Listen == c.Proxy.Listen {
+		return fmt.Errorf("metrics.listen must differ from proxy.listen")
+	}
 	if c.Admin.Token != "" && strings.TrimSpace(c.Admin.Token) == "" {
 		return fmt.Errorf("admin.token must not be empty when set")
+	}
+	if c.Admin.Enabled {
+		if strings.TrimSpace(c.Admin.Token) == "" {
+			return fmt.Errorf("admin.token is required when admin is enabled")
+		}
+		if strings.TrimSpace(c.Admin.Listen) == "" {
+			return fmt.Errorf("admin.listen is required when admin is enabled")
+		}
+		if err := validateLocalhostListen(c.Admin.Listen); err != nil {
+			return fmt.Errorf("admin.listen must be localhost-only: %w", err)
+		}
+		if c.Admin.Listen == c.Proxy.Listen {
+			return fmt.Errorf("admin.listen must differ from proxy.listen")
+		}
+		if c.Admin.Listen == c.Metrics.Listen {
+			return fmt.Errorf("admin.listen must differ from metrics.listen")
+		}
 	}
 	if c.Shutdown.GracePeriod <= 0 {
 		return fmt.Errorf("shutdown.gracePeriod must be greater than zero")
@@ -588,4 +621,17 @@ func normalizeCIDRSubject(value string) (string, error) {
 		return "", err
 	}
 	return prefix.Masked().String(), nil
+}
+
+func validateLocalhostListen(addr string) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return err
+	}
+	switch host {
+	case "127.0.0.1", "::1", "localhost":
+		return nil
+	default:
+		return fmt.Errorf("host %q is not loopback", host)
+	}
 }

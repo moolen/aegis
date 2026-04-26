@@ -190,13 +190,16 @@ EOF
 }
 
 ensure_mitm_secret() {
-  local cert_file="$1"
-  local key_file="$2"
-  generate_mitm_ca "$cert_file" "$key_file"
+  local issuer_cert="$1"
+  local issuer_key="$2"
+  local trust_bundle="$3"
+  local upstream_ca_cert="$4"
+
   kctl create namespace "$NAMESPACE" --dry-run=client -o yaml | kctl apply -f -
+  cat "$issuer_cert" "$upstream_ca_cert" >"$trust_bundle"
   kctl -n "$NAMESPACE" create secret generic aegis-perf-mitm-ca \
-    --from-file=ca.crt="$cert_file" \
-    --from-file=ca.key="$key_file" \
+    --from-file=ca.crt="$trust_bundle" \
+    --from-file=ca.key="$issuer_key" \
     --dry-run=client \
     -o yaml | kctl apply -f -
 }
@@ -230,6 +233,9 @@ RESULT_DIR="$(new_result_dir "${SCENARIO}" "kind")"
 PORT_FORWARD_LOG="${RESULT_DIR}/port-forward.log"
 MITM_CA_CERT="${RESULT_DIR}/mitm-ca.crt"
 MITM_CA_KEY="${RESULT_DIR}/mitm-ca.key"
+MITM_CA_BUNDLE="${RESULT_DIR}/mitm-ca-bundle.crt"
+UPSTREAM_CA_CERT="${RESULT_DIR}/upstream-ca.crt"
+UPSTREAM_CA_KEY="${RESULT_DIR}/upstream-ca.key"
 UPSTREAM_SERVER_CERT="${RESULT_DIR}/upstream-server.crt"
 UPSTREAM_SERVER_KEY="${RESULT_DIR}/upstream-server.key"
 UPSTREAM_SERVER_CSR="${RESULT_DIR}/upstream-server.csr"
@@ -237,8 +243,10 @@ UPSTREAM_SERVER_CSR="${RESULT_DIR}/upstream-server.csr"
 log "result dir: ${RESULT_DIR}"
 ensure_kind_cluster
 build_and_load_image
-ensure_mitm_secret "$MITM_CA_CERT" "$MITM_CA_KEY"
-apply_https_echo "$UPSTREAM_SERVER_CERT" "$UPSTREAM_SERVER_KEY" "$UPSTREAM_SERVER_CSR" "$MITM_CA_CERT" "$MITM_CA_KEY"
+generate_mitm_ca "$MITM_CA_CERT" "$MITM_CA_KEY" "aegis-perf-mitm-ca"
+generate_mitm_ca "$UPSTREAM_CA_CERT" "$UPSTREAM_CA_KEY" "aegis-perf-upstream-ca"
+ensure_mitm_secret "$MITM_CA_CERT" "$MITM_CA_KEY" "$MITM_CA_BUNDLE" "$UPSTREAM_CA_CERT"
+apply_https_echo "$UPSTREAM_SERVER_CERT" "$UPSTREAM_SERVER_KEY" "$UPSTREAM_SERVER_CSR" "$UPSTREAM_CA_CERT" "$UPSTREAM_CA_KEY"
 deploy_chart
 start_port_forward "$PORT_FORWARD_LOG"
 capture_metrics "$METRICS_URL" "${RESULT_DIR}/metrics-before.txt"
@@ -271,6 +279,9 @@ EXPECTED_STATUS=${EXPECTED_STATUS}
 SLEEP_SECONDS=${SLEEP_SECONDS}
 MITM_CA_CERT=${MITM_CA_CERT}
 MITM_CA_KEY=${MITM_CA_KEY}
+MITM_CA_BUNDLE=${MITM_CA_BUNDLE}
+UPSTREAM_CA_CERT=${UPSTREAM_CA_CERT}
+UPSTREAM_CA_KEY=${UPSTREAM_CA_KEY}
 UPSTREAM_SERVER_CERT=${UPSTREAM_SERVER_CERT}
 EOF
 

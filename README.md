@@ -26,14 +26,14 @@ Implemented in this bootstrap:
   would-deny metrics and logs while traffic keeps flowing.
 - Per-policy `enforcement: audit|enforce` so rollout can stay selective even
   when the global mode remains `enforce`.
-- Token-protected `POST /admin/enforcement?mode=audit|enforce|config` on the
-  metrics port for an immediate global audit/enforce override without reload.
+- Optional token-protected admin API on a separate localhost-only listener for
+  immediate global audit/enforce override without reload.
 - Per-policy `bypass: true` shadowing so a matching policy can emit would-allow
   / would-deny signals without blocking traffic.
 - Configurable `proxy.unknownIdentityPolicy: allow|deny` for production
   hard-deny behavior when a source IP cannot be resolved to a known identity.
-- Admin tooling on the metrics port for identity dump and policy simulation,
-  plus CLI subcommands for `validate`, `diff`, `dump-identities`, and
+- Admin tooling on a dedicated localhost-only listener for identity dump and
+  policy simulation, plus CLI subcommands for `validate`, `diff`, `dump-identities`, and
   `simulate`.
 - Optional per-identity concurrent connection limits across plain HTTP requests
   and `CONNECT` tunnels.
@@ -74,16 +74,17 @@ Current runtime behavior:
   passthrough rather than active MITM inspection.
 - When a matching policy sets `enforcement: audit`, that policy stays in shadow
   mode even while the global effective mode is `enforce`.
-- When `admin.token` is configured, the metrics port also exposes a protected
-  enforcement admin endpoint. `POST /admin/enforcement?mode=audit` forces
-  global audit mode immediately, `mode=enforce` forces blocking immediately,
-  and `mode=config` clears the override and returns to the configured
-  `proxy.enforcement` value. `GET /admin/enforcement` reports the configured,
-  override, and effective modes, `GET /admin/runtime` returns the active MITM
-  CA issuer plus any loaded companion CAs, `/admin/identities` returns the
-  live discovery map, `/admin/simulate` evaluates a hypothetical request
-  against the active runtime state, and `aegis_enforcement_mode` exposes the
-  effective mode in Prometheus.
+- When `admin.enabled: true` is configured, Aegis starts a separate
+  localhost-only admin listener at `admin.listen`. `POST /admin/enforcement?mode=audit`
+  forces global audit mode immediately, `mode=enforce` forces blocking
+  immediately, and `mode=config` clears the override and returns to the
+  configured `proxy.enforcement` value. `GET /admin/enforcement` reports the
+  configured, override, and effective modes, `GET /admin/runtime` returns the
+  active MITM CA issuer plus any loaded companion CAs, `/admin/identities`
+  returns the live discovery map, `/admin/simulate` evaluates a hypothetical
+  request against the active runtime state, and `aegis_enforcement_mode`
+  exposes the effective mode in Prometheus. `/metrics`, `/healthz`, and
+  `/readyz` stay on the metrics listener without authentication.
 - When a matching policy sets `bypass: true`, that policy behaves like a
   scoped shadow rule: Aegis records would-allow / would-deny outcomes for the
   match but still forwards the traffic. As with global audit mode, bypassed
@@ -102,11 +103,14 @@ Current runtime behavior:
   Protocol v2 on inbound connections and uses the forwarded source IP for
   request identity resolution.
 - `SIGHUP` reloads the config file in place. Listener settings stay immutable
-  during reload: `proxy.listen`, `metrics.listen`, and `proxy.proxyProtocol.*`
-  changes are rejected and require a process restart.
+  during reload: `proxy.listen`, `metrics.listen`, `admin.listen`,
+  `admin.enabled`, and `proxy.proxyProtocol.*` changes are rejected and
+  require a process restart.
 - Shutdown uses `shutdown.gracePeriod` to stop accepting new requests, drain
   active CONNECT tunnels, and force-close any remaining hijacked tunnels when
   the grace period expires.
+- `proxy.idleTimeout` bounds idle CONNECT passthrough and MITM sessions so
+  stalled clients or upstreams do not hold hijacked sockets forever.
 - When `proxy.connectionLimits.maxConcurrentPerIdentity` is greater than zero,
   Aegis limits each resolved identity across active HTTP requests and CONNECT
   tunnels combined. Limit hits return `429 Too Many Requests`.
@@ -180,8 +184,8 @@ without blocking traffic. For staged rollout, keep the global mode enforced and
 set `policies[].enforcement: audit` on the workloads that still need shadow
 mode. For a narrower escape hatch, set `bypass: true` on a specific policy
 instead. To enable the global kill switch and the admin tooling endpoints, set
-`admin.token` and call the metrics-port admin endpoint with
-`Authorization: Bearer <token>`.
+`admin.enabled: true`, choose a loopback-only `admin.listen`, set
+`admin.token`, and call the admin endpoint with `Authorization: Bearer <token>`.
 By default, Aegis also blocks loopback, private, and link-local upstream
 addresses after DNS resolution to reduce DNS rebinding and SSRF risk; use
 `dns.rebindingProtection.allowedHostPatterns` or
@@ -207,13 +211,13 @@ curl http://127.0.0.1:9090/healthz
 curl http://127.0.0.1:9090/readyz
 curl http://127.0.0.1:9090/metrics
 curl -H 'Authorization: Bearer replace-me' \
-  'http://127.0.0.1:9090/admin/runtime'
+  'http://127.0.0.1:9091/admin/runtime'
 curl -H 'Authorization: Bearer replace-me' \
-  'http://127.0.0.1:9090/admin/identities'
+  'http://127.0.0.1:9091/admin/identities'
 curl -H 'Authorization: Bearer replace-me' \
-  'http://127.0.0.1:9090/admin/simulate?sourceIP=10.0.0.10&fqdn=api.stripe.com&port=443&protocol=connect'
+  'http://127.0.0.1:9091/admin/simulate?sourceIP=10.0.0.10&fqdn=api.stripe.com&port=443&protocol=connect'
 curl -H 'Authorization: Bearer replace-me' \
-  -X POST 'http://127.0.0.1:9090/admin/enforcement?mode=audit'
+  -X POST 'http://127.0.0.1:9091/admin/enforcement?mode=audit'
 ```
 
 ## Performance Baselines
@@ -283,8 +287,8 @@ in-cluster Kubernetes discovery can watch pods when you enable
 `config.discovery.kubernetes`. Both `config.proxy.enforcement: audit` and
 per-policy `config.policies[].enforcement: audit` or
 `config.policies[].bypass: true` are supported for migration rollouts,
-`config.admin.token` enables the metrics-port global kill switch and admin
-tooling endpoints, `config.proxy.unknownIdentityPolicy` controls default-deny
+`config.admin.enabled`, `config.admin.listen`, and `config.admin.token`
+control the localhost-only admin API, `config.proxy.unknownIdentityPolicy` controls default-deny
 behavior for unresolved sources, `config.proxy.ca` stays the active issuing CA
 for forged MITM leaf certificates, `config.proxy.ca.additional[]` keeps
 companion CAs loaded during dual-CA rotation windows so `GET /admin/runtime`

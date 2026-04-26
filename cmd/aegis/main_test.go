@@ -310,7 +310,7 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 		return fakeHandlerProvider{handler: http.NewServeMux()}
 	}
 
-	_, _, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy:   config.ProxyConfig{Listen: ":8080"},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
@@ -337,6 +337,57 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 	}
 	if id == nil || id.Name != "default/api" {
 		t.Fatalf("IdentityResolver.Resolve() identity = %#v, want default/api", id)
+	}
+}
+
+func TestBuildServersCreatesAdminServerOnlyWhenEnabled(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
+
+	_, _, adminSrv, _, err := buildServers(context.Background(), config.Config{
+		Proxy:   config.ProxyConfig{Listen: ":8080"},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Admin: config.AdminConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:9091",
+			Token:   "secret-token",
+		},
+		Policies: []config.PolicyConfig{{
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+		Discovery: runtimeTestKubernetesDiscovery(),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServers() error = %v", err)
+	}
+	if adminSrv == nil {
+		t.Fatal("expected admin server when admin is enabled")
+	}
+
+	_, _, adminSrv, _, err = buildServers(context.Background(), config.Config{
+		Proxy:   config.ProxyConfig{Listen: ":8080"},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Policies: []config.PolicyConfig{{
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+		Discovery: runtimeTestKubernetesDiscovery(),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServers() error = %v", err)
+	}
+	if adminSrv != nil {
+		t.Fatal("expected no admin server when admin is disabled")
 	}
 }
 
@@ -389,7 +440,7 @@ func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
 		return fakeHandlerProvider{handler: http.NewServeMux()}
 	}
 
-	_, _, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy: config.ProxyConfig{
 			Listen: ":8080",
 			CA: config.CAConfig{
@@ -450,7 +501,7 @@ func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
 		return nil, errors.New("bad ca")
 	}
 
-	_, _, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy: config.ProxyConfig{
 			Listen: ":8080",
 			CA: config.CAConfig{
@@ -655,6 +706,21 @@ func TestValidateReloadableConfigRejectsProxyProtocolChange(t *testing.T) {
 	}
 	if got := err.Error(); got != "proxy.proxyProtocol.enabled cannot change during reload" {
 		t.Fatalf("error = %q, want %q", got, "proxy.proxyProtocol.enabled cannot change during reload")
+	}
+}
+
+func TestValidateReloadableConfigRejectsAdminListenerChange(t *testing.T) {
+	current := testRuntimeConfig()
+	current.Admin = config.AdminConfig{Enabled: true, Listen: "127.0.0.1:9091", Token: "secret"}
+	next := current
+	next.Admin.Listen = "127.0.0.1:9092"
+
+	err := validateReloadableConfig(current, next)
+	if err == nil {
+		t.Fatal("expected validateReloadableConfig() to fail")
+	}
+	if got := err.Error(); got != "admin.listen cannot change during reload" {
+		t.Fatalf("error = %q, want %q", got, "admin.listen cannot change during reload")
 	}
 }
 

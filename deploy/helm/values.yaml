@@ -28,6 +28,7 @@ config:
     listen: ":3128"
     # enforcement: audit
     # unknownIdentityPolicy: deny
+    # idleTimeout: 2m
     # connectionLimits:
     #   maxConcurrentPerIdentity: 100
     # proxyProtocol:
@@ -48,6 +49,8 @@ config:
     #     maxEntries: 10000
   admin: {}
   # admin:
+  #   enabled: true
+  #   listen: "127.0.0.1:9091"
   #   token: replace-me
   metrics:
     listen: ":9090"
@@ -116,8 +119,8 @@ config:
 # specific matched policies stay in shadow mode while the rest enforce.
 # Set config.proxy.unknownIdentityPolicy: deny to refuse traffic from source
 # IPs that do not resolve to a known identity.
-# Set config.admin.token to enable POST /admin/enforcement?mode=audit|enforce|config
-# on the metrics port as a protected global kill switch.
+# Set config.admin.enabled: true and config.admin.token to enable the
+# localhost-only admin API, including POST /admin/enforcement?mode=audit|enforce|config.
 # Set config.policies[].bypass: true for a narrower per-policy shadow mode with
 # the same transparent CONNECT behavior.
 # Set config.proxy.ca with the active issuing CA for forged MITM leaf

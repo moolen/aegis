@@ -2,6 +2,7 @@ proxy:
   listen: ":3128"
   # enforcement: audit   # audit | enforce
   # unknownIdentityPolicy: deny   # allow | deny
+  # idleTimeout: 2m   # closes idle CONNECT and MITM sessions
   # connectionLimits:
   #   maxConcurrentPerIdentity: 100
   # Uncomment when Aegis sits behind an L4 load balancer that injects
@@ -25,7 +26,9 @@ proxy:
   #   cache:
   #     maxEntries: 10000
 admin:
-  # token: "replace-me"   # enables the metrics-port admin kill switch
+  # enabled: true
+  # listen: "127.0.0.1:9091"
+  # token: "replace-me"   # enables the localhost admin API
 metrics:
   listen: ":9090"
 shutdown:

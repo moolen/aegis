@@ -208,6 +208,12 @@ func diffConfigs(current config.Config, next config.Config) []string {
 	if config.NormalizeUnknownIdentityPolicy(current.Proxy.UnknownIdentityPolicy) != config.NormalizeUnknownIdentityPolicy(next.Proxy.UnknownIdentityPolicy) {
 		lines = append(lines, fmt.Sprintf("proxy.unknownIdentityPolicy: %s -> %s", config.NormalizeUnknownIdentityPolicy(current.Proxy.UnknownIdentityPolicy), config.NormalizeUnknownIdentityPolicy(next.Proxy.UnknownIdentityPolicy)))
 	}
+	if current.Admin.Enabled != next.Admin.Enabled {
+		lines = append(lines, fmt.Sprintf("admin.enabled: %t -> %t", current.Admin.Enabled, next.Admin.Enabled))
+	}
+	if current.Admin.Listen != next.Admin.Listen {
+		lines = append(lines, fmt.Sprintf("admin.listen: %s -> %s", current.Admin.Listen, next.Admin.Listen))
+	}
 	if (current.Admin.Token != "") != (next.Admin.Token != "") {
 		lines = append(lines, fmt.Sprintf("admin.token configured: %t -> %t", current.Admin.Token != "", next.Admin.Token != ""))
 	}

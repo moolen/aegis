@@ -117,6 +117,155 @@ func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
 	}
 }
 
+func TestProxyConnectMITMStripsHopByHopResponseHeaders(t *testing.T) {
+	ca := newMITMTestCA(t)
+	mitmEngine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+
+	upstream, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{ca.issueServerCertificate(t, "tunnel.internal")},
+	})
+	if err != nil {
+		t.Fatalf("tls.Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		req, readErr := http.ReadRequest(bufio.NewReader(conn))
+		if readErr != nil {
+			return
+		}
+		req.Body.Close()
+		_, _ = io.WriteString(conn, "HTTP/1.1 204 No Content\r\nConnection: Foo\r\nFoo: remove-me\r\nX-End-To-End: keep-me\r\nContent-Length: 0\r\n\r\n")
+	}()
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-tls-http",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		MITM: mitmEngine,
+		UpstreamTLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    ca.roots,
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	clientTLSConn := mustMITMConnectClient(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%d", mustPort(t, upstream.Addr().String())), ca.roots)
+	defer clientTLSConn.Close()
+
+	if _, err := fmt.Fprintf(clientTLSConn, "GET / HTTP/1.1\r\nHost: tunnel.internal\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("Fprintf() error = %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("ReadResponse() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Connection"); got != "" {
+		t.Fatalf("Connection header = %q, want empty", got)
+	}
+	if got := resp.Header.Get("Foo"); got != "" {
+		t.Fatalf("Foo header = %q, want empty", got)
+	}
+	if got := resp.Header.Get("X-End-To-End"); got != "keep-me" {
+		t.Fatalf("X-End-To-End header = %q, want keep-me", got)
+	}
+
+	<-upstreamDone
+}
+
+func TestProxyConnectMITMIdleTimeoutClosesClientSession(t *testing.T) {
+	ca := newMITMTestCA(t)
+	mitmEngine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{ca.issueServerCertificate(t, "tunnel.internal")},
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		ConnectionIdleTimeout: 50 * time.Millisecond,
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-tls-http",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Listener.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/*"},
+				},
+			}},
+		}}),
+		MITM: mitmEngine,
+		UpstreamTLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    ca.roots,
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	clientTLSConn := mustMITMConnectClient(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%d", mustPort(t, upstream.Listener.Addr().String())), ca.roots)
+	defer clientTLSConn.Close()
+
+	_ = clientTLSConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, err := clientTLSConn.Read(buf); err == nil {
+		t.Fatal("expected mitm client session to close after idle timeout")
+	}
+}
+
 func TestMITMEngineSupportsAdditionalCAs(t *testing.T) {
 	primary := newMITMTestCA(t)
 	secondary := newMITMTestCA(t)

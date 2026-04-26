@@ -184,6 +184,9 @@ func (m *runtimeManager) AdminToken() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	if !m.current.cfg.Admin.Enabled {
+		return ""
+	}
 	return m.current.cfg.Admin.Token
 }
 
@@ -479,6 +482,12 @@ func validateReloadableConfig(current config.Config, next config.Config) error {
 	}
 	if current.Metrics.Listen != next.Metrics.Listen {
 		return fmt.Errorf("metrics.listen cannot change during reload")
+	}
+	if current.Admin.Enabled != next.Admin.Enabled {
+		return fmt.Errorf("admin.enabled cannot change during reload")
+	}
+	if current.Admin.Listen != next.Admin.Listen {
+		return fmt.Errorf("admin.listen cannot change during reload")
 	}
 	if current.Proxy.ProxyProtocol.Enabled != next.Proxy.ProxyProtocol.Enabled {
 		return fmt.Errorf("proxy.proxyProtocol.enabled cannot change during reload")

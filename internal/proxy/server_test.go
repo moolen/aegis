@@ -288,6 +288,158 @@ func TestRemoveHopByHopHeadersRemovesConnectionTokens(t *testing.T) {
 	}
 }
 
+func TestProxySanitizesHTTPDNSErrors(t *testing.T) {
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: errorResolver{
+			err: fmt.Errorf("lookup example.com on 10.0.0.53:53: no such host"),
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if got := string(body); !strings.Contains(got, "upstream name resolution failed") {
+		t.Fatalf("body = %q, want sanitized dns error", got)
+	} else if strings.Contains(got, "10.0.0.53") {
+		t.Fatalf("body = %q, must not leak resolver details", got)
+	}
+}
+
+func TestProxySanitizesHTTPDialErrors(t *testing.T) {
+	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	targetPort := mustPort(t, blockedListener.Addr().String())
+	blockedListener.Close()
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, fmt.Sprintf("http://example.com:%d/", targetPort), nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if got := string(body); !strings.Contains(got, "upstream connection failed") {
+		t.Fatalf("body = %q, want sanitized dial error", got)
+	} else if strings.Contains(got, "connect:") {
+		t.Fatalf("body = %q, must not leak raw dial details", got)
+	}
+}
+
+func TestProxySanitizesDestinationBlockedErrors(t *testing.T) {
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"blocked.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		DestinationGuard: mustDestinationGuard(t, nil, nil),
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, "http://blocked.internal/", nil)
+	if err != nil {
+		t.Fatalf("proxiedRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if got := string(body); !strings.Contains(got, "destination blocked by proxy") {
+		t.Fatalf("body = %q, want sanitized destination block message", got)
+	} else if strings.Contains(got, "127.0.0.1") {
+		t.Fatalf("body = %q, must not leak blocked IP", got)
+	}
+}
+
+func TestProxyConnectIdleTimeoutClosesPassthroughTunnel(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		<-time.After(500 * time.Millisecond)
+	}()
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{
+				"tunnel.internal": {net.ParseIP("127.0.0.1")},
+			},
+		},
+		ConnectionIdleTimeout: 50 * time.Millisecond,
+		EnforcementMode:       "audit",
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name: "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{
+				MatchLabels: map[string]string{"app": "web"},
+			},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "tunnel.internal",
+				Ports: []int{mustPort(t, upstream.Addr().String())},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	conn, reader := mustConnectProxy(t, proxyServer.URL, fmt.Sprintf("tunnel.internal:%s", strings.TrimPrefix(upstream.Addr().String(), "127.0.0.1:")))
+	defer conn.Close()
+	readConnectEstablished(t, reader)
+
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, err := reader.Read(buf); err == nil {
+		t.Fatal("expected passthrough tunnel to close after idle timeout")
+	}
+
+	<-upstreamDone
+}
+
 func TestProxyConnectionLimiterRejectsSecondConcurrentHTTPRequest(t *testing.T) {
 	upstreamStarted := make(chan struct{}, 1)
 	releaseUpstream := make(chan struct{})
@@ -2015,6 +2167,14 @@ func (r countingResolver) LookupNetIP(_ context.Context, host string) ([]net.IP,
 		return nil, fmt.Errorf("host not found: %s", host)
 	}
 	return ips, nil
+}
+
+type errorResolver struct {
+	err error
+}
+
+func (r errorResolver) LookupNetIP(context.Context, string) ([]net.IP, error) {
+	return nil, r.err
 }
 
 type staticIdentityResolver struct {

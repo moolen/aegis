@@ -105,9 +105,8 @@ func TestServerHidesAdminEndpointWithoutToken(t *testing.T) {
 	}
 }
 
-func TestServerRejectsUnauthorizedAdminRequest(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	srv := NewServer(":0", reg, nil, &enforcementAdminStub{token: "secret"})
+func TestAdminServerRejectsUnauthorizedAdminRequest(t *testing.T) {
+	srv := NewAdminServer("127.0.0.1:0", &enforcementAdminStub{token: "secret"})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -127,8 +126,7 @@ func TestServerRejectsUnauthorizedAdminRequest(t *testing.T) {
 	}
 }
 
-func TestServerReturnsAdminEnforcementStatus(t *testing.T) {
-	reg := prometheus.NewRegistry()
+func TestAdminServerReturnsAdminEnforcementStatus(t *testing.T) {
 	admin := enforcementAdminStub{
 		token: "secret",
 		status: EnforcementStatus{
@@ -137,7 +135,7 @@ func TestServerReturnsAdminEnforcementStatus(t *testing.T) {
 			Effective:  "audit",
 		},
 	}
-	srv := NewServer(":0", reg, nil, &admin)
+	srv := NewAdminServer("127.0.0.1:0", &admin)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -166,8 +164,7 @@ func TestServerReturnsAdminEnforcementStatus(t *testing.T) {
 	}
 }
 
-func TestServerReturnsAdminRuntimeStatus(t *testing.T) {
-	reg := prometheus.NewRegistry()
+func TestAdminServerReturnsAdminRuntimeStatus(t *testing.T) {
 	admin := &enforcementAdminStub{
 		token: "secret",
 		runtime: RuntimeStatus{
@@ -180,7 +177,7 @@ func TestServerReturnsAdminRuntimeStatus(t *testing.T) {
 		},
 	}
 
-	srv := NewServer(":0", reg, nil, admin)
+	srv := NewAdminServer("127.0.0.1:0", admin)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -209,8 +206,7 @@ func TestServerReturnsAdminRuntimeStatus(t *testing.T) {
 	}
 }
 
-func TestServerUpdatesAdminEnforcementMode(t *testing.T) {
-	reg := prometheus.NewRegistry()
+func TestAdminServerUpdatesAdminEnforcementMode(t *testing.T) {
 	admin := &enforcementAdminStub{
 		token: "secret",
 		status: EnforcementStatus{
@@ -218,7 +214,7 @@ func TestServerUpdatesAdminEnforcementMode(t *testing.T) {
 			Effective:  "enforce",
 		},
 	}
-	srv := NewServer(":0", reg, nil, admin)
+	srv := NewAdminServer("127.0.0.1:0", admin)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -249,8 +245,7 @@ func TestServerUpdatesAdminEnforcementMode(t *testing.T) {
 	}
 }
 
-func TestServerReturnsIdentityDump(t *testing.T) {
-	reg := prometheus.NewRegistry()
+func TestAdminServerReturnsIdentityDump(t *testing.T) {
 	admin := &enforcementAdminStub{
 		token: "secret",
 		identities: []IdentityDumpRecord{{
@@ -263,7 +258,7 @@ func TestServerReturnsIdentityDump(t *testing.T) {
 			},
 		}},
 	}
-	srv := NewServer(":0", reg, nil, admin)
+	srv := NewAdminServer("127.0.0.1:0", admin)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -293,7 +288,6 @@ func TestServerReturnsIdentityDump(t *testing.T) {
 }
 
 func TestRuntimeSimulationReturnsProviderScopedDecision(t *testing.T) {
-	reg := prometheus.NewRegistry()
 	admin := &enforcementAdminStub{
 		token: "secret",
 		simulation: SimulationResponse{
@@ -313,7 +307,7 @@ func TestRuntimeSimulationReturnsProviderScopedDecision(t *testing.T) {
 			},
 		},
 	}
-	srv := NewServer(":0", reg, nil, admin)
+	srv := NewAdminServer("127.0.0.1:0", admin)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

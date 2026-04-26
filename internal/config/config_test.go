@@ -30,6 +30,9 @@ dns:
 	if cfg.DNS.CacheTTL != 30*time.Second {
 		t.Fatalf("unexpected cache TTL %s", cfg.DNS.CacheTTL)
 	}
+	if cfg.Proxy.IdleTimeout != 2*time.Minute {
+		t.Fatalf("unexpected proxy idle timeout %s", cfg.Proxy.IdleTimeout)
+	}
 }
 
 func TestLoadRejectsMissingProxyListen(t *testing.T) {
@@ -112,6 +115,18 @@ metrics:
 	}
 }
 
+func TestLoadRejectsNonPositiveProxyIdleTimeout(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  idleTimeout: 0s
+metrics:
+  listen: ":9090"
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
 func TestLoadRejectsNegativeMaxConcurrentConnectionsPerIdentity(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"
@@ -161,10 +176,63 @@ admin:
 	if cfg.Admin.Token != "secret-token" {
 		t.Fatalf("admin token = %q, want %q", cfg.Admin.Token, "secret-token")
 	}
+	if cfg.Admin.Listen != "127.0.0.1:9091" {
+		t.Fatalf("admin listen = %q, want %q", cfg.Admin.Listen, "127.0.0.1:9091")
+	}
 }
 
 func TestLoadRejectsWhitespaceOnlyAdminToken(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte("proxy:\n  listen: \":3128\"\nadmin:\n  token: \"   \"\n")))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsEnabledAdminWithoutToken(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+admin:
+  enabled: true
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsMetricsListenEqualToProxyListen(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":9090"
+metrics:
+  listen: ":9090"
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsNonLocalhostAdminListen(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+admin:
+  enabled: true
+  listen: "0.0.0.0:9091"
+  token: secret-token
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsAdminListenEqualToMetricsListen(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+admin:
+  enabled: true
+  listen: "127.0.0.1:9090"
+  token: secret-token
+metrics:
+  listen: "127.0.0.1:9090"
+`)))
 	if err == nil {
 		t.Fatal("expected validation error")
 	}

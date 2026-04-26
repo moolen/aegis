@@ -42,6 +42,7 @@ type Dependencies struct {
 	DestinationGuard      *DestinationGuard
 	DrainTracker          *DrainTracker
 	ConnectionLimiter     *ConnectionLimiter
+	ConnectionIdleTimeout time.Duration
 	UpstreamHTTPTransport *http.Transport
 	EnforcementMode       string
 	Enforcement           *EnforcementOverrideController
@@ -71,6 +72,9 @@ type auditOutcome struct {
 func NewServer(deps Dependencies) *Server {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
+	}
+	if deps.ConnectionIdleTimeout <= 0 {
+		deps.ConnectionIdleTimeout = 2 * time.Minute
 	}
 	if deps.UpstreamHTTPTransport == nil {
 		deps.UpstreamHTTPTransport = NewUpstreamHTTPTransport()
@@ -167,10 +171,12 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if IsDestinationBlocked(err) {
 			s.recordRequestDecision("http", "deny", decisionPolicyName(decision), "destination_blocked")
 			s.logRequestDecision(slog.LevelWarn, "http", "deny", "destination_blocked", reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), audit)
-			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
+			s.deps.Logger.Warn("http destination blocked", "host", host, "port", port, "error", err)
+			s.writeError(w, http.StatusForbidden, "destination blocked by proxy", "destination")
 			return
 		}
-		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
+		s.deps.Logger.Warn("http target resolution failed", "host", host, "port", port, "error", err)
+		s.writeError(w, http.StatusBadGateway, "upstream name resolution failed", "dns")
 		return
 	}
 	reason := "policy_allowed"
@@ -188,7 +194,8 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.deps.UpstreamHTTPTransport.RoundTrip(outReq)
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream round trip failed: %v", err), "dial")
+		s.deps.Logger.Warn("http upstream round trip failed", "host", host, "port", port, "target_addr", targetAddr, "error", err)
+		s.writeError(w, http.StatusBadGateway, "upstream connection failed", "dial")
 		return
 	}
 	defer resp.Body.Close()
@@ -273,18 +280,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			s.recordConnectResult(mode, "destination_blocked")
 			s.recordRequestDecision("connect", "deny", decisionPolicyName(decision), "destination_blocked")
 			s.logRequestDecision(slog.LevelWarn, "connect", "deny", "destination_blocked", reqIdentity, host, port, decision, http.MethodConnect, "", audit)
-			s.writeError(w, http.StatusForbidden, err.Error(), "destination")
+			s.deps.Logger.Warn("connect destination blocked", "host", host, "port", port, "error", err)
+			s.writeError(w, http.StatusForbidden, "destination blocked by proxy", "destination")
 			return
 		}
 		s.recordConnectResult(mode, "dns_error")
-		s.writeError(w, http.StatusBadGateway, err.Error(), "dns")
+		s.deps.Logger.Warn("connect target resolution failed", "host", host, "port", port, "error", err)
+		s.writeError(w, http.StatusBadGateway, "upstream name resolution failed", "dns")
 		return
 	}
 
 	upstreamConn, err := (&net.Dialer{}).DialContext(r.Context(), "tcp", targetAddr)
 	if err != nil {
 		s.recordConnectResult(mode, "upstream_dial_error")
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("connect upstream failed: %v", err), "dial")
+		s.deps.Logger.Warn("connect upstream dial failed", "host", host, "port", port, "target_addr", targetAddr, "error", err)
+		s.writeError(w, http.StatusBadGateway, "upstream connection failed", "dial")
 		return
 	}
 
@@ -292,7 +302,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		s.recordConnectResult(mode, "server_error")
 		upstreamConn.Close()
-		s.writeError(w, http.StatusInternalServerError, "response writer does not support hijacking", "server")
+		s.deps.Logger.Error("connect response writer does not support hijacking")
+		s.writeError(w, http.StatusInternalServerError, "internal proxy error", "server")
 		return
 	}
 
@@ -300,7 +311,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.recordConnectResult(mode, "server_error")
 		upstreamConn.Close()
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("hijack failed: %v", err), "server")
+		s.deps.Logger.Error("connect hijack failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "internal proxy error", "server")
 		return
 	}
 
@@ -317,7 +329,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		reason := auditActualReason(audit)
 		s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), reason)
 		s.logRequestDecision(auditLogLevel(audit), "connect", "allow", reason, reqIdentity, host, port, decision, http.MethodConnect, "", audit)
-		s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
+		s.spliceConnectTunnel(s.wrapIdleConn(clientConn), s.wrapIdleConn(upstreamConn), s.wrapIdleReader(clientConn, buf.Reader))
 		return
 	}
 
@@ -364,7 +376,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordRequestDecision("connect", "allow", decisionPolicyName(decision), reason)
 	s.logRequestDecision(auditLogLevel(audit), "connect", "allow", reason, reqIdentity, host, port, decision, http.MethodConnect, "", audit)
-	s.spliceConnectTunnel(clientConn, upstreamConn, buf.Reader)
+	s.spliceConnectTunnel(s.wrapIdleConn(clientConn), s.wrapIdleConn(upstreamConn), s.wrapIdleReader(clientConn, buf.Reader))
 }
 
 func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, upstreamConn net.Conn, reqIdentity *identity.Identity, sourceIP netip.Addr, serverName string, port int) {
@@ -390,8 +402,10 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 
 	s.recordConnectResult("mitm", "established")
 
-	clientReaderTLS := bufio.NewReader(clientTLSConn)
-	upstreamReaderTLS := bufio.NewReader(upstreamTLSConn)
+	clientConn = s.wrapIdleConn(clientTLSConn)
+	upstreamConn = s.wrapIdleConn(upstreamTLSConn)
+	clientReaderTLS := bufio.NewReader(clientConn)
+	upstreamReaderTLS := bufio.NewReader(upstreamConn)
 
 	for {
 		req, err := http.ReadRequest(clientReaderTLS)
@@ -438,11 +452,12 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 		if err != nil {
 			s.recordTLSError()
 			s.deps.Logger.Warn("connect mitm read upstream response failed", "server_name", serverName, "error", err)
-			_ = writeMITMErrorResponse(clientTLSConn, http.StatusBadGateway, "upstream response failed")
+			_ = writeMITMErrorResponse(clientConn, http.StatusBadGateway, "upstream response failed")
 			return
 		}
 
-		if err := resp.Write(clientTLSConn); err != nil {
+		removeHopByHopHeaders(resp.Header)
+		if err := resp.Write(clientConn); err != nil {
 			resp.Body.Close()
 			if isConnectionClosed(err) {
 				return
@@ -517,6 +532,27 @@ func (s *Server) spliceConnectTunnel(clientConn net.Conn, upstreamConn net.Conn,
 	}()
 
 	wg.Wait()
+}
+
+func (s *Server) wrapIdleConn(conn net.Conn) net.Conn {
+	if conn == nil || s.deps.ConnectionIdleTimeout <= 0 {
+		return conn
+	}
+	return &idleDeadlineConn{
+		Conn:        conn,
+		idleTimeout: s.deps.ConnectionIdleTimeout,
+	}
+}
+
+func (s *Server) wrapIdleReader(conn net.Conn, reader io.Reader) io.Reader {
+	if reader == nil || conn == nil || s.deps.ConnectionIdleTimeout <= 0 {
+		return reader
+	}
+	return &idleDeadlineReader{
+		conn:        conn,
+		reader:      reader,
+		idleTimeout: s.deps.ConnectionIdleTimeout,
+	}
 }
 
 func (s *Server) recordTLSError() {
@@ -809,6 +845,38 @@ type replayConn struct {
 
 func (c *replayConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
+}
+
+type idleDeadlineConn struct {
+	net.Conn
+	idleTimeout time.Duration
+}
+
+func (c *idleDeadlineConn) Read(p []byte) (int, error) {
+	if err := c.Conn.SetReadDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *idleDeadlineConn) Write(p []byte) (int, error) {
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(p)
+}
+
+type idleDeadlineReader struct {
+	conn        net.Conn
+	reader      io.Reader
+	idleTimeout time.Duration
+}
+
+func (r *idleDeadlineReader) Read(p []byte) (int, error) {
+	if err := r.conn.SetReadDeadline(time.Now().Add(r.idleTimeout)); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func writeMITMErrorResponse(w io.Writer, status int, message string) error {

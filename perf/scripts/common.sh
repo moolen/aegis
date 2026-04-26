@@ -277,6 +277,7 @@ build_ssl_cert_file() {
 generate_mitm_ca() {
   local cert_file="$1"
   local key_file="$2"
+  local common_name="${3:-aegis-perf-mitm-ca}"
 
   require_tool openssl
   mkdir -p "$(dirname -- "$cert_file")"
@@ -289,7 +290,7 @@ generate_mitm_ca() {
     -days 1 \
     -key "$key_file" \
     -out "$cert_file" \
-    -subj "/CN=aegis-perf-mitm-ca" \
+    -subj "/CN=${common_name}" \
     -addext "basicConstraints=critical,CA:TRUE" \
     -addext "keyUsage=critical,keyCertSign,cRLSign,digitalSignature" \
     -addext "subjectKeyIdentifier=hash"

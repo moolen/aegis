@@ -116,6 +116,14 @@ func NewServer(addr string, reg *prometheus.Registry, readyChecker ReadyChecker,
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	return &Server{
+		addr:    addr,
+		handler: mux,
+	}
+}
+
+func NewAdminServer(addr string, adminAPI AdminAPI) *Server {
+	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/enforcement", func(w http.ResponseWriter, r *http.Request) {
 		if adminAPI == nil || strings.TrimSpace(adminAPI.AdminToken()) == "" {
 			http.NotFound(w, r)
@@ -185,7 +193,6 @@ func NewServer(addr string, reg *prometheus.Registry, readyChecker ReadyChecker,
 		}
 		writeJSON(w, resp)
 	})
-
 	return &Server{
 		addr:    addr,
 		handler: mux,

@@ -26,7 +26,8 @@ config:
     - name: perf-kind-connect-mitm
       subjects:
         cidrs:
-          - "127.0.0.0/8"
+          - "0.0.0.0/0"
+          - "::/0"
       egress:
         - fqdn: "echo-tls.aegis-perf.svc.cluster.local"
           ports: [443]

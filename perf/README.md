@@ -54,6 +54,11 @@ Use Kind targets when you need Helm-rendered deployment behavior, Kubernetes net
 
 Local runs build `bin/aegis` and the fixture helper on demand, then start fixture processes directly. Kind runs build/load an image, deploy the chart, and port-forward the in-cluster service before invoking the same logical `k6` scenario.
 
+The Kind perf overlays intentionally use broad `subjects.cidrs` matches. Those
+runs are meant to measure the deployed proxy path, not to validate source-IP
+selection semantics through the `kubectl port-forward` path, which is not
+stable enough to treat as a policy boundary.
+
 ## Outputs
 
 Each run writes artifacts under `perf/results/<timestamp>-<scenario>-<target>/`:
