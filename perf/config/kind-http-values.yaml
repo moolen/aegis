@@ -1,0 +1,31 @@
+config:
+  proxy:
+    listen: ":3128"
+    enforcement: enforce
+    unknownIdentityPolicy: deny
+  metrics:
+    listen: ":9090"
+  dns:
+    cache_ttl: 30s
+    timeout: 5s
+    servers: []
+    rebindingProtection:
+      allowedHostPatterns:
+        - "*.svc.cluster.local"
+      allowedCIDRs: []
+  discovery:
+    kubernetes: []
+    ec2: []
+  policies:
+    - name: perf-kind-http
+      subjects:
+        cidrs:
+          - "127.0.0.0/8"
+      egress:
+        - fqdn: "echo.aegis-perf.svc.cluster.local"
+          ports: [80]
+          tls:
+            mode: mitm
+          http:
+            allowedMethods: ["GET"]
+            allowedPaths: ["/allowed"]

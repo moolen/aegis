@@ -209,6 +209,13 @@ curl -H 'Authorization: Bearer replace-me' \
   -X POST 'http://127.0.0.1:9090/admin/enforcement?mode=audit'
 ```
 
+## Performance Baselines
+
+The repository includes a `perf/` package for reproducible `k6`-based
+performance baselines against both local/subprocess and Kind/Helm deployments.
+See [perf/README.md](perf/README.md) for setup, scenario descriptions, and run
+commands.
+
 ## Development
 
 Available commands:

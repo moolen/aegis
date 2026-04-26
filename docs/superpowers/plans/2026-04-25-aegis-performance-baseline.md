@@ -30,7 +30,7 @@
 - `perf/scripts/run-kind-http.sh` — orchestrate Kind HTTP baseline.
 - `perf/scripts/run-kind-connect-passthrough.sh` — orchestrate Kind passthrough baseline.
 - `perf/scripts/run-kind-connect-mitm.sh` — orchestrate Kind MITM baseline.
-- `perf/scripts/_fixtures.go` — small Go helper binary for synthetic upstream fixtures and result-oriented local bootstrapping.
+- `perf/scripts/fixtures.go` — small Go helper binary for synthetic upstream fixtures and result-oriented local bootstrapping.
 - `perf/scripts/fixtures_test.go` — focused Go tests for fixture wiring where practical.
 - `perf/.gitignore` — ignore `results/` artifacts.
 
@@ -123,7 +123,7 @@ git commit -m "docs: add perf baseline package overview"
 ## Task 2: Add the synthetic fixture helper for local baselines
 
 **Files:**
-- Create: `perf/scripts/_fixtures.go`
+- Create: `perf/scripts/fixtures.go`
 - Create: `perf/scripts/fixtures_test.go`
 
 - [ ] **Step 1: Write the failing fixture tests**
@@ -173,12 +173,13 @@ Expected: FAIL with missing symbols or package errors
 
 - [ ] **Step 3: Implement the fixture helper minimally**
 
-Create `perf/scripts/_fixtures.go` as a small Go program with:
+Create `perf/scripts/fixtures.go` as a small Go program with:
 
 - `fixtureConfig` struct
 - `parseFixtureConfig(args []string) (fixtureConfig, error)`
 - `newHTTPFixture(path string, successStatus int) http.Handler`
-- optional TLS startup path using generated or temp test certs for HTTPS fixtures
+- invalid mode rejection for any mode outside `http|passthrough|mitm`
+- minimal HTTPS startup path for `passthrough` and `mitm` using generated or temp test certs
 - `main()` that starts the requested listener and prints the bound address in a stable format
 
 Core shape:
@@ -209,6 +210,11 @@ func parseFixtureConfig(args []string) (fixtureConfig, error) {
     if err := fs.Parse(args); err != nil {
         return fixtureConfig{}, err
     }
+    switch cfg.Mode {
+    case "http", "passthrough", "mitm":
+    default:
+        return fixtureConfig{}, fmt.Errorf("invalid mode %q", cfg.Mode)
+    }
     return cfg, nil
 }
 
@@ -227,12 +233,9 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    ln, err := net.Listen("tcp", cfg.Listen)
-    if err != nil {
+    if err := runFixture(os.Args[1:], os.Stdout); err != nil {
         log.Fatal(err)
     }
-    fmt.Printf("LISTEN_ADDR=%s\n", ln.Addr().String())
-    log.Fatal(http.Serve(ln, newHTTPFixture(cfg.Path, http.StatusNoContent)))
 }
 ```
 
@@ -246,7 +249,7 @@ Expected: PASS
 - [ ] **Step 5: Commit the fixture helper**
 
 ```bash
-git add perf/scripts/_fixtures.go perf/scripts/fixtures_test.go
+git add perf/scripts/fixtures.go perf/scripts/fixtures_test.go
 git commit -m "feat: add local perf fixture helper"
 ```
 
