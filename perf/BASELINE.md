@@ -92,6 +92,26 @@ than policy evaluation.
   MITM. `300 VUs` is beyond the safe operating point without further upstream
   socket tuning.
 
+## Profiling Snapshot
+
+With the new localhost-only `pprof` listener enabled on an isolated local MITM
+run, Aegis handled `2,900,190` successful requests in `30s` at `200 VUs` with
+`0%` failures and p95 around `4.72 ms`.
+
+The useful profile reads from that run were:
+
+- heap: about `5.1 MiB` in-use, dominated by startup/runtime allocations rather
+  than request-path growth
+- goroutines: stable at `8`, with no sign of unbounded goroutine growth under
+  sustained MITM load
+
+The CPU profile endpoint responded successfully, but in this specific local
+environment it returned a zero-sample profile even while the load run was
+active. That means the `pprof` surface is wired correctly and usable for heap
+and goroutine inspection today, but CPU hotspot attribution still needs a
+follow-up capture in staging or a different local runtime environment before it
+can be treated as trustworthy tuning data.
+
 ## Artifacts
 
 Representative result directories:
@@ -122,3 +142,5 @@ Representative result directories:
   - `perf/results/20260426T125207Z-connect-mitm-kind`
   - `perf/results/20260426T125636Z-connect-mitm-kind`
   - `perf/results/20260426T130238Z-connect-mitm-kind`
+- isolated local MITM `pprof` capture:
+  - `/tmp/aegis-pprof-isolated.lfVQAn/result`

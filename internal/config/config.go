@@ -29,6 +29,7 @@ type Config struct {
 	Proxy     ProxyConfig     `yaml:"proxy"`
 	Admin     AdminConfig     `yaml:"admin"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
+	Pprof     PprofConfig     `yaml:"pprof"`
 	DNS       DNSConfig       `yaml:"dns"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 	Policies  []PolicyConfig  `yaml:"policies"`
@@ -73,6 +74,11 @@ type ConnectionLimitsConfig struct {
 
 type MetricsConfig struct {
 	Listen string `yaml:"listen"`
+}
+
+type PprofConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
 }
 
 type AdminConfig struct {
@@ -297,8 +303,25 @@ func (c Config) Validate() error {
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")
 	}
-	if c.Metrics.Listen == c.Proxy.Listen {
+	if listenersConflict(c.Metrics.Listen, c.Proxy.Listen) {
 		return fmt.Errorf("metrics.listen must differ from proxy.listen")
+	}
+	if c.Pprof.Enabled {
+		if strings.TrimSpace(c.Pprof.Listen) == "" {
+			return fmt.Errorf("pprof.listen is required when pprof is enabled")
+		}
+		if err := validateLocalhostListen(c.Pprof.Listen); err != nil {
+			return fmt.Errorf("pprof.listen must be localhost-only: %w", err)
+		}
+		if listenersConflict(c.Pprof.Listen, c.Proxy.Listen) {
+			return fmt.Errorf("pprof.listen must differ from proxy.listen")
+		}
+		if listenersConflict(c.Pprof.Listen, c.Metrics.Listen) {
+			return fmt.Errorf("pprof.listen must differ from metrics.listen")
+		}
+		if c.Admin.Enabled && listenersConflict(c.Pprof.Listen, c.Admin.Listen) {
+			return fmt.Errorf("pprof.listen must differ from admin.listen")
+		}
 	}
 	if c.Admin.Token != "" && strings.TrimSpace(c.Admin.Token) == "" {
 		return fmt.Errorf("admin.token must not be empty when set")
@@ -313,10 +336,10 @@ func (c Config) Validate() error {
 		if err := validateLocalhostListen(c.Admin.Listen); err != nil {
 			return fmt.Errorf("admin.listen must be localhost-only: %w", err)
 		}
-		if c.Admin.Listen == c.Proxy.Listen {
+		if listenersConflict(c.Admin.Listen, c.Proxy.Listen) {
 			return fmt.Errorf("admin.listen must differ from proxy.listen")
 		}
-		if c.Admin.Listen == c.Metrics.Listen {
+		if listenersConflict(c.Admin.Listen, c.Metrics.Listen) {
 			return fmt.Errorf("admin.listen must differ from metrics.listen")
 		}
 	}
@@ -633,5 +656,64 @@ func validateLocalhostListen(addr string) error {
 		return nil
 	default:
 		return fmt.Errorf("host %q is not loopback", host)
+	}
+}
+
+func listenersConflict(a string, b string) bool {
+	aHost, aPort, err := splitListenAddress(a)
+	if err != nil {
+		return a == b
+	}
+	bHost, bPort, err := splitListenAddress(b)
+	if err != nil {
+		return a == b
+	}
+	if aPort != bPort {
+		return false
+	}
+	if isWildcardListenHost(aHost) || isWildcardListenHost(bHost) {
+		return true
+	}
+	return sameListenHost(aHost, bHost)
+}
+
+func splitListenAddress(addr string) (string, string, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(host), strings.TrimSpace(port), nil
+}
+
+func isWildcardListenHost(host string) bool {
+	switch strings.TrimSpace(host) {
+	case "", "0.0.0.0", "::":
+		return true
+	default:
+		return false
+	}
+}
+
+func sameListenHost(a string, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	if a == "localhost" && isLoopbackListenHost(b) {
+		return true
+	}
+	if b == "localhost" && isLoopbackListenHost(a) {
+		return true
+	}
+	return false
+}
+
+func isLoopbackListenHost(host string) bool {
+	switch strings.TrimSpace(host) {
+	case "127.0.0.1", "::1":
+		return true
+	default:
+		return false
 	}
 }

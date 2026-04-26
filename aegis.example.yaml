@@ -29,6 +29,9 @@ admin:
   # enabled: true
   # listen: "127.0.0.1:9091"
   # token: "replace-me"   # enables the localhost admin API
+pprof:
+  # enabled: true
+  # listen: "127.0.0.1:6060"
 metrics:
   listen: ":9090"
 shutdown:

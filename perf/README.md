@@ -79,6 +79,35 @@ Typical artifact paths look like:
 
 Use `summary.json` for machine-readable metric review, `summary.txt` for the operator-facing `k6` summary, `metrics-before.txt` and `metrics-after.txt` to compare Aegis metrics snapshots, and `meta.env` to capture the run inputs that made the result reproducible.
 
+## Profiling
+
+Enable the optional localhost-only `pprof` listener when you need runtime
+profiles during a perf run:
+
+```yaml
+pprof:
+  enabled: true
+  listen: "127.0.0.1:6060"
+```
+
+Then capture profiles while the scenario is running:
+
+```bash
+go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=15
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+curl -fsS http://127.0.0.1:6060/debug/pprof/goroutine?debug=1 > /tmp/aegis-goroutines.txt
+```
+
+For a saved binary profile:
+
+```bash
+go tool pprof -proto http://127.0.0.1:6060/debug/pprof/profile?seconds=15 > /tmp/aegis-cpu.pb.gz
+go tool pprof -proto http://127.0.0.1:6060/debug/pprof/heap > /tmp/aegis-heap.pb.gz
+```
+
+Keep the `pprof` listener on its own localhost-only port. It is separate from
+the proxy, metrics, and admin listeners.
+
 ## CI Guidance
 
 CI should validate that the harness runs successfully and emits the expected artifacts for a scenario. It should not gate on fixed latency thresholds, because those numbers are environment-sensitive and better tracked as baselines or trend comparisons outside of CI pass/fail logic.

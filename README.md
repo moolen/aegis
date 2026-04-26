@@ -28,6 +28,9 @@ Implemented in this bootstrap:
   when the global mode remains `enforce`.
 - Optional token-protected admin API on a separate localhost-only listener for
   immediate global audit/enforce override without reload.
+- Optional localhost-only `pprof` listener on a separate port for CPU, heap,
+  goroutine, block, mutex, and trace profiling during perf and staging
+  investigations.
 - Per-policy `bypass: true` shadowing so a matching policy can emit would-allow
   / would-deny signals without blocking traffic.
 - Configurable `proxy.unknownIdentityPolicy: allow|deny` for production
@@ -196,6 +199,14 @@ Set `proxy.connectionLimits.maxConcurrentPerIdentity` to cap concurrent
 upstream usage per resolved identity during migration or steady-state rollout.
 Use `shutdown.gracePeriod` to control how long Aegis drains in-flight traffic
 before it force-closes remaining CONNECT tunnels during process shutdown.
+To enable runtime profiling, set `pprof.enabled: true` and bind
+`pprof.listen` to a localhost-only address on a separate port, for example:
+
+```yaml
+pprof:
+  enabled: true
+  listen: "127.0.0.1:6060"
+```
 
 Send traffic through the proxy:
 
@@ -218,6 +229,7 @@ curl -H 'Authorization: Bearer replace-me' \
   'http://127.0.0.1:9091/admin/simulate?sourceIP=10.0.0.10&fqdn=api.stripe.com&port=443&protocol=connect'
 curl -H 'Authorization: Bearer replace-me' \
   -X POST 'http://127.0.0.1:9091/admin/enforcement?mode=audit'
+go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=15
 ```
 
 ## Performance Baselines

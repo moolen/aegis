@@ -199,6 +199,157 @@ admin:
 	}
 }
 
+func TestValidateRejectsEnabledPprofWithoutListen(t *testing.T) {
+	cfg := validConfigForValidationTests()
+	cfg.Pprof.Enabled = true
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "pprof.listen is required") {
+		t.Fatalf("error = %v, want pprof listen required validation error", err)
+	}
+}
+
+func TestValidateRejectsNonLocalhostPprofListen(t *testing.T) {
+	tests := []string{
+		"0.0.0.0:6060",
+		":6060",
+		"192.168.1.10:6060",
+	}
+
+	for _, listen := range tests {
+		t.Run(listen, func(t *testing.T) {
+			cfg := validConfigForValidationTests()
+			cfg.Pprof.Enabled = true
+			cfg.Pprof.Listen = listen
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), "pprof.listen must be localhost-only") {
+				t.Fatalf("error = %v, want localhost-only validation error", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsPprofListenerCollision(t *testing.T) {
+	tests := []struct {
+		name   string
+		apply  func(*Config)
+		listen string
+		want   string
+	}{
+		{
+			name: "proxy",
+			apply: func(cfg *Config) {
+				cfg.Proxy.Listen = "127.0.0.1:3128"
+			},
+			listen: "127.0.0.1:3128",
+			want:   "pprof.listen must differ from proxy.listen",
+		},
+		{
+			name: "proxy wildcard",
+			apply: func(cfg *Config) {
+				cfg.Proxy.Listen = ":3128"
+			},
+			listen: "127.0.0.1:3128",
+			want:   "pprof.listen must differ from proxy.listen",
+		},
+		{
+			name:   "metrics",
+			apply:  func(cfg *Config) {},
+			listen: "127.0.0.1:9090",
+			want:   "pprof.listen must differ from metrics.listen",
+		},
+		{
+			name: "metrics wildcard",
+			apply: func(cfg *Config) {
+				cfg.Metrics.Listen = ":9090"
+			},
+			listen: "localhost:9090",
+			want:   "pprof.listen must differ from metrics.listen",
+		},
+		{
+			name:   "admin",
+			apply:  func(cfg *Config) {},
+			listen: "127.0.0.1:9091",
+			want:   "pprof.listen must differ from admin.listen",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfigForValidationTests()
+			tt.apply(&cfg)
+			cfg.Pprof.Enabled = true
+			cfg.Pprof.Listen = tt.listen
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateAllowsPprofListenEqualToDisabledAdminListen(t *testing.T) {
+	cfg := validConfigForValidationTests()
+	cfg.Admin.Enabled = false
+	cfg.Pprof.Enabled = true
+	cfg.Pprof.Listen = "127.0.0.1:9091"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateAcceptsLocalhostPprofListen(t *testing.T) {
+	tests := []string{
+		"127.0.0.1:6060",
+		"[::1]:6060",
+		"localhost:6060",
+	}
+
+	for _, listen := range tests {
+		t.Run(listen, func(t *testing.T) {
+			cfg := validConfigForValidationTests()
+			cfg.Pprof.Enabled = true
+			cfg.Pprof.Listen = listen
+
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsPprofConfig(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+metrics:
+  listen: ":9090"
+pprof:
+  enabled: true
+  listen: "127.0.0.1:6060"
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Pprof.Enabled {
+		t.Fatal("pprof enabled = false, want true")
+	}
+	if cfg.Pprof.Listen != "127.0.0.1:6060" {
+		t.Fatalf("pprof listen = %q, want %q", cfg.Pprof.Listen, "127.0.0.1:6060")
+	}
+}
+
 func TestLoadRejectsMetricsListenEqualToProxyListen(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":9090"
@@ -1712,5 +1863,30 @@ func TestExampleConfigIncludesDiscoverySection(t *testing.T) {
 	}
 	if len(cfg.Discovery.EC2) != 0 {
 		t.Fatalf("example config should keep ec2 discovery disabled for local runs, got %d providers", len(cfg.Discovery.EC2))
+	}
+}
+
+func validConfigForValidationTests() Config {
+	return Config{
+		Proxy: ProxyConfig{
+			Listen:      ":3128",
+			Enforcement: EnforcementEnforce,
+			IdleTimeout: defaultProxyIdleTTL,
+		},
+		Admin: AdminConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:9091",
+			Token:   "secret-token",
+		},
+		Metrics: MetricsConfig{
+			Listen: "127.0.0.1:9090",
+		},
+		DNS: DNSConfig{
+			CacheTTL: defaultDNSCacheTTL,
+			Timeout:  defaultDNSTimeout,
+		},
+		Shutdown: ShutdownConfig{
+			GracePeriod: defaultGracePeriod,
+		},
 	}
 }

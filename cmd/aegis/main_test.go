@@ -343,7 +343,7 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 		return fakeHandlerProvider{handler: http.NewServeMux()}
 	}
 
-	_, _, _, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy:   config.ProxyConfig{Listen: ":8080"},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
@@ -376,7 +376,7 @@ func TestBuildServersInjectsIdentityResolverIntoProxy(t *testing.T) {
 func TestBuildServersCreatesAdminServerOnlyWhenEnabled(t *testing.T) {
 	stubRuntimeKubernetesProvider(t)
 
-	_, _, adminSrv, _, err := buildServers(context.Background(), config.Config{
+	_, _, adminSrv, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy:   config.ProxyConfig{Listen: ":8080"},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Admin: config.AdminConfig{
@@ -402,7 +402,7 @@ func TestBuildServersCreatesAdminServerOnlyWhenEnabled(t *testing.T) {
 		t.Fatal("expected admin server when admin is enabled")
 	}
 
-	_, _, adminSrv, _, err = buildServers(context.Background(), config.Config{
+	_, _, adminSrv, _, _, err = buildServers(context.Background(), config.Config{
 		Proxy:   config.ProxyConfig{Listen: ":8080"},
 		Metrics: config.MetricsConfig{Listen: ":9090"},
 		Policies: []config.PolicyConfig{{
@@ -422,6 +422,88 @@ func TestBuildServersCreatesAdminServerOnlyWhenEnabled(t *testing.T) {
 	if adminSrv != nil {
 		t.Fatal("expected no admin server when admin is disabled")
 	}
+}
+
+func TestBuildServersIncludesPprofWhenEnabled(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
+
+	_, _, _, pprofSrv, _, err := buildServers(context.Background(), config.Config{
+		Proxy:   config.ProxyConfig{Listen: ":8080"},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Pprof: config.PprofConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:6060",
+		},
+		Policies: []config.PolicyConfig{{
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+		Discovery: runtimeTestKubernetesDiscovery(),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServers() error = %v", err)
+	}
+	if pprofSrv == nil {
+		t.Fatal("expected pprof server when pprof is enabled")
+	}
+	if got := pprofSrv.Addr; got != "127.0.0.1:6060" {
+		t.Fatalf("pprof server addr = %q, want %q", got, "127.0.0.1:6060")
+	}
+}
+
+func TestBuildServersOmitsPprofWhenDisabled(t *testing.T) {
+	stubRuntimeKubernetesProvider(t)
+
+	_, _, _, pprofSrv, _, err := buildServers(context.Background(), config.Config{
+		Proxy:   config.ProxyConfig{Listen: ":8080"},
+		Metrics: config.MetricsConfig{Listen: ":9090"},
+		Policies: []config.PolicyConfig{{
+			Name:     "allow-example",
+			Subjects: runtimeTestKubernetesSubjects(),
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{443},
+				TLS:   config.TLSRuleConfig{Mode: "passthrough"},
+			}},
+		}},
+		Discovery: runtimeTestKubernetesDiscovery(),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildServers() error = %v", err)
+	}
+	if pprofSrv != nil {
+		t.Fatal("expected no pprof server when pprof is disabled")
+	}
+}
+
+func TestBuildListenersCreatesPprofListenerWhenEnabled(t *testing.T) {
+	cfg := config.Config{
+		Proxy:   config.ProxyConfig{Listen: "127.0.0.1:0"},
+		Metrics: config.MetricsConfig{Listen: "127.0.0.1:0"},
+		Pprof: config.PprofConfig{
+			Enabled: true,
+			Listen:  "127.0.0.1:0",
+		},
+	}
+
+	proxyListener, metricsListener, adminListener, pprofListener, err := buildListeners(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()))
+	if err != nil {
+		t.Fatalf("buildListeners() error = %v", err)
+	}
+	defer proxyListener.Close()
+	defer metricsListener.Close()
+	if adminListener != nil {
+		t.Fatalf("expected no admin listener, got %v", adminListener.Addr())
+	}
+	if pprofListener == nil {
+		t.Fatal("expected pprof listener when pprof is enabled")
+	}
+	defer pprofListener.Close()
 }
 
 func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
@@ -473,7 +555,7 @@ func TestBuildServersInjectsMITMEngineIntoProxy(t *testing.T) {
 		return fakeHandlerProvider{handler: http.NewServeMux()}
 	}
 
-	_, _, _, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy: config.ProxyConfig{
 			Listen: ":8080",
 			CA: config.CAConfig{
@@ -534,7 +616,7 @@ func TestBuildServersFailsWhenMITMEngineLoadFails(t *testing.T) {
 		return nil, errors.New("bad ca")
 	}
 
-	_, _, _, _, err := buildServers(context.Background(), config.Config{
+	_, _, _, _, _, err := buildServers(context.Background(), config.Config{
 		Proxy: config.ProxyConfig{
 			Listen: ":8080",
 			CA: config.CAConfig{
@@ -754,6 +836,36 @@ func TestValidateReloadableConfigRejectsAdminListenerChange(t *testing.T) {
 	}
 	if got := err.Error(); got != "admin.listen cannot change during reload" {
 		t.Fatalf("error = %q, want %q", got, "admin.listen cannot change during reload")
+	}
+}
+
+func TestValidateReloadableConfigRejectsPprofEnablementChange(t *testing.T) {
+	current := testRuntimeConfig()
+	next := current
+	next.Pprof.Enabled = true
+	next.Pprof.Listen = "127.0.0.1:6060"
+
+	err := validateReloadableConfig(current, next)
+	if err == nil {
+		t.Fatal("expected validateReloadableConfig() to fail")
+	}
+	if got := err.Error(); got != "pprof.enabled cannot change during reload" {
+		t.Fatalf("error = %q, want %q", got, "pprof.enabled cannot change during reload")
+	}
+}
+
+func TestValidateReloadableConfigRejectsPprofListenerChange(t *testing.T) {
+	current := testRuntimeConfig()
+	current.Pprof = config.PprofConfig{Enabled: true, Listen: "127.0.0.1:6060"}
+	next := current
+	next.Pprof.Listen = "127.0.0.1:6061"
+
+	err := validateReloadableConfig(current, next)
+	if err == nil {
+		t.Fatal("expected validateReloadableConfig() to fail")
+	}
+	if got := err.Error(); got != "pprof.listen cannot change during reload" {
+		t.Fatalf("error = %q, want %q", got, "pprof.listen cannot change during reload")
 	}
 }
 

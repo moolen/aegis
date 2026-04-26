@@ -90,8 +90,12 @@ func runServe(args []string) int {
 	if cfg.Admin.Enabled {
 		adminHandler = appmetrics.NewAdminServer(cfg.Admin.Listen, runtime).Handler()
 	}
-	proxySrv, metricsSrv, adminSrv := newHTTPServers(cfg, reloadableHandler, metricsHandler, adminHandler)
-	proxyListener, metricsListener, adminListener, err := buildListeners(cfg, logger, m)
+	var pprofHandler http.Handler
+	if cfg.Pprof.Enabled {
+		pprofHandler = appmetrics.NewPprofServer(cfg.Pprof.Listen).Handler()
+	}
+	proxySrv, metricsSrv, adminSrv, pprofSrv := newHTTPServers(cfg, reloadableHandler, metricsHandler, adminHandler, pprofHandler)
+	proxyListener, metricsListener, adminListener, pprofListener, err := buildListeners(cfg, logger, m)
 	if err != nil {
 		logger.Error("build listeners failed", "error", err)
 		return 1
@@ -101,8 +105,11 @@ func runServe(args []string) int {
 	if adminListener != nil {
 		defer adminListener.Close()
 	}
+	if pprofListener != nil {
+		defer pprofListener.Close()
+	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	reloadCh := make(chan os.Signal, 1)
 	signal.Notify(reloadCh, syscall.SIGHUP)
 	defer signal.Stop(reloadCh)
@@ -112,12 +119,18 @@ func runServe(args []string) int {
 	if adminSrv != nil && adminListener != nil {
 		go serve(logger, "admin", adminSrv, adminListener, errCh)
 	}
-
-	if cfg.Admin.Enabled {
-		logger.Info("aegis started", "proxy_listen", cfg.Proxy.Listen, "metrics_listen", cfg.Metrics.Listen, "admin_listen", cfg.Admin.Listen)
-	} else {
-		logger.Info("aegis started", "proxy_listen", cfg.Proxy.Listen, "metrics_listen", cfg.Metrics.Listen)
+	if pprofSrv != nil && pprofListener != nil {
+		go serve(logger, "pprof", pprofSrv, pprofListener, errCh)
 	}
+
+	startAttrs := []any{"proxy_listen", cfg.Proxy.Listen, "metrics_listen", cfg.Metrics.Listen}
+	if cfg.Admin.Enabled {
+		startAttrs = append(startAttrs, "admin_listen", cfg.Admin.Listen)
+	}
+	if cfg.Pprof.Enabled {
+		startAttrs = append(startAttrs, "pprof_listen", cfg.Pprof.Listen)
+	}
+	logger.Info("aegis started", startAttrs...)
 
 	for {
 		select {
@@ -154,6 +167,11 @@ shutdown:
 			return 1
 		}
 	}
+	if pprofSrv != nil {
+		if err := shutdownServer(logger, "pprof", pprofSrv, shutdownCtx); err != nil {
+			return 1
+		}
+	}
 	drainResult := drainTracker.Shutdown(shutdownCtx)
 	logger.Info("aegis shutdown complete", "result", drainResult, "grace_period", runtime.ShutdownGracePeriod())
 
@@ -179,14 +197,14 @@ func shutdownServer(logger *slog.Logger, name string, srv *http.Server, ctx cont
 	return nil
 }
 
-func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, *http.Server, *http.Server, *appmetrics.Metrics, error) {
+func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (*http.Server, *http.Server, *http.Server, *http.Server, *appmetrics.Metrics, error) {
 	registry := prometheus.NewRegistry()
 	m := appmetrics.New(registry)
 	connectionLimiter := proxy.NewConnectionLimiter(logger, m)
 	enforcement := proxy.NewEnforcementOverrideController(logger)
 	deps, err := buildProxyDependencies(ctx, cfg, logger, m, proxy.NewDrainTracker(logger, m), connectionLimiter, enforcement)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	connectionLimiter.UpdateLimit(cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
 	proxyHandler := newProxyServer(deps)
@@ -195,9 +213,13 @@ func buildServers(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if cfg.Admin.Enabled {
 		adminHandler = appmetrics.NewAdminServer(cfg.Admin.Listen, nil).Handler()
 	}
+	var pprofHandler http.Handler
+	if cfg.Pprof.Enabled {
+		pprofHandler = appmetrics.NewPprofServer(cfg.Pprof.Listen).Handler()
+	}
 
-	proxySrv, metricsSrv, adminSrv := newHTTPServers(cfg, proxyHandler.Handler(), metricsHandler.Handler(), adminHandler)
-	return proxySrv, metricsSrv, adminSrv, m, nil
+	proxySrv, metricsSrv, adminSrv, pprofSrv := newHTTPServers(cfg, proxyHandler.Handler(), metricsHandler.Handler(), adminHandler, pprofHandler)
+	return proxySrv, metricsSrv, adminSrv, pprofSrv, m, nil
 }
 
 func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics, drainTracker *proxy.DrainTracker, connectionLimiter *proxy.ConnectionLimiter, enforcement *proxy.EnforcementOverrideController) (proxy.Dependencies, error) {
@@ -287,12 +309,20 @@ func buildUpstreamTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
-func newHTTPServers(cfg config.Config, proxyHandler http.Handler, metricsHandler http.Handler, adminHandler http.Handler) (*http.Server, *http.Server, *http.Server) {
+func newHTTPServers(cfg config.Config, proxyHandler http.Handler, metricsHandler http.Handler, adminHandler http.Handler, pprofHandler http.Handler) (*http.Server, *http.Server, *http.Server, *http.Server) {
 	var adminSrv *http.Server
 	if adminHandler != nil {
 		adminSrv = &http.Server{
 			Addr:              cfg.Admin.Listen,
 			Handler:           adminHandler,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+	}
+	var pprofSrv *http.Server
+	if pprofHandler != nil {
+		pprofSrv = &http.Server{
+			Addr:              cfg.Pprof.Listen,
+			Handler:           pprofHandler,
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 	}
@@ -304,13 +334,13 @@ func newHTTPServers(cfg config.Config, proxyHandler http.Handler, metricsHandler
 			Addr:              cfg.Metrics.Listen,
 			Handler:           metricsHandler,
 			ReadHeaderTimeout: 5 * time.Second,
-		}, adminSrv
+		}, adminSrv, pprofSrv
 }
 
-func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics) (net.Listener, net.Listener, net.Listener, error) {
+func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metrics) (net.Listener, net.Listener, net.Listener, net.Listener, error) {
 	proxyListener, err := listen("tcp", cfg.Proxy.Listen)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("listen proxy: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("listen proxy: %w", err)
 	}
 
 	if cfg.Proxy.ProxyProtocol.Enabled {
@@ -321,7 +351,7 @@ func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metric
 		trustedCIDRs, err := parseTrustedProxyProtocolCIDRs(cfg.Proxy.ProxyProtocol.TrustedCIDRs)
 		if err != nil {
 			proxyListener.Close()
-			return nil, nil, nil, fmt.Errorf("parse proxy protocol trusted CIDRs: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("parse proxy protocol trusted CIDRs: %w", err)
 		}
 		proxyListener = proxy.NewProxyProtocolListener(proxyListener, proxy.ProxyProtocolListenerConfig{
 			HeaderTimeout: headerTimeout,
@@ -334,7 +364,7 @@ func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metric
 	metricsListener, err := listen("tcp", cfg.Metrics.Listen)
 	if err != nil {
 		proxyListener.Close()
-		return nil, nil, nil, fmt.Errorf("listen metrics: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("listen metrics: %w", err)
 	}
 
 	var adminListener net.Listener
@@ -343,11 +373,24 @@ func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metric
 		if err != nil {
 			proxyListener.Close()
 			metricsListener.Close()
-			return nil, nil, nil, fmt.Errorf("listen admin: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("listen admin: %w", err)
 		}
 	}
 
-	return proxyListener, metricsListener, adminListener, nil
+	var pprofListener net.Listener
+	if cfg.Pprof.Enabled {
+		pprofListener, err = listen("tcp", cfg.Pprof.Listen)
+		if err != nil {
+			proxyListener.Close()
+			metricsListener.Close()
+			if adminListener != nil {
+				adminListener.Close()
+			}
+			return nil, nil, nil, nil, fmt.Errorf("listen pprof: %w", err)
+		}
+	}
+
+	return proxyListener, metricsListener, adminListener, pprofListener, nil
 }
 
 func parseTrustedProxyProtocolCIDRs(values []string) ([]netip.Prefix, error) {

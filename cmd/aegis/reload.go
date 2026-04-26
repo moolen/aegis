@@ -483,6 +483,12 @@ func validateReloadableConfig(current config.Config, next config.Config) error {
 	if current.Metrics.Listen != next.Metrics.Listen {
 		return fmt.Errorf("metrics.listen cannot change during reload")
 	}
+	if current.Pprof.Enabled != next.Pprof.Enabled {
+		return fmt.Errorf("pprof.enabled cannot change during reload")
+	}
+	if current.Pprof.Listen != next.Pprof.Listen {
+		return fmt.Errorf("pprof.listen cannot change during reload")
+	}
 	if current.Admin.Enabled != next.Admin.Enabled {
 		return fmt.Errorf("admin.enabled cannot change during reload")
 	}
