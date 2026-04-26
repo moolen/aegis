@@ -33,6 +33,7 @@ config:
     # proxyProtocol:
     #   enabled: true
     #   headerTimeout: 2s
+    #   trustedCIDRs: ["10.0.0.0/8"]
     # proxy.ca is always the active issuing CA for forged MITM leaf
     # certificates. Keep previous trust roots under proxy.ca.additional during
     # rotation windows so Aegis can report the full CA set and distinguish
@@ -43,6 +44,8 @@ config:
     #   additional:
     #     - certFile: /etc/aegis/ca/old-ca.crt
     #       keyFile: /etc/aegis/ca/old-ca.key
+    #   cache:
+    #     maxEntries: 10000
   admin: {}
   # admin:
   #   token: replace-me

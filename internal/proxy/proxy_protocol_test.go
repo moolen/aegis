@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ func TestProxyProtocolListenerOverridesRemoteAddr(t *testing.T) {
 		HeaderTimeout: time.Second,
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Metrics:       m,
+		TrustedCIDRs:  []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
 	})
 
 	seenRemoteAddr := make(chan string, 1)
@@ -92,6 +94,7 @@ func TestProxyProtocolListenerRejectsInvalidHeaderAndContinues(t *testing.T) {
 		HeaderTimeout: 200 * time.Millisecond,
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Metrics:       m,
+		TrustedCIDRs:  []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
 	})
 
 	var hits atomic.Int32
@@ -153,6 +156,63 @@ func TestProxyProtocolListenerRejectsInvalidHeaderAndContinues(t *testing.T) {
 	}
 	if got := counterValue(t, reg, "aegis_proxy_protocol_connections_total", map[string]string{"result": "accepted"}); got != 1 {
 		t.Fatalf("accepted metric = %v, want 1", got)
+	}
+}
+
+func TestProxyProtocolListenerRejectsUntrustedPeer(t *testing.T) {
+	baseListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer baseListener.Close()
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	trustedPrefix := netip.MustParsePrefix("10.0.0.0/8")
+	listener := NewProxyProtocolListener(baseListener, ProxyProtocolListenerConfig{
+		HeaderTimeout: time.Second,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Metrics:       m,
+		TrustedCIDRs:  []netip.Prefix{trustedPrefix},
+	})
+
+	var hits atomic.Int32
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	}
+	go func() {
+		_ = srv.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	conn, err := net.Dial("tcp", baseListener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	header := mustProxyProtocolV2Header(t, net.ParseIP("203.0.113.9"), 4567, net.ParseIP("127.0.0.1"), listener.Addr().(*net.TCPAddr).Port)
+	if _, err := conn.Write(append(header, []byte("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")...)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 1)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected untrusted proxy protocol connection to close")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("hits = %d, want 0", hits.Load())
+	}
+	if got := counterValue(t, reg, "aegis_proxy_protocol_connections_total", map[string]string{"result": "untrusted"}); got != 1 {
+		t.Fatalf("untrusted metric = %v, want 1", got)
 	}
 }
 

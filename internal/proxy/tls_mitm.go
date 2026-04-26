@@ -21,6 +21,7 @@ import (
 const (
 	defaultMITMCertificateTTL  = 24 * time.Hour
 	defaultMITMCertificateSkew = 1 * time.Hour
+	defaultMITMCacheMaxEntries = 10000
 )
 
 type MITMEngine struct {
@@ -32,6 +33,7 @@ type MITMEngine struct {
 	mu         sync.Mutex
 	cache      map[string]cachedMITMCertificate
 	validFor   time.Duration
+	maxEntries int
 }
 
 type mitmCARole string
@@ -57,6 +59,7 @@ type MITMCAStatus struct {
 type cachedMITMCertificate struct {
 	certificate *tls.Certificate
 	expiresAt   time.Time
+	lastUsedAt  time.Time
 }
 
 func NewMITMEngineFromFiles(certFile string, keyFile string, logger *slog.Logger) (*MITMEngine, error) {
@@ -84,11 +87,22 @@ func NewMITMEngine(ca tls.Certificate, logger *slog.Logger) (*MITMEngine, error)
 			leaf:        caLeaf,
 			signer:      &ca,
 		},
-		logger:   logger,
-		now:      time.Now,
-		cache:    make(map[string]cachedMITMCertificate),
-		validFor: defaultMITMCertificateTTL,
+		logger:     logger,
+		now:        time.Now,
+		cache:      make(map[string]cachedMITMCertificate),
+		validFor:   defaultMITMCertificateTTL,
+		maxEntries: defaultMITMCacheMaxEntries,
 	}, nil
+}
+
+func (e *MITMEngine) SetCacheMaxEntries(maxEntries int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if maxEntries <= 0 {
+		maxEntries = defaultMITMCacheMaxEntries
+	}
+	e.maxEntries = maxEntries
 }
 
 func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, string, error) {
@@ -103,12 +117,16 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, str
 
 	if cached, ok := e.cache[serverName]; ok {
 		if now.Before(cached.expiresAt) {
+			cached.lastUsedAt = now
+			e.cache[serverName] = cached
 			return cached.certificate, "cache_hit", nil
 		}
 		delete(e.cache, serverName)
 		e.recordCacheEntriesLocked()
 		e.recordCacheEviction("expired", 1)
 	}
+
+	e.evictCapacityLocked(now)
 
 	certificate, err := e.generateCertificate(serverName, now)
 	if err != nil {
@@ -118,6 +136,7 @@ func (e *MITMEngine) CertificateForSNI(serverName string) (*tls.Certificate, str
 	e.cache[serverName] = cachedMITMCertificate{
 		certificate: certificate,
 		expiresAt:   certificate.Leaf.NotAfter,
+		lastUsedAt:  now,
 	}
 	e.recordCacheEntriesLocked()
 	e.logger.Debug("issued mitm certificate", "server_name", serverName, "not_after", certificate.Leaf.NotAfter)
@@ -250,6 +269,36 @@ func (e *MITMEngine) recordCacheEviction(reason string, count int) {
 	}
 
 	e.metrics.MITMCertificateCacheEvictions.WithLabelValues(reason).Add(float64(count))
+}
+
+func (e *MITMEngine) evictCapacityLocked(now time.Time) {
+	if e.maxEntries <= 0 || len(e.cache) < e.maxEntries {
+		return
+	}
+
+	var (
+		evictKey      string
+		evictLastUsed time.Time
+		found         bool
+	)
+	for key, cached := range e.cache {
+		lastUsed := cached.lastUsedAt
+		if lastUsed.IsZero() {
+			lastUsed = now
+		}
+		if !found || lastUsed.Before(evictLastUsed) {
+			evictKey = key
+			evictLastUsed = lastUsed
+			found = true
+		}
+	}
+	if !found {
+		return
+	}
+
+	delete(e.cache, evictKey)
+	e.recordCacheEntriesLocked()
+	e.recordCacheEviction("capacity", 1)
 }
 
 func parseMITMCA(ca tls.Certificate) (*x509.Certificate, string, error) {

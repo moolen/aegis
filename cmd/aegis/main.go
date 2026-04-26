@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -197,6 +198,7 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		if err != nil {
 			return proxy.Dependencies{}, fmt.Errorf("load mitm engine: %w", err)
 		}
+		mitmEngine.SetCacheMaxEntries(cfg.Proxy.CA.Cache.MaxEntries)
 		for i, additional := range cfg.Proxy.CA.Additional {
 			if err := mitmEngine.AddAdditionalCAFromFiles(additional.CertFile, additional.KeyFile); err != nil {
 				return proxy.Dependencies{}, fmt.Errorf("load proxy.ca.additional[%d]: %w", i, err)
@@ -214,6 +216,7 @@ func buildProxyDependencies(ctx context.Context, cfg config.Config, logger *slog
 		DestinationGuard:      destinationGuard,
 		DrainTracker:          drainTracker,
 		ConnectionLimiter:     connectionLimiter,
+		UpstreamHTTPTransport: proxy.NewUpstreamHTTPTransport(),
 		EnforcementMode:       cfg.Proxy.Enforcement,
 		Enforcement:           enforcement,
 		UnknownIdentityPolicy: cfg.Proxy.UnknownIdentityPolicy,
@@ -248,10 +251,16 @@ func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metric
 		if cfg.Proxy.ProxyProtocol.HeaderTimeout != nil {
 			headerTimeout = *cfg.Proxy.ProxyProtocol.HeaderTimeout
 		}
+		trustedCIDRs, err := parseTrustedProxyProtocolCIDRs(cfg.Proxy.ProxyProtocol.TrustedCIDRs)
+		if err != nil {
+			proxyListener.Close()
+			return nil, nil, fmt.Errorf("parse proxy protocol trusted CIDRs: %w", err)
+		}
 		proxyListener = proxy.NewProxyProtocolListener(proxyListener, proxy.ProxyProtocolListenerConfig{
 			HeaderTimeout: headerTimeout,
 			Logger:        logger,
 			Metrics:       m,
+			TrustedCIDRs:  trustedCIDRs,
 		})
 	}
 
@@ -262,6 +271,18 @@ func buildListeners(cfg config.Config, logger *slog.Logger, m *appmetrics.Metric
 	}
 
 	return proxyListener, metricsListener, nil
+}
+
+func parseTrustedProxyProtocolCIDRs(values []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
 }
 
 func buildIdentityResolver(ctx context.Context, cfg config.DiscoveryConfig, logger *slog.Logger, m *appmetrics.Metrics) (proxy.IdentityResolver, error) {

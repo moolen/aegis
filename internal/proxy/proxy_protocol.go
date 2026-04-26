@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/moolen/aegis/internal/metrics"
@@ -42,6 +43,7 @@ type ProxyProtocolListenerConfig struct {
 	HeaderTimeout time.Duration
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics
+	TrustedCIDRs  []netip.Prefix
 }
 
 func NewProxyProtocolListener(inner net.Listener, cfg ProxyProtocolListenerConfig) net.Listener {
@@ -97,6 +99,15 @@ func (l *proxyProtocolListener) acceptProxyConn(conn net.Conn) (net.Conn, bool) 
 		return nil, false
 	}
 
+	if !l.isTrustedPeer(conn.RemoteAddr()) {
+		if l.cfg.Metrics != nil {
+			l.cfg.Metrics.ProxyProtocolConnectionsTotal.WithLabelValues("untrusted").Inc()
+		}
+		l.cfg.Logger.Warn("proxy protocol peer rejected", "remote_addr", conn.RemoteAddr().String(), "result", "untrusted")
+		conn.Close()
+		return nil, false
+	}
+
 	if header.remoteAddr == nil {
 		if l.cfg.Metrics != nil {
 			l.cfg.Metrics.ProxyProtocolConnectionsTotal.WithLabelValues("local").Inc()
@@ -113,6 +124,28 @@ func (l *proxyProtocolListener) acceptProxyConn(conn net.Conn) (net.Conn, bool) 
 		Conn:       conn,
 		remoteAddr: header.remoteAddr,
 	}, true
+}
+
+func (l *proxyProtocolListener) isTrustedPeer(addr net.Addr) bool {
+	if len(l.cfg.TrustedCIDRs) == 0 {
+		return false
+	}
+
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok || tcpAddr.IP == nil {
+		return false
+	}
+	ip, ok := netip.AddrFromSlice(tcpAddr.IP)
+	if !ok {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, prefix := range l.cfg.TrustedCIDRs {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 type proxyProtocolConn struct {

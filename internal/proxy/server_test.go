@@ -191,6 +191,103 @@ func TestProxyAllowsHTTPRequestsWhenPolicyMatches(t *testing.T) {
 	}
 }
 
+func TestProxyReusesUpstreamHTTPConnectionAcrossRequests(t *testing.T) {
+	var upstreamConnections atomic.Int32
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			upstreamConnections.Add(1)
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"example.com": {net.ParseIP("127.0.0.1")}},
+		},
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: mustPolicyEngine(t, []config.PolicyConfig{{
+			Name:             "allow-web",
+			IdentitySelector: config.IdentitySelectorConfig{MatchLabels: map[string]string{"app": "web"}},
+			Egress: []config.EgressRuleConfig{{
+				FQDN:  "example.com",
+				Ports: []int{mustPort(t, upstreamURL.Host)},
+				TLS:   config.TLSRuleConfig{Mode: "mitm"},
+				HTTP: &config.HTTPRuleConfig{
+					AllowedMethods: []string{"GET"},
+					AllowedPaths:   []string{"/allowed"},
+				},
+			}},
+		}}),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler())
+	defer proxyServer.Close()
+
+	targetURL := fmt.Sprintf("http://example.com%s/allowed", hostPortSuffix(upstreamURL.Host))
+	for i := 0; i < 3; i++ {
+		resp, err := proxiedRequest(proxyServer.URL, http.MethodGet, targetURL, nil)
+		if err != nil {
+			t.Fatalf("proxiedRequest() error = %v", err)
+		}
+		if resp.StatusCode != http.StatusNoContent {
+			resp.Body.Close()
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+		}
+		resp.Body.Close()
+	}
+
+	if got := upstreamConnections.Load(); got != 1 {
+		t.Fatalf("upstreamConnections = %d, want 1", got)
+	}
+}
+
+func TestRemoveHopByHopHeadersRemovesConnectionTokens(t *testing.T) {
+	header := http.Header{
+		"Connection":        []string{"Keep-Alive, Foo, Bar"},
+		"Proxy-Connection":  []string{"close"},
+		"Keep-Alive":        []string{"timeout=5"},
+		"Foo":               []string{"remove-me"},
+		"Bar":               []string{"remove-me-too"},
+		"X-End-To-End":      []string{"keep-me"},
+		"Transfer-Encoding": []string{"chunked"},
+	}
+
+	removeHopByHopHeaders(header)
+
+	if got := header.Values("Foo"); len(got) != 0 {
+		t.Fatalf("Foo header still present: %#v", got)
+	}
+	if got := header.Values("Bar"); len(got) != 0 {
+		t.Fatalf("Bar header still present: %#v", got)
+	}
+	if got := header.Values("Connection"); len(got) != 0 {
+		t.Fatalf("Connection header still present: %#v", got)
+	}
+	if got := header.Values("Proxy-Connection"); len(got) != 0 {
+		t.Fatalf("Proxy-Connection header still present: %#v", got)
+	}
+	if got := header.Values("Keep-Alive"); len(got) != 0 {
+		t.Fatalf("Keep-Alive header still present: %#v", got)
+	}
+	if got := header.Values("Transfer-Encoding"); len(got) != 0 {
+		t.Fatalf("Transfer-Encoding header still present: %#v", got)
+	}
+	if got := header.Values("X-End-To-End"); len(got) != 1 || got[0] != "keep-me" {
+		t.Fatalf("X-End-To-End header = %#v, want [keep-me]", got)
+	}
+}
+
 func TestProxyConnectionLimiterRejectsSecondConcurrentHTTPRequest(t *testing.T) {
 	upstreamStarted := make(chan struct{}, 1)
 	releaseUpstream := make(chan struct{})

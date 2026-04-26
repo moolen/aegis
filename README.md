@@ -136,20 +136,27 @@ target AWS `region`, and define the tag filters that scope instance discovery.
 To enable TLS MITM for `CONNECT`, provide a proxy CA certificate and key
 through `proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs
 behind an NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled`
-and configure the balancer to emit Proxy Protocol v2 on the proxy port. To
-reload policy or discovery changes without restarting the process, send
-`SIGHUP` to Aegis.
+and configure the balancer to emit Proxy Protocol v2 on the proxy port; when
+PPv2 is enabled, `proxy.proxyProtocol.trustedCIDRs` must restrict which direct
+peers are allowed to supply forwarded source addresses. To reload policy or
+discovery changes without restarting the process, send `SIGHUP` to Aegis.
 When rotating trust, keep the new active issuer under `proxy.ca` and keep the
 old CA loaded under `proxy.ca.additional[]`, for example:
 
 ```yaml
 proxy:
+  proxyProtocol:
+    enabled: true
+    trustedCIDRs:
+      - "10.0.0.0/8"
   ca:
     certFile: /etc/aegis/ca/new-ca.crt
     keyFile: /etc/aegis/ca/new-ca.key
     additional:
       - certFile: /etc/aegis/ca/old-ca.crt
         keyFile: /etc/aegis/ca/old-ca.key
+    cache:
+      maxEntries: 10000
 ```
 
 A CIDR-only policy is also valid when you want to scope rules directly to

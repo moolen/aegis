@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,7 @@ type runtimeGeneration struct {
 	cfg              config.Config
 	cancel           context.CancelFunc
 	mitm             *proxy.MITMEngine
+	upstreamHTTP     *http.Transport
 	readyChecker     appmetrics.ReadyChecker
 	identityResolver proxy.IdentityResolver
 	policyEngine     proxy.PolicyEngine
@@ -102,6 +104,9 @@ func (m *runtimeManager) Close() {
 		m.current.cancel()
 		m.current.cancel = nil
 	}
+	if m.current.upstreamHTTP != nil {
+		m.current.upstreamHTTP.CloseIdleConnections()
+	}
 }
 
 func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) error {
@@ -134,10 +139,14 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	if m.current.cancel != nil {
 		m.current.cancel()
 	}
+	if m.current.upstreamHTTP != nil {
+		m.current.upstreamHTTP.CloseIdleConnections()
+	}
 	m.current = runtimeGeneration{
 		cfg:              cfg,
 		cancel:           cancel,
 		mitm:             deps.MITM,
+		upstreamHTTP:     deps.UpstreamHTTPTransport,
 		identityResolver: deps.IdentityResolver,
 		policyEngine:     deps.PolicyEngine,
 	}
@@ -477,6 +486,9 @@ func validateReloadableConfig(current config.Config, next config.Config) error {
 	if proxyProtocolTimeoutForConfig(current.Proxy.ProxyProtocol) != proxyProtocolTimeoutForConfig(next.Proxy.ProxyProtocol) {
 		return fmt.Errorf("proxy.proxyProtocol.headerTimeout cannot change during reload")
 	}
+	if !slices.Equal(proxyProtocolTrustedCIDRsForConfig(current.Proxy.ProxyProtocol), proxyProtocolTrustedCIDRsForConfig(next.Proxy.ProxyProtocol)) {
+		return fmt.Errorf("proxy.proxyProtocol.trustedCIDRs cannot change during reload")
+	}
 	return nil
 }
 
@@ -485,6 +497,23 @@ func proxyProtocolTimeoutForConfig(cfg config.ProxyProtocolConfig) int64 {
 		return proxyProtocolHeaderTimeout.Nanoseconds()
 	}
 	return cfg.HeaderTimeout.Nanoseconds()
+}
+
+func proxyProtocolTrustedCIDRsForConfig(cfg config.ProxyProtocolConfig) []string {
+	if len(cfg.TrustedCIDRs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.TrustedCIDRs))
+	for _, value := range cfg.TrustedCIDRs {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			out = append(out, value)
+			continue
+		}
+		out = append(out, prefix.String())
+	}
+	slices.Sort(out)
+	return out
 }
 
 func enforcementStatusForConfig(cfg config.Config, controller *proxy.EnforcementOverrideController) appmetrics.EnforcementStatus {

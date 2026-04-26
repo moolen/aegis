@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,7 @@ type Dependencies struct {
 	DestinationGuard      *DestinationGuard
 	DrainTracker          *DrainTracker
 	ConnectionLimiter     *ConnectionLimiter
+	UpstreamHTTPTransport *http.Transport
 	EnforcementMode       string
 	Enforcement           *EnforcementOverrideController
 	UnknownIdentityPolicy string
@@ -70,7 +72,20 @@ func NewServer(deps Dependencies) *Server {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	if deps.UpstreamHTTPTransport == nil {
+		deps.UpstreamHTTPTransport = NewUpstreamHTTPTransport()
+	}
 	return &Server{deps: deps}
+}
+
+func NewUpstreamHTTPTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.MaxIdleConns = 1024
+	transport.MaxIdleConnsPerHost = 256
+	transport.MaxConnsPerHost = 0
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
 }
 
 func (s *Server) Handler() http.Handler {
@@ -168,18 +183,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	outReq := r.Clone(r.Context())
 	outReq.RequestURI = ""
 	outReq.Host = r.Host
+	outReq.URL.Host = targetAddr
 	removeHopByHopHeaders(outReq.Header)
 
-	transport := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			dialer := &net.Dialer{}
-			return dialer.DialContext(ctx, network, targetAddr)
-		},
-	}
-	defer transport.CloseIdleConnections()
-
-	resp, err := transport.RoundTrip(outReq)
+	resp, err := s.deps.UpstreamHTTPTransport.RoundTrip(outReq)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream round trip failed: %v", err), "dial")
 		return
@@ -756,6 +763,12 @@ func copyHeader(dst, src http.Header) {
 }
 
 func removeHopByHopHeaders(header http.Header) {
+	for _, key := range connectionHeaderTokens(header.Values("Connection")) {
+		header.Del(key)
+	}
+	for _, key := range connectionHeaderTokens(header.Values("Proxy-Connection")) {
+		header.Del(key)
+	}
 	for _, key := range []string{
 		"Connection",
 		"Proxy-Connection",
@@ -769,6 +782,24 @@ func removeHopByHopHeaders(header http.Header) {
 	} {
 		header.Del(key)
 	}
+}
+
+func connectionHeaderTokens(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	tokens := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			token = textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(token))
+			if token == "" {
+				continue
+			}
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
 }
 
 type replayConn struct {

@@ -45,6 +45,7 @@ type CAConfig struct {
 	CertFile   string         `yaml:"certFile"`
 	KeyFile    string         `yaml:"keyFile"`
 	Additional []AdditionalCA `yaml:"additional"`
+	Cache      CACacheConfig  `yaml:"cache"`
 }
 
 type AdditionalCA struct {
@@ -52,9 +53,14 @@ type AdditionalCA struct {
 	KeyFile  string `yaml:"keyFile"`
 }
 
+type CACacheConfig struct {
+	MaxEntries int `yaml:"maxEntries"`
+}
+
 type ProxyProtocolConfig struct {
 	Enabled       bool           `yaml:"enabled"`
 	HeaderTimeout *time.Duration `yaml:"headerTimeout"`
+	TrustedCIDRs  []string       `yaml:"trustedCIDRs"`
 }
 
 type ConnectionLimitsConfig struct {
@@ -258,8 +264,22 @@ func (c Config) Validate() error {
 	if c.Proxy.ProxyProtocol.HeaderTimeout != nil && *c.Proxy.ProxyProtocol.HeaderTimeout <= 0 {
 		return fmt.Errorf("proxy.proxyProtocol.headerTimeout must be greater than zero")
 	}
+	if c.Proxy.ProxyProtocol.Enabled && len(c.Proxy.ProxyProtocol.TrustedCIDRs) == 0 {
+		return fmt.Errorf("proxy.proxyProtocol.trustedCIDRs must contain at least one CIDR when proxyProtocol is enabled")
+	}
+	for i, cidr := range c.Proxy.ProxyProtocol.TrustedCIDRs {
+		if strings.TrimSpace(cidr) == "" {
+			return fmt.Errorf("proxy.proxyProtocol.trustedCIDRs[%d] must not be empty", i)
+		}
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return fmt.Errorf("proxy.proxyProtocol.trustedCIDRs[%d] must be a valid CIDR: %w", i, err)
+		}
+	}
 	if c.Proxy.ConnectionLimits.MaxConcurrentPerIdentity < 0 {
 		return fmt.Errorf("proxy.connectionLimits.maxConcurrentPerIdentity must be greater than or equal to zero")
+	}
+	if c.Proxy.CA.Cache.MaxEntries < 0 {
+		return fmt.Errorf("proxy.ca.cache.maxEntries must be greater than or equal to zero")
 	}
 	if c.Metrics.Listen == "" {
 		return fmt.Errorf("metrics.listen is required")

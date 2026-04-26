@@ -239,6 +239,64 @@ func TestMITMEngineReportsIssuerAndCompanionFingerprints(t *testing.T) {
 	}
 }
 
+func TestMITMEngineEvictsLeastRecentlyUsedCertificatesWhenCacheIsFull(t *testing.T) {
+	ca := newMITMTestCA(t)
+	engine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewMITMEngine() error = %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	engine.AttachMetrics(m)
+	engine.SetCacheMaxEntries(2)
+
+	first, result, err := engine.CertificateForSNI("one.internal")
+	if err != nil {
+		t.Fatalf("CertificateForSNI(one) error = %v", err)
+	}
+	if result != "issued" {
+		t.Fatalf("result(one) = %q, want issued", result)
+	}
+	if _, result, err := engine.CertificateForSNI("two.internal"); err != nil {
+		t.Fatalf("CertificateForSNI(two) error = %v", err)
+	} else if result != "issued" {
+		t.Fatalf("result(two) = %q, want issued", result)
+	}
+	if _, result, err := engine.CertificateForSNI("one.internal"); err != nil {
+		t.Fatalf("CertificateForSNI(one cache hit) error = %v", err)
+	} else if result != "cache_hit" {
+		t.Fatalf("result(one cache hit) = %q, want cache_hit", result)
+	}
+	if _, result, err := engine.CertificateForSNI("three.internal"); err != nil {
+		t.Fatalf("CertificateForSNI(three) error = %v", err)
+	} else if result != "issued" {
+		t.Fatalf("result(three) = %q, want issued", result)
+	}
+
+	if got := engine.CacheEntries(); got != 2 {
+		t.Fatalf("CacheEntries() = %d, want 2", got)
+	}
+	again, result, err := engine.CertificateForSNI("one.internal")
+	if err != nil {
+		t.Fatalf("CertificateForSNI(one final) error = %v", err)
+	}
+	if result != "cache_hit" {
+		t.Fatalf("result(one final) = %q, want cache_hit", result)
+	}
+	if first != again {
+		t.Fatal("expected most-recently-used certificate to stay cached")
+	}
+	if _, result, err := engine.CertificateForSNI("two.internal"); err != nil {
+		t.Fatalf("CertificateForSNI(two final) error = %v", err)
+	} else if result != "issued" {
+		t.Fatalf("result(two final) = %q, want issued after eviction", result)
+	}
+	if got := counterValue(t, reg, "aegis_mitm_certificate_cache_evictions_total", map[string]string{"reason": "capacity"}); got != 2 {
+		t.Fatalf("capacity eviction metric = %v, want 2", got)
+	}
+}
+
 func TestMITMEngineRejectsInvalidAdditionalCA(t *testing.T) {
 	primary := newMITMTestCA(t)
 	leafOnly := primary.issueServerCertificate(t, "not-a-ca.internal")

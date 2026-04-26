@@ -59,7 +59,51 @@ func TestLoadRejectsInvalidProxyProtocolHeaderTimeout(t *testing.T) {
   listen: ":3128"
   proxyProtocol:
     enabled: true
+    trustedCIDRs: ["127.0.0.0/8"]
     headerTimeout: 0s
+metrics:
+  listen: ":9090"
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsProxyProtocolWithoutTrustedCIDRs(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  proxyProtocol:
+    enabled: true
+metrics:
+  listen: ":9090"
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsInvalidProxyProtocolTrustedCIDR(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  proxyProtocol:
+    enabled: true
+    trustedCIDRs: ["not-a-cidr"]
+metrics:
+  listen: ":9090"
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestLoadRejectsNegativeMITMCacheMaxEntries(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+  ca:
+    certFile: /tmp/ca.crt
+    keyFile: /tmp/ca.key
+    cache:
+      maxEntries: -1
 metrics:
   listen: ":9090"
 `)))
