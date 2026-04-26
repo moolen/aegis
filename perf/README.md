@@ -54,6 +54,11 @@ Use Kind targets when you need Helm-rendered deployment behavior, Kubernetes net
 
 Local runs build `bin/aegis` and the fixture helper on demand, then start fixture processes directly. Kind runs build/load an image, deploy the chart, and hit the proxy and metrics service through fixed Kind `NodePort` mappings instead of `kubectl port-forward`, so the benchmark path matches the deployed data path more closely under concurrency.
 
+The Kind MITM scenario now serves the in-cluster HTTPS upstream over HTTP/2 and
+restarts the Aegis Deployment after rotating the perf CA secret, so the
+deployed-shape MITM numbers reflect real end-to-end HTTP/2 multiplexing rather
+than stale trust material or an HTTP/1.1-only fixture.
+
 When iterating on perf, combine `KEEP_CLUSTER=1` with `SKIP_IMAGE_BUILD=1` after the first successful run to avoid paying the full cluster/image setup cost on every scenario.
 
 The Kind perf overlays intentionally use broad `subjects.cidrs` matches. Those

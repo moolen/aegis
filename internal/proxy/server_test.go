@@ -234,6 +234,40 @@ func TestNewUpstreamHTTPTransportSupportsHTTP2(t *testing.T) {
 	}
 }
 
+func TestPrepareOutboundRequestNormalizesEmptyBodyForReplay(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/path", http.NoBody)
+	req.Header.Set("Connection", "X-Test-Hop")
+	req.Header.Set("X-Test-Hop", "drop-me")
+
+	outReq := prepareOutboundRequest(req)
+	if outReq.Body != nil {
+		t.Fatalf("Body = %#v, want nil", outReq.Body)
+	}
+	if outReq.GetBody != nil {
+		t.Fatal("GetBody should be nil for replay-safe empty body")
+	}
+	if outReq.ContentLength != 0 {
+		t.Fatalf("ContentLength = %d, want 0", outReq.ContentLength)
+	}
+	if got := outReq.Header.Get("X-Test-Hop"); got != "" {
+		t.Fatalf("X-Test-Hop = %q, want empty", got)
+	}
+}
+
+func TestPrepareOutboundRequestPreservesStreamingBody(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "https://example.com/path", io.NopCloser(strings.NewReader("payload")))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+
+	outReq := prepareOutboundRequest(req)
+	if outReq.Body == nil {
+		t.Fatal("Body = nil, want preserved body")
+	}
+	if outReq.ContentLength != -1 {
+		t.Fatalf("ContentLength = %d, want -1", outReq.ContentLength)
+	}
+}
+
 func TestSharedUpstreamTransportReusesHTTP2Connection(t *testing.T) {
 	var (
 		mu    sync.Mutex

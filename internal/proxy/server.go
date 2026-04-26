@@ -199,12 +199,9 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	s.recordRequestDecision("http", "allow", decisionPolicyName(decision), reason)
 	s.logRequestDecision(auditLogLevel(audit), "http", "allow", reason, reqIdentity, host, port, decision, r.Method, requestPolicyPath(r), audit)
 
-	outReq := r.Clone(r.Context())
-	outReq.RequestURI = ""
+	outReq := prepareOutboundRequest(r)
 	outReq.Host = r.Host
 	outReq.URL.Host = targetAddr
-	outReq.Close = false
-	removeHopByHopHeaders(outReq.Header)
 
 	resp, err := s.deps.UpstreamHTTPTransport.RoundTrip(outReq)
 	if err != nil {
@@ -487,18 +484,41 @@ func (s *Server) handleMITMHTTPRequest(w http.ResponseWriter, req *http.Request,
 }
 
 func (s *Server) roundTripMITMRequest(req *http.Request, serverName string, port int) (*http.Response, error) {
-	outReq := req.Clone(req.Context())
-	outReq.RequestURI = ""
-	outReq.Close = false
-	outReq.URL = cloneRequestURL(req.URL)
+	outReq := prepareOutboundRequest(req)
 	outReq.URL.Scheme = "https"
 	outReq.URL.Host = net.JoinHostPort(serverName, strconv.Itoa(port))
 	if outReq.Host == "" {
 		outReq.Host = serverName
 	}
-	removeHopByHopHeaders(outReq.Header)
 
 	return s.deps.UpstreamHTTPTransport.RoundTrip(outReq)
+}
+
+func prepareOutboundRequest(req *http.Request) *http.Request {
+	outReq := req.Clone(req.Context())
+	outReq.RequestURI = ""
+	outReq.Close = false
+	outReq.URL = cloneRequestURL(req.URL)
+	removeHopByHopHeaders(outReq.Header)
+	if requestHasReplaySafeEmptyBody(req) {
+		outReq.Body = nil
+		outReq.GetBody = nil
+		outReq.ContentLength = 0
+	}
+	return outReq
+}
+
+func requestHasReplaySafeEmptyBody(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if req.ContentLength > 0 {
+		return false
+	}
+	if len(req.TransferEncoding) > 0 {
+		return false
+	}
+	return req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0
 }
 
 func (s *Server) handshakeClientMITM(clientConn net.Conn, clientReader *bufio.Reader, clientHello []byte, serverName string) (*tls.Conn, error) {

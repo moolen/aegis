@@ -54,10 +54,15 @@ The deployed-shape HTTP path is healthy at the tested VU levels:
 | CONNECT passthrough | 200 | 51,356 | 4.195 | 7.230 | 90.127 | 0.00% |
 | CONNECT MITM | 10 | 11,102 | 0.744 | 1.074 | 9.267 | 0.00% |
 | CONNECT MITM | 25 | 14,958 | 1.395 | 2.372 | 384.886 | 0.00% |
-| CONNECT MITM | 50 | 17,464 | 2.708 | 4.834 | 79.419 | 0.00% |
-| CONNECT MITM | 100 | 19,552 | 3.597 | 9.180 | 86.893 | 0.00% |
-| CONNECT MITM | 150 | 22,209 | 4.915 | 12.888 | 89.911 | 0.00% |
-| CONNECT MITM | 200 | 22,779 | 8.413 | 17.141 | 96.562 | 0.00% |
+| CONNECT MITM | 50 | 17,595 | 2.388 | 5.350 | 23.601 | 0.02% |
+| CONNECT MITM | 100 | 18,466 | 4.746 | 11.103 | 36.077 | 0.00% |
+| CONNECT MITM | 200 | 21,652 | 8.733 | 18.036 | 77.589 | 0.00% |
+| CONNECT MITM | 250 | 20,470 | 10.803 | 22.259 | 87.880 | 0.00% |
+| CONNECT MITM | 300 | 22,972 | 11.365 | 23.327 | 75.723 | 0.00% |
+| CONNECT MITM | 400 | 23,946 | 15.772 | 28.726 | 81.224 | 0.00% |
+| CONNECT MITM | 500 | 23,158 | 17.567 | 35.840 | 7074.320 | 0.14% |
+| CONNECT MITM | 600 | 20,539 | 19.457 | 39.870 | 15076.571 | 0.00% |
+| CONNECT MITM | 800 | 22,099 | 25.024 | 54.281 | 15080.460 | 0.00% |
 
 ### Kind Tunnel Status
 
@@ -70,11 +75,22 @@ were:
 - lowering normal allow-decision logs to `DEBUG`
 - bounding per-host upstream connections on the pooled transport
 
-With those changes, the deployed MITM path stays healthy through `200 VUs` on
-this single-node Kind shape. The next knee is between `200` and `300 VUs`:
-`300 VUs` still collapses with `dial tcp ... connect: cannot assign requested
-address`, which indicates the next limiter is upstream socket pressure rather
-than policy evaluation.
+With those changes, the deployed MITM path now exercises real client-side and
+upstream-side HTTP/2 multiplexing and stays healthy through `800 VUs` on this
+single-node Kind shape. The key harness and runtime fixes were:
+
+- enabling HTTP/2 on the in-cluster HTTPS upstream fixture
+- restarting Aegis after rotating the in-cluster MITM/upstream CA secret so the
+  proxy picks up the new trust bundle before the run
+- normalizing replay-safe empty-body requests before forwarding so Go's HTTP/2
+  transport can recover cleanly from upstream `GOAWAY` frames
+
+The practical knee is now above `800 VUs` on this environment, but the curve is
+starting to bend: p95 rises from about `18 ms` at `200 VUs` to about `54 ms`
+at `800 VUs`, and the `500 VU` run showed a small startup-only burst of reset
+errors. The earlier
+socket-exhaustion, stale-trust, and HTTP/2 retryability failures are no longer
+the limiting factors in the current Kind MITM baseline.
 
 ## Practical First-Pass Guidance
 
@@ -87,10 +103,42 @@ than policy evaluation.
 - For the current Kind single-node deployment shape, `CONNECT` passthrough is
   healthy through `~51.4k req/s` at `200 VUs`.
 - For the current Kind single-node deployment shape, `CONNECT` MITM is healthy
-  through `~22.8k req/s` at `200 VUs`.
-- On this environment, `200 VUs` is a reasonable first capacity target for Kind
-  MITM. `300 VUs` is beyond the safe operating point without further upstream
-  socket tuning.
+  through `~22.1k req/s` at `800 VUs`.
+- On this environment, `400 VUs` looks like a conservative production target
+  for Kind MITM with strong latency headroom.
+- `600-800 VUs` is still functional here, but p95 tail latency is materially
+  worse and should be treated as stress territory rather than steady-state
+  planning guidance.
+
+## Resource Read At Higher Concurrency
+
+Using the run artifacts from the `250/300/400 VU` MITM runs, the deployed Aegis
+process looked like this at the end of each `15s` steady-state window:
+
+| Scenario | VUs | CPU Seconds Delta | Approx CPU Cores | RSS After | Goroutines After | Open FDs After |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CONNECT MITM | 250 | 151.37 | 10.09 | 101.4 MiB | 13 | 12 |
+| CONNECT MITM | 300 | 163.91 | 10.93 | 109.3 MiB | 13 | 12 |
+| CONNECT MITM | 400 | 166.83 | 11.12 | 129.1 MiB | 15 | 14 |
+| CONNECT MITM | 500 | 166.10 | 11.07 | 141.6 MiB | 14 | 13 |
+| CONNECT MITM | 600 | 167.78 | 11.19 | 147.6 MiB | 13 | 12 |
+| CONNECT MITM | 800 | 170.03 | 11.34 | 199.4 MiB | 14 | 13 |
+
+These are not cluster-wide numbers. They come from the Aegis process metrics in
+`metrics-before.txt` and `metrics-after.txt`:
+
+- `process_cpu_seconds_total`
+- `process_resident_memory_bytes`
+- `process_open_fds`
+- `go_goroutines`
+
+On this machine, the first useful sizing read is:
+
+- CPU, not memory, is the dominant resource at higher MITM concurrency
+- memory growth from `250 -> 800 VUs` is still moderate relative to throughput
+- goroutine and FD counts remain low and stable, which is a good sign that the
+  HTTP/2 multiplexing path is no longer spraying connections or leaking work
+- latency, not correctness, is the first signal to watch as concurrency rises
 
 ## Profiling Snapshot
 
@@ -111,6 +159,17 @@ active. That means the `pprof` surface is wired correctly and usable for heap
 and goroutine inspection today, but CPU hotspot attribution still needs a
 follow-up capture in staging or a different local runtime environment before it
 can be treated as trustworthy tuning data.
+
+The same limitation still showed up on the Kind MITM `250 VU` run: the CPU
+profile endpoint responded, but the captured profile again contained zero
+samples. Heap and goroutine profiles were still useful. The Kind heap snapshot
+at `250 VUs` showed about `31.7 MiB` in-use, with the largest live buckets in:
+
+- `runtime.mallocgc`
+- `io.copyBuffer`
+- `bufio.NewWriterSize`
+- `net/http.(*http2ClientConn).addStreamLocked`
+- `github.com/moolen/aegis/internal/proxy.(*Server).handleMITMHTTPRequest`
 
 ## Artifacts
 
@@ -142,5 +201,14 @@ Representative result directories:
   - `perf/results/20260426T125207Z-connect-mitm-kind`
   - `perf/results/20260426T125636Z-connect-mitm-kind`
   - `perf/results/20260426T130238Z-connect-mitm-kind`
+  - `perf/results/20260426T163344Z-connect-mitm-kind`
+  - `perf/results/20260426T163824Z-connect-mitm-kind`
+  - `perf/results/20260426T163854Z-connect-mitm-kind`
+  - `perf/results/20260426T165137Z-connect-mitm-kind`
+  - `perf/results/20260426T165537Z-connect-mitm-kind`
+  - `perf/results/20260426T165611Z-connect-mitm-kind`
+  - `perf/results/20260426T170204Z-connect-mitm-kind`
+  - `perf/results/20260426T170533Z-connect-mitm-kind`
+  - `perf/results/20260426T170606Z-connect-mitm-kind`
 - isolated local MITM `pprof` capture:
   - `/tmp/aegis-pprof-isolated.lfVQAn/result`

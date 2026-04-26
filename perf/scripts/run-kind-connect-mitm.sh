@@ -138,6 +138,7 @@ data:
   default.conf: |
     server {
       listen 8443 ssl;
+      http2 on;
       server_name echo-tls.aegis-perf.svc.cluster.local;
       ssl_certificate /etc/nginx/tls/tls.crt;
       ssl_certificate_key /etc/nginx/tls/tls.key;
@@ -223,6 +224,7 @@ deploy_chart() {
       --timeout 180s
   )
   kctl -n "$NAMESPACE" set env deployment/aegis SSL_CERT_FILE=/etc/aegis/ca/ca.crt >/dev/null
+  kctl -n "$NAMESPACE" rollout restart deployment/aegis >/dev/null
   kctl -n "$NAMESPACE" rollout status deployment/aegis --timeout=180s
 }
 

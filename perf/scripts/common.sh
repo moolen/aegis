@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 PERF_TMP_DIR="${PERF_TMP_DIR:-/tmp/aegis-perf}"
 GO_BIN="${GO_BIN:-}"
-K6_NO_USAGE_REPORT="${K6_NO_USAGE_REPORT:-true}"
+export K6_NO_USAGE_REPORT="${K6_NO_USAGE_REPORT:-true}"
 LAST_STARTED_PID=""
 declare -a CLEANUP_PIDS=()
 
