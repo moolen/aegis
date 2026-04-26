@@ -48,10 +48,14 @@ The deployed-shape HTTP path is healthy at the tested VU levels:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | HTTP | 10 | 8,717 | 1.010 | 1.377 | 10.431 | 0.00% |
 | HTTP | 25 | 11,799 | 1.954 | 2.837 | 21.748 | 0.00% |
+| HTTP | 400 | 33,737 | 11.014 | 19.278 | 106.239 | 0.00% |
+| HTTP | 800 | 34,363 | 22.155 | 33.141 | 71.109 | 0.00% |
 | CONNECT passthrough | 10 | 8,352 | 1.049 | 1.404 | 6.753 | 0.00% |
 | CONNECT passthrough | 50 | 39,026 | 1.034 | 1.953 | 82.463 | 0.00% |
 | CONNECT passthrough | 100 | 43,062 | 2.183 | 3.797 | 89.678 | 0.00% |
 | CONNECT passthrough | 200 | 51,356 | 4.195 | 7.230 | 90.127 | 0.00% |
+| CONNECT passthrough | 400 | 53,913 | 5.948 | 14.197 | 48.706 | 0.00% |
+| CONNECT passthrough | 800 | ~53,623 steady-state* | 6.129 | 14.544 | 57.756 | 0.00% |
 | CONNECT MITM | 10 | 11,102 | 0.744 | 1.074 | 9.267 | 0.00% |
 | CONNECT MITM | 25 | 14,958 | 1.395 | 2.372 | 384.886 | 0.00% |
 | CONNECT MITM | 50 | 17,595 | 2.388 | 5.350 | 23.601 | 0.02% |
@@ -99,9 +103,10 @@ the limiting factors in the current Kind MITM baseline.
   - `~89k req/s` for CONNECT passthrough at `100 VUs`
   - `~89k req/s` for CONNECT MITM at `100 VUs`
 - For the current Kind single-node deployment shape, plain HTTP is healthy at
-  least through `~11.8k req/s` at `25 VUs`.
+  least through `~34.4k req/s` at `800 VUs`.
 - For the current Kind single-node deployment shape, `CONNECT` passthrough is
-  healthy through `~51.4k req/s` at `200 VUs`.
+  healthy through `~53.9k req/s` at `400 VUs`, and steady-state throughput at
+  `800 VUs` is still about `53.6k req/s`.
 - For the current Kind single-node deployment shape, `CONNECT` MITM is healthy
   through `~22.1k req/s` at `800 VUs`.
 - On this environment, `400 VUs` looks like a conservative production target
@@ -109,6 +114,33 @@ the limiting factors in the current Kind MITM baseline.
 - `600-800 VUs` is still functional here, but p95 tail latency is materially
   worse and should be treated as stress territory rather than steady-state
   planning guidance.
+
+## HTTP and Passthrough Resource Read
+
+Using the run artifacts from the higher-concurrency HTTP and passthrough runs,
+the deployed Aegis process looked like this at the end of each `15s`
+steady-state window:
+
+| Scenario | VUs | CPU Seconds Delta | Approx CPU Cores | RSS After | Goroutines After | Open FDs After |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| HTTP | 400 | 107.60 | 7.17 | 78.3 MiB | 266 | 137 |
+| HTTP | 800 | 107.54 | 7.17 | 98.9 MiB | 266 | 137 |
+| CONNECT passthrough | 400 | 57.86 | 3.86 | 86.8 MiB | 10 | 9 |
+| CONNECT passthrough | 800 | 57.29 | 3.82 | 100.3 MiB | 10 | 9 |
+
+Compared to MITM:
+
+- plain HTTP drives more goroutines and open FDs because it uses the `net/http`
+  server/request machinery directly under much higher request throughput
+- CONNECT passthrough is the cheapest path by far in CPU and goroutine terms
+- MITM remains the most expensive path, but its concurrency behavior is now
+  stable and predictable
+
+For the `800 VU` passthrough run, `k6` reported `389` interrupted VUs during
+graceful stop because long-lived tunnels were still open after the `15s` active
+window. Request failure rate stayed at `0`, and the more honest throughput read
+for that run is `804,348 / 15s ≈ 53.6k req/s`, not the lower `iterations.rate`
+value that includes drain time.
 
 ## Resource Read At Higher Concurrency
 
@@ -190,10 +222,14 @@ Representative result directories:
 - Kind HTTP `10/25 VUs`:
   - `perf/results/20260426T092122Z-http-kind`
   - `perf/results/20260426T092759Z-http-kind`
+  - `perf/results/20260426T172952Z-http-kind`
+  - `perf/results/20260426T173244Z-http-kind`
 - Kind CONNECT passthrough healthy baseline:
   - `perf/results/20260426T093930Z-connect-passthrough-kind`
   - `perf/results/20260426T093452Z-connect-passthrough-kind`
   - `perf/results/20260426T094308Z-connect-passthrough-kind`
+  - `perf/results/20260426T173313Z-connect-passthrough-kind`
+  - `perf/results/20260426T173349Z-connect-passthrough-kind`
 - Kind CONNECT MITM healthy baselines:
   - `perf/results/20260426T105942Z-connect-mitm-kind`
   - `perf/results/20260426T110230Z-connect-mitm-kind`
@@ -212,3 +248,8 @@ Representative result directories:
   - `perf/results/20260426T170606Z-connect-mitm-kind`
 - isolated local MITM `pprof` capture:
   - `/tmp/aegis-pprof-isolated.lfVQAn/result`
+
+\* `CONNECT` passthrough at `800 VUs` completed the `15s` active load window
+cleanly with `0` request failures, but many tunnels were still draining during
+`k6` graceful stop. The listed throughput is the steady-state `iterations / 15s`
+value rather than the raw `iterations.rate` from the full extended run time.
