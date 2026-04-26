@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -209,8 +212,17 @@ func TestAuditLogLevelUsesWarnForAuditBlock(t *testing.T) {
 	}
 }
 
-func TestNewUpstreamHTTPTransportSetsConnectionBounds(t *testing.T) {
+func TestNewUpstreamHTTPTransportSupportsHTTP2(t *testing.T) {
 	transport := NewUpstreamHTTPTransport()
+	if transport == nil {
+		t.Fatal("expected transport")
+	}
+	if transport.TLSClientConfig != nil && len(transport.TLSClientConfig.NextProtos) > 0 {
+		t.Fatalf("unexpected explicit TLS next protos: %#v", transport.TLSClientConfig.NextProtos)
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Fatal("expected ForceAttemptHTTP2 to be enabled")
+	}
 	if transport.MaxIdleConns != 1024 {
 		t.Fatalf("MaxIdleConns = %d, want 1024", transport.MaxIdleConns)
 	}
@@ -219,6 +231,59 @@ func TestNewUpstreamHTTPTransportSetsConnectionBounds(t *testing.T) {
 	}
 	if transport.MaxConnsPerHost != 128 {
 		t.Fatalf("MaxConnsPerHost = %d, want 128", transport.MaxConnsPerHost)
+	}
+}
+
+func TestSharedUpstreamTransportReusesHTTP2Connection(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		conns = map[string]struct{}{}
+	)
+
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		conns[r.RemoteAddr] = struct{}{}
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	transport := NewUpstreamHTTPTransport()
+	t.Cleanup(transport.CloseIdleConnections)
+
+	rootCAs := x509.NewCertPool()
+	rootCAs.AddCert(upstream.Certificate())
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    rootCAs,
+	}
+
+	client := &http.Client{Transport: transport}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get(upstream.URL)
+			if err != nil {
+				t.Errorf("Get() error = %v", err)
+				return
+			}
+			resp.Body.Close()
+			if resp.ProtoMajor != 2 {
+				t.Errorf("proto major = %d, want 2", resp.ProtoMajor)
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	got := len(conns)
+	mu.Unlock()
+	if got > 2 {
+		t.Fatalf("expected upstream HTTP/2 reuse, got %d remote addrs", got)
 	}
 }
 

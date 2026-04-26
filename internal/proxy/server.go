@@ -13,8 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,10 +96,12 @@ func NewServer(deps Dependencies) *Server {
 func NewUpstreamHTTPTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	transport.TLSClientConfig = nil
 	transport.MaxIdleConns = 1024
 	transport.MaxIdleConnsPerHost = 256
 	transport.MaxConnsPerHost = 128
 	transport.IdleConnTimeout = 90 * time.Second
+	transport.ForceAttemptHTTP2 = true
 	return transport
 }
 
@@ -416,65 +418,72 @@ func (s *Server) handleConnectMITM(clientConn net.Conn, clientReader *bufio.Read
 	defer clientTLSConn.Close()
 
 	s.recordConnectResult("mitm", "established")
-
-	clientConn = s.wrapIdleConn(clientTLSConn)
-	clientReaderTLS := bufio.NewReader(clientConn)
-
-	for {
-		req, err := http.ReadRequest(clientReaderTLS)
-		if err != nil {
-			if isConnectionClosed(err) {
-				return
-			}
-			s.recordTLSError()
-			s.deps.Logger.Warn("connect mitm read request failed", "server_name", serverName, "error", err)
-			return
-		}
-
-		if s.deps.PolicyEngine != nil {
-			decision := s.evaluatePolicy("mitm_http", func() *policy.Decision {
-				return s.deps.PolicyEngine.Evaluate(reqIdentity, sourceIP, serverName, port, req.Method, requestPolicyPath(req))
+	srv := newMITMHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		s.handleMITMHTTPRequest(w, req, reqIdentity, sourceIP, serverName, port)
+	}))
+	srv.IdleTimeout = s.deps.ConnectionIdleTimeout
+	var serveDone sync.Once
+	serveDoneCh := make(chan struct{})
+	srv.ConnState = func(conn net.Conn, state http.ConnState) {
+		if conn == clientTLSConn && state == http.StateClosed {
+			serveDone.Do(func() {
+				close(serveDoneCh)
 			})
-			audit := s.recordAuditPolicyDecision("mitm_http", reqIdentity, serverName, decision)
-			if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
-				s.recordPolicyError()
-				s.recordRequestDecision("mitm_http", "deny", decisionPolicyName(decision), "policy_denied")
-				s.logRequestDecision(slog.LevelWarn, "mitm_http", "deny", "policy_denied", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), auditOutcome{})
-				s.deps.Logger.Warn("connect mitm request denied by policy", "server_name", serverName, "method", req.Method, "path", requestPolicyPath(req))
-				_ = writeMITMErrorResponse(clientTLSConn, http.StatusForbidden, "request denied by policy")
-				return
-			}
-			reason := "policy_allowed"
-			if audit.Enabled {
-				reason = auditActualReason(audit)
-			}
-			s.recordRequestDecision("mitm_http", "allow", decisionPolicyName(decision), reason)
-			s.logRequestDecision(auditLogLevel(audit), "mitm_http", "allow", reason, reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), audit)
 		}
-
-		resp, err := s.roundTripMITMRequest(req, serverName, port)
-		if err != nil {
-			s.recordTLSError()
-			if isUpstreamTLSHandshakeError(err) {
-				s.recordUpstreamTLSError("handshake")
-			}
-			s.deps.Logger.Warn("connect mitm upstream round trip failed", "server_name", serverName, "error", err)
-			_ = writeMITMErrorResponse(clientConn, http.StatusBadGateway, "upstream response failed")
-			return
-		}
-
-		removeHopByHopHeaders(resp.Header)
-		if err := resp.Write(clientConn); err != nil {
-			resp.Body.Close()
-			if isConnectionClosed(err) {
-				return
-			}
-			s.recordTLSError()
-			s.deps.Logger.Warn("connect mitm write client response failed", "server_name", serverName, "error", err)
-			return
-		}
-		resp.Body.Close()
 	}
+	if err := srv.Serve(&singleUseListener{
+		addr: clientTLSConn.LocalAddr(),
+		conn: clientTLSConn,
+		done: serveDoneCh,
+	}); err != nil && !isConnectionClosed(err) {
+		s.recordTLSError()
+		s.deps.Logger.Warn("connect mitm serve failed", "server_name", serverName, "error", err)
+	}
+}
+
+func (s *Server) handleMITMHTTPRequest(w http.ResponseWriter, req *http.Request, reqIdentity *identity.Identity, sourceIP netip.Addr, serverName string, port int) {
+	if s.deps.PolicyEngine != nil {
+		decision := s.evaluatePolicy("mitm_http", func() *policy.Decision {
+			return s.deps.PolicyEngine.Evaluate(reqIdentity, sourceIP, serverName, port, req.Method, requestPolicyPath(req))
+		})
+		audit := s.recordAuditPolicyDecision("mitm_http", reqIdentity, serverName, decision)
+		if !s.shadowMode(decision) && (decision == nil || !decision.Allowed) {
+			s.recordPolicyError()
+			s.recordRequestDecision("mitm_http", "deny", decisionPolicyName(decision), "policy_denied")
+			s.logRequestDecision(slog.LevelWarn, "mitm_http", "deny", "policy_denied", reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), auditOutcome{})
+			s.deps.Logger.Warn("connect mitm request denied by policy", "server_name", serverName, "method", req.Method, "path", requestPolicyPath(req))
+			http.Error(w, "request denied by policy", http.StatusForbidden)
+			return
+		}
+		reason := "policy_allowed"
+		if audit.Enabled {
+			reason = auditActualReason(audit)
+		}
+		s.recordRequestDecision("mitm_http", "allow", decisionPolicyName(decision), reason)
+		s.logRequestDecision(auditLogLevel(audit), "mitm_http", "allow", reason, reqIdentity, serverName, port, decision, req.Method, requestPolicyPath(req), audit)
+	}
+
+	resp, err := s.roundTripMITMRequest(req, serverName, port)
+	if err != nil {
+		s.recordTLSError()
+		if isUpstreamTLSHandshakeError(err) {
+			s.recordUpstreamTLSError("handshake")
+		}
+		s.deps.Logger.Warn("connect mitm upstream round trip failed", "server_name", serverName, "error", err)
+		http.Error(w, "upstream response failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	removeHopByHopHeaders(resp.Header)
+	copyHeader(w.Header(), resp.Header)
+	declareTrailers(w.Header(), resp.Trailer)
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil && !isConnectionClosed(err) {
+		s.recordTLSError()
+		s.deps.Logger.Warn("connect mitm write client response failed", "server_name", serverName, "error", err)
+	}
+	copyTrailers(w.Header(), resp.Trailer)
 }
 
 func (s *Server) roundTripMITMRequest(req *http.Request, serverName string, port int) (*http.Response, error) {
@@ -500,11 +509,13 @@ func (s *Server) handshakeClientMITM(clientConn net.Conn, clientReader *bufio.Re
 	}
 	s.recordMITMCertificateResult(result)
 
+	wrappedClientConn := s.wrapIdleConn(clientConn)
 	tlsConn := tls.Server(&replayConn{
-		Conn:   clientConn,
-		reader: io.MultiReader(bytes.NewReader(clientHello), clientReader),
+		Conn:   wrappedClientConn,
+		reader: io.MultiReader(bytes.NewReader(clientHello), s.wrapIdleReader(wrappedClientConn, clientReader)),
 	}, &tls.Config{
 		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"},
 		Certificates: []tls.Certificate{*certificate},
 	})
 	if err := tlsConn.Handshake(); err != nil {
@@ -512,6 +523,34 @@ func (s *Server) handshakeClientMITM(clientConn net.Conn, clientReader *bufio.Re
 	}
 
 	return tlsConn, nil
+}
+
+type singleUseListener struct {
+	addr net.Addr
+	conn net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func (l *singleUseListener) Accept() (net.Conn, error) {
+	var conn net.Conn
+	l.once.Do(func() {
+		conn = l.conn
+		l.conn = nil
+	})
+	if conn != nil {
+		return conn, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *singleUseListener) Close() error {
+	return nil
+}
+
+func (l *singleUseListener) Addr() net.Addr {
+	return l.addr
 }
 
 func (s *Server) handshakeUpstreamTLS(upstreamConn net.Conn, serverName string) (*tls.Conn, error) {
@@ -875,6 +914,40 @@ func copyHeader(dst, src http.Header) {
 			dst.Add(key, value)
 		}
 	}
+}
+
+func declareTrailers(header http.Header, trailers http.Header) {
+	for key := range trailers {
+		header.Add("Trailer", key)
+	}
+}
+
+func copyTrailers(dst, src http.Header) {
+	for key, values := range src {
+		if trailerDeclared(dst, key) {
+			dst.Del(key)
+			for _, value := range values {
+				dst.Add(key, value)
+			}
+			continue
+		}
+		prefixedKey := http.TrailerPrefix + key
+		dst.Del(prefixedKey)
+		for _, value := range values {
+			dst.Add(prefixedKey, value)
+		}
+	}
+}
+
+func trailerDeclared(header http.Header, key string) bool {
+	for _, value := range header.Values("Trailer") {
+		for _, token := range connectionHeaderTokens([]string{value}) {
+			if token == textproto.CanonicalMIMEHeaderKey(key) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func removeHopByHopHeaders(header http.Header) {
