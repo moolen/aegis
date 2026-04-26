@@ -49,27 +49,15 @@ The deployed-shape HTTP path is healthy at the tested VU levels:
 | HTTP | 10 | 8,717 | 1.010 | 1.377 | 10.431 | 0.00% |
 | HTTP | 25 | 11,799 | 1.954 | 2.837 | 21.748 | 0.00% |
 | CONNECT passthrough | 10 | 8,352 | 1.049 | 1.404 | 6.753 | 0.00% |
+| CONNECT MITM | 10 | 11,102 | 0.744 | 1.074 | 9.267 | 0.00% |
+| CONNECT MITM | 25 | 14,958 | 1.395 | 2.372 | 384.886 | 0.00% |
 
 ### Kind Tunnel Status
 
-The in-cluster `CONNECT` passthrough harness is now healthy. The remaining
-deployed-shape gap is **MITM over `kubectl port-forward`**:
-
-- policy matching is fixed for the Kind overlays
-- MITM traffic is allowed by policy
-- but the current Kind MITM harness still fails before producing valid capacity
-  numbers
-
-The remaining failure is now in the deployment/harness path, not in policy
-selection:
-
-- the control path eventually reports `connection reset by peer` / `connection
-  refused` on the forwarded proxy port
-- earlier runs also showed upstream trust wiring issues in the Kind MITM
-  fixture setup
-
-Until that path is stabilized, do not treat the current Kind MITM outputs as
-product capacity results.
+All three deployed-shape traffic modes are now benchmarkable. The key fix was
+removing `kubectl port-forward` from the proxy data path and switching the Kind
+perf harness to fixed `NodePort` mappings, which avoids the websocket-forwarder
+becoming the bottleneck under concurrent `CONNECT` load.
 
 ## Practical First-Pass Guidance
 
@@ -81,8 +69,10 @@ product capacity results.
   least through `~11.8k req/s` at `25 VUs`.
 - For the current Kind single-node deployment shape, `CONNECT` passthrough is
   healthy at least through `~8.35k req/s` at `10 VUs`.
-- The next useful benchmark step is stabilizing the Kind MITM path so the
-  deployed-shape matrix covers all three traffic modes.
+- For the current Kind single-node deployment shape, `CONNECT` MITM is healthy
+  at least through `~15.0k req/s` at `25 VUs`.
+- The next useful benchmark step is extending the same deployed-shape matrix to
+  higher VU counts now that the MITM path is no longer blocked by the harness.
 
 ## Artifacts
 
@@ -105,5 +95,6 @@ Representative result directories:
   - `perf/results/20260426T092759Z-http-kind`
 - Kind CONNECT passthrough healthy baseline:
   - `perf/results/20260426T093930Z-connect-passthrough-kind`
-- Kind CONNECT MITM still-invalid baseline:
-  - `perf/results/20260426T095017Z-connect-mitm-kind`
+- Kind CONNECT MITM healthy baselines:
+  - `perf/results/20260426T105942Z-connect-mitm-kind`
+  - `perf/results/20260426T110230Z-connect-mitm-kind`

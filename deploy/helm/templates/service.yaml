@@ -11,7 +11,13 @@ spec:
       port: {{ .Values.service.proxyPort }}
       targetPort: proxy
       protocol: TCP
+      {{- if and (or (eq .Values.service.type "NodePort") (eq .Values.service.type "LoadBalancer")) .Values.service.proxyNodePort }}
+      nodePort: {{ .Values.service.proxyNodePort }}
+      {{- end }}
     - name: metrics
       port: {{ .Values.service.metricsPort }}
       targetPort: metrics
       protocol: TCP
+      {{- if and (or (eq .Values.service.type "NodePort") (eq .Values.service.type "LoadBalancer")) .Values.service.metricsNodePort }}
+      nodePort: {{ .Values.service.metricsNodePort }}
+      {{- end }}

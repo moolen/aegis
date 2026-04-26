@@ -15,6 +15,7 @@ SCENARIO="http"
 CLUSTER_NAME="${CLUSTER_NAME:-aegis-perf}"
 # Set KEEP_CLUSTER=1 to preserve a newly created Kind cluster after the run.
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
+SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-0}"
 KUBE_CONTEXT="kind-${CLUSTER_NAME}"
 NAMESPACE="aegis-perf"
 RELEASE_NAME="aegis-perf"
@@ -27,6 +28,7 @@ PROXY_URL="http://127.0.0.1:3128"
 METRICS_URL="http://127.0.0.1:9090"
 TARGET_URL="http://echo.aegis-perf.svc.cluster.local/allowed"
 CLUSTER_CREATED=0
+NODE_READY_TIMEOUT="${NODE_READY_TIMEOUT:-30}"
 
 kctl() {
   kubectl --context "$KUBE_CONTEXT" "$@"
@@ -44,6 +46,9 @@ ensure_kind_cluster() {
 }
 
 build_and_load_image() {
+  if [ "$SKIP_IMAGE_BUILD" = "1" ]; then
+    return 0
+  fi
   (
     cd "$REPO_ROOT"
     docker build -t "$IMAGE_REF" .
@@ -137,24 +142,18 @@ deploy_chart() {
   kctl -n "$NAMESPACE" rollout status deployment/aegis --timeout=180s
 }
 
-start_port_forward() {
-  local log_file="$1"
-  : >"$log_file"
-  kctl -n "$NAMESPACE" port-forward svc/aegis 3128:3128 9090:9090 >"$log_file" 2>&1 &
-  local pid=$!
-  track_pid "$pid"
-  wait_for_http_ok_pid "$pid" "${METRICS_URL}/healthz" 30
+wait_for_nodeport() {
+  wait_for_http_ok "${METRICS_URL}/healthz" "$NODE_READY_TIMEOUT"
 }
 
 RESULT_DIR="$(new_result_dir "${SCENARIO}" "kind")"
-PORT_FORWARD_LOG="${RESULT_DIR}/port-forward.log"
 
 log "result dir: ${RESULT_DIR}"
 ensure_kind_cluster
 build_and_load_image
 apply_http_echo
 deploy_chart
-start_port_forward "$PORT_FORWARD_LOG"
+wait_for_nodeport
 capture_metrics "$METRICS_URL" "${RESULT_DIR}/metrics-before.txt"
 
 export RESULT_DIR PROXY_URL HTTP_PROXY="$PROXY_URL"
@@ -179,6 +178,7 @@ TARGET_URL=${TARGET_URL}
 PROXY_URL=${PROXY_URL}
 METRICS_URL=${METRICS_URL}
 KEEP_CLUSTER=${KEEP_CLUSTER}
+SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD}
 VUS=${VUS}
 DURATION=${DURATION}
 EXPECTED_STATUS=${EXPECTED_STATUS}

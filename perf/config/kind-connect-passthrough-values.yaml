@@ -1,3 +1,8 @@
+service:
+  type: NodePort
+  proxyNodePort: 30128
+  metricsNodePort: 30090
+
 config:
   proxy:
     listen: ":3128"

@@ -52,7 +52,9 @@ Use Kind targets when you need Helm-rendered deployment behavior, Kubernetes net
 - `make perf-kind-connect`
 - `make perf-kind-mitm`
 
-Local runs build `bin/aegis` and the fixture helper on demand, then start fixture processes directly. Kind runs build/load an image, deploy the chart, and port-forward the in-cluster service before invoking the same logical `k6` scenario.
+Local runs build `bin/aegis` and the fixture helper on demand, then start fixture processes directly. Kind runs build/load an image, deploy the chart, and hit the proxy and metrics service through fixed Kind `NodePort` mappings instead of `kubectl port-forward`, so the benchmark path matches the deployed data path more closely under concurrency.
+
+When iterating on perf, combine `KEEP_CLUSTER=1` with `SKIP_IMAGE_BUILD=1` after the first successful run to avoid paying the full cluster/image setup cost on every scenario.
 
 The Kind perf overlays intentionally use broad `subjects.cidrs` matches. Those
 runs are meant to measure the deployed proxy path, not to validate source-IP
@@ -74,7 +76,6 @@ Typical artifact paths look like:
 - `perf/results/20260425T120000Z-http-local/summary.json`
 - `perf/results/20260425T120000Z-http-local/summary.txt`
 - `perf/results/20260425T120000Z-connect-mitm-local/meta.env`
-- `perf/results/20260425T120000Z-http-kind/port-forward.log`
 
 Use `summary.json` for machine-readable metric review, `summary.txt` for the operator-facing `k6` summary, `metrics-before.txt` and `metrics-after.txt` to compare Aegis metrics snapshots, and `meta.env` to capture the run inputs that made the result reproducible.
 

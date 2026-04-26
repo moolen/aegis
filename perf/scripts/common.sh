@@ -130,7 +130,17 @@ wait_for_http_ok_pid() {
 capture_metrics() {
   local url="$1"
   local out="$2"
-  curl -fsS "${url}/metrics" >"$out"
+  local timeout_seconds="${3:-15}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while (( SECONDS < deadline )); do
+    if curl -fsS "${url}/metrics" >"$out" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  die "timed out capturing metrics from ${url}/metrics"
 }
 
 build_fixture_helper() {
