@@ -251,6 +251,12 @@ Available commands:
 - `make fmt`
 - `make docker`
 
+OCI release image:
+
+- pushes to `master` publish `ghcr.io/moolen/aegis` via `.github/workflows/release.yml`
+- the release workflow publishes `linux/amd64` and `linux/arm64`
+- tags include `master`, `latest`, and `sha-<commit>`
+
 CLI tooling:
 
 - `./bin/aegis validate --config aegis.example.yaml`
