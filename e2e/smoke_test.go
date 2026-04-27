@@ -275,10 +275,14 @@ func TestAdminEnforcementKillSwitchFlipsHTTPTrafficWithoutReload(t *testing.T) {
 
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
+	adminAddr := reserveTCPAddr(t)
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "aegis.yaml")
 
-	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/other", policyConfigOptions{AdminToken: adminToken}))
+	writeConfig(t, configPath, policyConfigYAMLWithOptions(proxyAddr, metricsAddr, "127.0.0.1", mustPort(t, upstreamURL.Host), "/other", policyConfigOptions{
+		AdminToken: adminToken,
+		AdminAddr:  adminAddr,
+	}))
 	startAegis(t, configPath)
 
 	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
@@ -290,7 +294,7 @@ func TestAdminEnforcementKillSwitchFlipsHTTPTrafficWithoutReload(t *testing.T) {
 		t.Fatalf("initial status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 
-	adminResp, err := setAdminEnforcementMode("http://"+metricsAddr, adminToken, "audit")
+	adminResp, err := setAdminEnforcementMode("http://"+adminAddr, adminToken, "audit")
 	if err != nil {
 		t.Fatalf("setAdminEnforcementMode(audit) error = %v", err)
 	}
@@ -313,7 +317,7 @@ func TestAdminEnforcementKillSwitchFlipsHTTPTrafficWithoutReload(t *testing.T) {
 		t.Fatalf("effective audit mode gauge = %v, want 1", got)
 	}
 
-	adminResp, err = setAdminEnforcementMode("http://"+metricsAddr, adminToken, "config")
+	adminResp, err = setAdminEnforcementMode("http://"+adminAddr, adminToken, "config")
 	if err != nil {
 		t.Fatalf("setAdminEnforcementMode(config) error = %v", err)
 	}
@@ -383,10 +387,11 @@ func TestCIDRSubjectAllowsLoopbackRequestWithoutDiscovery(t *testing.T) {
 
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
+	adminAddr := reserveTCPAddr(t)
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "aegis.yaml")
 
-	writeConfig(t, configPath, cidrPolicyConfigYAML(proxyAddr, metricsAddr, adminToken, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", []string{"127.0.0.0/8", "::1/128"}, configpkg.UnknownIdentityDeny))
+	writeConfig(t, configPath, cidrPolicyConfigYAML(proxyAddr, metricsAddr, adminAddr, adminToken, "127.0.0.1", mustPort(t, upstreamURL.Host), "/allowed", []string{"127.0.0.0/8", "::1/128"}, configpkg.UnknownIdentityDeny))
 	startAegis(t, configPath)
 
 	resp, err := proxiedRequest("http://"+proxyAddr, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/allowed", mustPort(t, upstreamURL.Host)))
@@ -398,7 +403,7 @@ func TestCIDRSubjectAllowsLoopbackRequestWithoutDiscovery(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 
-	simulation := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+	simulation := simulateRequest(t, "http://"+adminAddr, adminToken, appmetrics.SimulationRequest{
 		SourceIP: "127.0.0.1",
 		FQDN:     "127.0.0.1",
 		Port:     mustPort(t, upstreamURL.Host),
@@ -440,12 +445,15 @@ func TestPolicySubjectBindsToConfiguredKubernetesProviderName(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "aegis.yaml")
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
+	adminAddr := reserveTCPAddr(t)
 	clusterAKubeconfig := writeKubeconfig(t, clusterA.URL)
 	clusterBKubeconfig := writeKubeconfig(t, clusterB.URL)
 
 	writeConfig(t, configPath, fmt.Sprintf(`proxy:
   listen: %q
 admin:
+  enabled: true
+  listen: %q
   token: %q
 metrics:
   listen: %q
@@ -480,12 +488,12 @@ policies:
         ports: [443]
         tls:
           mode: passthrough
-`, proxyAddr, adminToken, metricsAddr, clusterAKubeconfig, clusterBKubeconfig))
+`, proxyAddr, adminAddr, adminToken, metricsAddr, clusterAKubeconfig, clusterBKubeconfig))
 
 	startAegis(t, configPath)
-	waitForIdentityProviders(t, "http://"+metricsAddr, adminToken, "cluster-a", "cluster-b")
+	waitForIdentityProviders(t, "http://"+adminAddr, adminToken, "cluster-a", "cluster-b")
 
-	allowed := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+	allowed := simulateRequest(t, "http://"+adminAddr, adminToken, appmetrics.SimulationRequest{
 		SourceIP: "10.10.0.10",
 		FQDN:     "example.com",
 		Port:     443,
@@ -498,7 +506,7 @@ policies:
 		t.Fatalf("allowed response = %#v, want allow policy_allowed", allowed)
 	}
 
-	denied := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+	denied := simulateRequest(t, "http://"+adminAddr, adminToken, appmetrics.SimulationRequest{
 		SourceIP: "10.10.0.11",
 		FQDN:     "example.com",
 		Port:     443,
@@ -535,10 +543,13 @@ func TestPolicySubjectBindsToConfiguredEC2ProviderName(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "aegis.yaml")
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
+	adminAddr := reserveTCPAddr(t)
 
 	writeConfig(t, configPath, fmt.Sprintf(`proxy:
   listen: %q
 admin:
+  enabled: true
+  listen: %q
   token: %q
 metrics:
   listen: %q
@@ -570,12 +581,12 @@ policies:
         ports: [443]
         tls:
           mode: passthrough
-`, proxyAddr, adminToken, metricsAddr, defaultE2EEC2TagKey, defaultE2EEC2TagKey))
+`, proxyAddr, adminAddr, adminToken, metricsAddr, defaultE2EEC2TagKey, defaultE2EEC2TagKey))
 
 	startAegisWithEnv(t, configPath, fakeEC2Env(ec2Server.URL))
-	waitForIdentityProviders(t, "http://"+metricsAddr, adminToken, "blue-ec2", "green-ec2")
+	waitForIdentityProviders(t, "http://"+adminAddr, adminToken, "blue-ec2", "green-ec2")
 
-	allowed := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+	allowed := simulateRequest(t, "http://"+adminAddr, adminToken, appmetrics.SimulationRequest{
 		SourceIP: "10.20.0.10",
 		FQDN:     "example.com",
 		Port:     443,
@@ -588,7 +599,7 @@ policies:
 		t.Fatalf("allowed response = %#v, want allow policy_allowed", allowed)
 	}
 
-	denied := simulateRequest(t, "http://"+metricsAddr, adminToken, appmetrics.SimulationRequest{
+	denied := simulateRequest(t, "http://"+adminAddr, adminToken, appmetrics.SimulationRequest{
 		SourceIP: "10.20.0.11",
 		FQDN:     "example.com",
 		Port:     443,
@@ -811,7 +822,16 @@ func ensureBinaryBuilt(t *testing.T) (string, string) {
 			return
 		}
 		buildBinary = filepath.Join(tempDir, "aegis")
-		cmd := exec.Command("/usr/local/go/bin/go", "build", "-o", buildBinary, "./cmd/aegis")
+		goBinary, err := exec.LookPath("go")
+		if err != nil {
+			if _, statErr := os.Stat("/usr/local/go/bin/go"); statErr == nil {
+				goBinary = "/usr/local/go/bin/go"
+			} else {
+				buildErr = fmt.Errorf("resolve go binary: %w", err)
+				return
+			}
+		}
+		cmd := exec.Command(goBinary, "build", "-o", buildBinary, "./cmd/aegis")
 		cmd.Dir = buildRepoRoot
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -893,10 +913,10 @@ func policyConfigYAML(proxyAddr string, metricsAddr string, host string, port in
 	return policyConfigYAMLWithOptions(proxyAddr, metricsAddr, host, port, allowedPath, policyConfigOptions{})
 }
 
-func cidrPolicyConfigYAML(proxyAddr string, metricsAddr string, adminToken string, host string, port int, allowedPath string, cidrs []string, unknownIdentityPolicy string) string {
+func cidrPolicyConfigYAML(proxyAddr string, metricsAddr string, adminAddr string, adminToken string, host string, port int, allowedPath string, cidrs []string, unknownIdentityPolicy string) string {
 	adminBlock := ""
 	if adminToken != "" {
-		adminBlock = fmt.Sprintf("admin:\n  token: %q\n", adminToken)
+		adminBlock = fmt.Sprintf("admin:\n  enabled: true\n  listen: %q\n  token: %q\n", adminAddr, adminToken)
 	}
 	unknownIdentityBlock := ""
 	if unknownIdentityPolicy != "" {
@@ -937,6 +957,7 @@ type policyConfigOptions struct {
 	PolicyEnforcement        string
 	Bypass                   bool
 	AdminToken               string
+	AdminAddr                string
 	UnknownIdentityPolicy    string
 	MaxConcurrentPerIdentity int
 	DiscoveryTagValues       []string
@@ -965,7 +986,7 @@ func policyConfigYAMLWithOptions(proxyAddr string, metricsAddr string, host stri
 	}
 	adminBlock := ""
 	if opts.AdminToken != "" {
-		adminBlock = fmt.Sprintf("admin:\n  token: %q\n", opts.AdminToken)
+		adminBlock = fmt.Sprintf("admin:\n  enabled: true\n  listen: %q\n  token: %q\n", opts.AdminAddr, opts.AdminToken)
 	}
 	discoveryTagValues := opts.DiscoveryTagValues
 	if len(discoveryTagValues) == 0 {

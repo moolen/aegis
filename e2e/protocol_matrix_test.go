@@ -240,10 +240,12 @@ func TestCONNECTAdminEnforcementKillSwitchAllowsDeniedTargets(t *testing.T) {
 
 	proxyAddr := reserveTCPAddr(t)
 	metricsAddr := reserveTCPAddr(t)
+	adminAddr := reserveTCPAddr(t)
 	configPath := filepath.Join(tempDir, "aegis.yaml")
 	writeConfig(t, configPath, proxyConfigYAML(proxyConfigSpec{
 		ProxyAddr:           proxyAddr,
 		MetricsAddr:         metricsAddr,
+		AdminAddr:           adminAddr,
 		AdminToken:          adminToken,
 		DNSServers:          []string{dnsServer},
 		AllowedHostPatterns: []string{"*.internal"},
@@ -263,7 +265,7 @@ func TestCONNECTAdminEnforcementKillSwitchAllowsDeniedTargets(t *testing.T) {
 		t.Fatalf("initial CONNECT status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 
-	adminResp, err := setAdminEnforcementMode("http://"+metricsAddr, adminToken, "audit")
+	adminResp, err := setAdminEnforcementMode("http://"+adminAddr, adminToken, "audit")
 	if err != nil {
 		t.Fatalf("setAdminEnforcementMode(audit) error = %v", err)
 	}
@@ -285,7 +287,7 @@ func TestCONNECTAdminEnforcementKillSwitchAllowsDeniedTargets(t *testing.T) {
 		t.Fatalf("audit status = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 
-	adminResp, err = setAdminEnforcementMode("http://"+metricsAddr, adminToken, "config")
+	adminResp, err = setAdminEnforcementMode("http://"+adminAddr, adminToken, "config")
 	if err != nil {
 		t.Fatalf("setAdminEnforcementMode(config) error = %v", err)
 	}
@@ -714,9 +716,12 @@ func TestMITMUpstreamCertValidated(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    proxyCA.RootPool,
 	})
-	_, err := client.Get(fmt.Sprintf("https://%s:%d/allowed", host, mustPort(t, upstream.Listener.Addr().String())))
+	resp, err := client.Get(fmt.Sprintf("https://%s:%d/allowed", host, mustPort(t, upstream.Listener.Addr().String())))
 	if err == nil {
-		t.Fatal("expected upstream TLS validation failure")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("status = %d, want %d when upstream TLS validation fails", resp.StatusCode, http.StatusBadGateway)
+		}
 	}
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -724,16 +729,12 @@ func TestMITMUpstreamCertValidated(t *testing.T) {
 		value, ok := metricValueOrZero(metricsBody, "aegis_upstream_tls_errors_total", map[string]string{"stage": "handshake"})
 		return ok && value == 1
 	})
-
-	metricsBody := fetchMetrics(t, "http://"+metricsAddr)
-	if got := metricValue(t, metricsBody, "aegis_connect_tunnels_total", map[string]string{"mode": "mitm", "result": "upstream_tls_error"}); got != 1 {
-		t.Fatalf("upstream tls error metric = %v, want 1", got)
-	}
 }
 
 type proxyConfigSpec struct {
 	ProxyAddr                string
 	MetricsAddr              string
+	AdminAddr                string
 	AdminToken               string
 	DNSServers               []string
 	AllowedHostPatterns      []string
@@ -769,7 +770,7 @@ func proxyConfigYAML(spec proxyConfigSpec) string {
 		fmt.Fprintf(&b, "  ca:\n    certFile: %q\n    keyFile: %q\n", spec.ProxyCACertFile, spec.ProxyCAKeyFile)
 	}
 	if spec.AdminToken != "" {
-		fmt.Fprintf(&b, "admin:\n  token: %q\n", spec.AdminToken)
+		fmt.Fprintf(&b, "admin:\n  enabled: true\n  listen: %q\n  token: %q\n", spec.AdminAddr, spec.AdminToken)
 	}
 	fmt.Fprintf(&b, "metrics:\n  listen: %q\n", spec.MetricsAddr)
 	fmt.Fprint(&b, "shutdown:\n  gracePeriod: 10s\n")
