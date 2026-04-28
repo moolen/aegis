@@ -160,8 +160,9 @@ func (c *gcsObjectStoreClient) Read(ctx context.Context, ref ObjectRef) ([]byte,
 }
 
 type azureBlobObjectStoreClient struct {
-	container string
-	client    *azblob.Client
+	serviceURL string
+	container  string
+	client     *azblob.Client
 }
 
 func newAzureBlobObjectStoreClient(ctx context.Context, source config.PolicyDiscoverySourceConfig) (ObjectStoreClient, error) {
@@ -185,8 +186,9 @@ func newAzureBlobObjectStoreClient(ctx context.Context, source config.PolicyDisc
 	}
 
 	return &azureBlobObjectStoreClient{
-		container: source.Bucket,
-		client:    client,
+		serviceURL: serviceURL,
+		container:  source.Bucket,
+		client:     client,
 	}, nil
 }
 
@@ -207,7 +209,7 @@ func (c *azureBlobObjectStoreClient) List(ctx context.Context, prefix string) ([
 			key := *item.Name
 			refs = append(refs, ObjectRef{
 				Key:      key,
-				URI:      fmt.Sprintf("azblob://%s/%s", c.container, key),
+				URI:      azureObjectURI(c.serviceURL, c.container, key),
 				Revision: azureETag(item),
 			})
 		}
@@ -251,4 +253,12 @@ func azureETag(item *container.BlobItem) string {
 		return ""
 	}
 	return string(*item.Properties.ETag)
+}
+
+func azureObjectURI(serviceURL string, containerName string, blobName string) string {
+	return fmt.Sprintf("%s/%s/%s",
+		strings.TrimRight(strings.TrimSpace(serviceURL), "/"),
+		strings.Trim(strings.TrimSpace(containerName), "/"),
+		strings.TrimLeft(blobName, "/"),
+	)
 }

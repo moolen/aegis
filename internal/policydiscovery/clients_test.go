@@ -50,3 +50,12 @@ func TestNewObjectStoreClientBuildsAWSClient(t *testing.T) {
 		t.Fatalf("auth.mode = %q, want %q", gotSource.Auth.Mode, "default")
 	}
 }
+
+func TestAzureObjectURIIncludesServiceIdentity(t *testing.T) {
+	got := azureObjectURI("https://exampleacct.blob.core.windows.net/", "tenant-policies", "teams/a/policy.yaml")
+	want := "https://exampleacct.blob.core.windows.net/tenant-policies/teams/a/policy.yaml"
+
+	if got != want {
+		t.Fatalf("azureObjectURI() = %q, want %q", got, want)
+	}
+}
