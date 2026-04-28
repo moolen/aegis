@@ -1368,6 +1368,28 @@ policies:
 	}
 }
 
+func TestLoadRejectsDuplicatePolicyDiscoveryNamesAfterTrimming(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: " remote-policy "
+      provider: aws
+      bucket: aegis-policies
+      auth: {}
+    - name: remote-policy
+      provider: gcp
+      bucket: aegis-policies
+      auth: {}
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), `discovery.policies[1].name "remote-policy" must be unique`) {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
 func TestLoadAcceptsKubernetesDiscoveryAuthProviders(t *testing.T) {
 	tests := []struct {
 		name string
