@@ -464,6 +464,27 @@ func TestRunnerRemovesDeletedDocumentsAcrossPolls(t *testing.T) {
 	}
 }
 
+func TestDeleteSourceMetricsRemovesActiveSeries(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := appmetrics.New(reg)
+	source := testPolicyDiscoverySource("prod-aws")
+	metrics.PolicyDiscoveryObjectsActive.WithLabelValues("prod-aws", "aws").Set(1)
+	metrics.PolicyDiscoveryPoliciesActive.WithLabelValues("prod-aws", "aws").Set(2)
+	metrics.PolicyDiscoveryLastSuccess.WithLabelValues("prod-aws", "aws").Set(1700000300)
+
+	DeleteSourceMetrics(metrics, []config.PolicyDiscoverySourceConfig{source})
+
+	if metricExistsForLabels(t, reg, "aegis_policy_discovery_objects_active", map[string]string{"source": "prod-aws", "provider": "aws"}) {
+		t.Fatal("objects gauge should be removed")
+	}
+	if metricExistsForLabels(t, reg, "aegis_policy_discovery_policies_active", map[string]string{"source": "prod-aws", "provider": "aws"}) {
+		t.Fatal("policies gauge should be removed")
+	}
+	if metricExistsForLabels(t, reg, "aegis_policy_discovery_last_success_timestamp_seconds", map[string]string{"source": "prod-aws", "provider": "aws"}) {
+		t.Fatal("last success gauge should be removed")
+	}
+}
+
 func testPolicyConfig(name string, cidr string, fqdn string) config.PolicyConfig {
 	return config.PolicyConfig{
 		Name:        name,
@@ -532,13 +553,12 @@ func (c *fakeSnapshotCollector) WaitForCall(t *testing.T, want int) {
 	for {
 		c.mu.Lock()
 		got := c.callCount
-		ch := c.callCh
 		c.mu.Unlock()
 		if got >= want {
 			return
 		}
 		select {
-		case <-ch:
+		case <-time.After(10 * time.Millisecond):
 		case <-deadline:
 			t.Fatalf("collector call count = %d, want at least %d", got, want)
 		}
@@ -661,6 +681,25 @@ func mustFindMetricForLabels(t *testing.T, reg *prometheus.Registry, name string
 	}
 	t.Fatalf("metric %q with labels %#v not found", name, labels)
 	return nil
+}
+
+func metricExistsForLabels(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) bool {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricHasLabels(metric, labels) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {

@@ -223,6 +223,18 @@ func (r *Runner) closeClients() error {
 	return firstErr
 }
 
+func DeleteSourceMetrics(metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig) {
+	if metrics == nil {
+		return
+	}
+	for _, rawSource := range sources {
+		source := normalizeSourceConfig(rawSource)
+		metrics.PolicyDiscoveryObjectsActive.DeleteLabelValues(source.Name, source.Provider)
+		metrics.PolicyDiscoveryPoliciesActive.DeleteLabelValues(source.Name, source.Provider)
+		metrics.PolicyDiscoveryLastSuccess.DeleteLabelValues(source.Name, source.Provider)
+	}
+}
+
 func pollIntervalForSource(source config.PolicyDiscoverySourceConfig) time.Duration {
 	if source.PollInterval == nil || *source.PollInterval <= 0 {
 		return defaultSourcePollInterval

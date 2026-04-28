@@ -130,6 +130,7 @@ func (m *runtimeManager) Close() {
 	m.current = runtimeGeneration{}
 	m.mu.Unlock()
 
+	policydiscovery.DeleteSourceMetrics(m.metrics, current.cfg.Discovery.Policies)
 	closeRuntimeGeneration(current)
 }
 
@@ -149,6 +150,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 			return err
 		}
 	}
+	carriedSnapshots := carryForwardSnapshots(m.current.remoteSnapshots, cfg.Discovery.Policies)
 	m.nextGenerationID++
 	generationID := m.nextGenerationID
 	m.mu.Unlock()
@@ -159,7 +161,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		cancel()
 		return err
 	}
-	mergedPolicies, err := policydiscovery.MergePolicies(cfg.Policies, nil)
+	mergedEngine, mergedPolicies, err := policydiscovery.CompileMergedEngine(cfg.Policies, carriedSnapshots)
 	if err != nil {
 		cancel()
 		if deps.UpstreamHTTPTransport != nil {
@@ -168,7 +170,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		return err
 	}
 
-	policyRuntime := newRuntimePolicyEngine(deps.PolicyEngine)
+	policyRuntime := newRuntimePolicyEngine(mergedEngine)
 	deps.PolicyEngine = policyRuntime
 
 	runner, err := m.buildPolicyDiscoveryRunner(generationCtx, cfg, generationID, policyRuntime)
@@ -194,7 +196,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		policyEngine:          policyRuntime,
 		policyRuntime:         policyRuntime,
 		mergedPolicies:        mergedPolicies,
-		remoteSnapshots:       make(map[string]policydiscovery.Snapshot),
+		remoteSnapshots:       carriedSnapshots,
 		policyDiscoveryRunner: runner,
 	}
 	if checker, ok := deps.IdentityResolver.(appmetrics.ReadyChecker); ok {
@@ -213,6 +215,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	m.current = nextGeneration
 	m.mu.Unlock()
 
+	policydiscovery.DeleteSourceMetrics(m.metrics, removedPolicyDiscoverySources(previous.cfg.Discovery.Policies, nextGeneration.cfg.Discovery.Policies))
 	if nextGeneration.policyDiscoveryRunner != nil {
 		if err := nextGeneration.policyDiscoveryRunner.Start(); err != nil {
 			m.mu.Lock()
@@ -261,6 +264,41 @@ func (m *runtimeManager) applyRemotePolicySnapshot(generationID uint64, policyRu
 	m.current.remoteSnapshots = nextSnapshots
 	m.current.mergedPolicies = mergedPolicies
 	return nil
+}
+
+func carryForwardSnapshots(current map[string]policydiscovery.Snapshot, sources []config.PolicyDiscoverySourceConfig) map[string]policydiscovery.Snapshot {
+	if len(current) == 0 || len(sources) == 0 {
+		return make(map[string]policydiscovery.Snapshot)
+	}
+	allowed := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		allowed[source.Name] = struct{}{}
+	}
+	carried := make(map[string]policydiscovery.Snapshot, len(allowed))
+	for sourceName, snapshot := range current {
+		if _, ok := allowed[sourceName]; ok {
+			carried[sourceName] = snapshot
+		}
+	}
+	return carried
+}
+
+func removedPolicyDiscoverySources(previous []config.PolicyDiscoverySourceConfig, next []config.PolicyDiscoverySourceConfig) []config.PolicyDiscoverySourceConfig {
+	if len(previous) == 0 {
+		return nil
+	}
+	nextByName := make(map[string]struct{}, len(next))
+	for _, source := range next {
+		nextByName[source.Name] = struct{}{}
+	}
+	removed := make([]config.PolicyDiscoverySourceConfig, 0, len(previous))
+	for _, source := range previous {
+		if _, ok := nextByName[source.Name]; ok {
+			continue
+		}
+		removed = append(removed, source)
+	}
+	return removed
 }
 
 func (m *runtimeManager) ShutdownGracePeriod() time.Duration {
