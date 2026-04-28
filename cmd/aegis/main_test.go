@@ -1025,6 +1025,12 @@ func TestRuntimeManagerReloadReplacesPolicyDiscoveryRunnerLifecycle(t *testing.T
 	if len(runners) != 2 {
 		t.Fatalf("runner creations = %d, want 2", len(runners))
 	}
+	if runners[0].startCalls != 1 {
+		t.Fatalf("first runner start calls = %d, want 1", runners[0].startCalls)
+	}
+	if runners[1].startCalls != 1 {
+		t.Fatalf("second runner start calls = %d, want 1", runners[1].startCalls)
+	}
 	if runners[0].closeCalls != 1 {
 		t.Fatalf("first runner close calls = %d, want 1", runners[0].closeCalls)
 	}
@@ -1036,6 +1042,190 @@ func TestRuntimeManagerReloadReplacesPolicyDiscoveryRunnerLifecycle(t *testing.T
 
 	if runners[1].closeCalls != 1 {
 		t.Fatalf("second runner close calls after manager close = %d, want 1", runners[1].closeCalls)
+	}
+}
+
+func TestRuntimeManagerRejectsStaleDiscoveryCallbackAfterReloadAndClose(t *testing.T) {
+	restorePolicyDiscoveryRunner := newPolicyDiscoveryRunner
+	t.Cleanup(func() {
+		newPolicyDiscoveryRunner = restorePolicyDiscoveryRunner
+	})
+
+	var runners []*fakePolicyDiscoveryRunner
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+		runner := &fakePolicyDiscoveryRunner{
+			apply:   apply,
+			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
+		}
+		runners = append(runners, runner)
+		return runner, nil
+	}
+
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()), "", &reloadableProxyHandler{}, nil)
+
+	cfg := testRuntimeConfig()
+	cfg.Discovery = config.DiscoveryConfig{
+		Policies: []config.PolicyDiscoverySourceConfig{{
+			Name:     "remote-a",
+			Provider: "aws",
+			Bucket:   "policies",
+		}},
+	}
+	cfg.Policies = []config.PolicyConfig{
+		testRuntimeCIDRPolicy("static-allow", "10.0.0.0/24", "static.example.com"),
+	}
+
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	nextCfg := cfg
+	nextCfg.Policies = []config.PolicyConfig{
+		testRuntimeCIDRPolicy("static-next", "10.2.0.0/24", "next.example.com"),
+	}
+	if err := manager.applyConfig(nextCfg, true); err != nil {
+		t.Fatalf("applyConfig() error = %v", err)
+	}
+
+	staleSnapshot := policydiscovery.Snapshot{
+		Source: config.PolicyDiscoverySourceConfig{Name: "remote-a"},
+		Policies: []policydiscovery.DiscoveredPolicy{{
+			SourceName: "remote-a",
+			Object: policydiscovery.ObjectRef{
+				Key: "env/prod/stale.yaml",
+				URI: "s3://policies/env/prod/stale.yaml",
+			},
+			Policy: testRuntimeCIDRPolicy("stale-allow", "10.3.0.0/24", "stale.example.com"),
+		}},
+	}
+	if err := runners[0].apply("remote-a", staleSnapshot); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stale callback after reload error = %v, want context.Canceled", err)
+	}
+	if got := policyNames(manager.current.mergedPolicies); !slices.Equal(got, []string{"static-next"}) {
+		t.Fatalf("merged policy names after stale reload callback = %#v, want %#v", got, []string{"static-next"})
+	}
+
+	manager.Close()
+
+	if err := runners[1].apply("remote-a", staleSnapshot); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stale callback after close error = %v, want context.Canceled", err)
+	}
+	if len(manager.current.mergedPolicies) != 0 {
+		t.Fatalf("merged policies after close = %#v, want empty", manager.current.mergedPolicies)
+	}
+}
+
+func TestRuntimeManagerAppliesInitialSnapshotDeliveredDuringRunnerStart(t *testing.T) {
+	restorePolicyDiscoveryRunner := newPolicyDiscoveryRunner
+	t.Cleanup(func() {
+		newPolicyDiscoveryRunner = restorePolicyDiscoveryRunner
+	})
+
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+		return &fakePolicyDiscoveryRunner{
+			apply:   apply,
+			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
+			startFn: func(r *fakePolicyDiscoveryRunner) error {
+				return r.apply("remote-a", policydiscovery.Snapshot{
+					Source: config.PolicyDiscoverySourceConfig{Name: "remote-a"},
+					Policies: []policydiscovery.DiscoveredPolicy{{
+						SourceName: "remote-a",
+						Object: policydiscovery.ObjectRef{
+							Key: "env/prod/initial.yaml",
+							URI: "s3://policies/env/prod/initial.yaml",
+						},
+						Policy: testRuntimeCIDRPolicy("remote-allow", "10.1.0.0/24", "remote.example.com"),
+					}},
+				})
+			},
+		}, nil
+	}
+
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()), "", &reloadableProxyHandler{}, nil)
+	defer manager.Close()
+
+	cfg := testRuntimeConfig()
+	cfg.Discovery = config.DiscoveryConfig{
+		Policies: []config.PolicyDiscoverySourceConfig{{
+			Name:     "remote-a",
+			Provider: "aws",
+			Bucket:   "policies",
+		}},
+	}
+	cfg.Policies = []config.PolicyConfig{
+		testRuntimeCIDRPolicy("static-allow", "10.0.0.0/24", "static.example.com"),
+	}
+
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	if got := policyNames(manager.current.mergedPolicies); !slices.Equal(got, []string{"static-allow", "remote-allow"}) {
+		t.Fatalf("merged policy names = %#v, want %#v", got, []string{"static-allow", "remote-allow"})
+	}
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		Protocol: "connect",
+		SourceIP: "10.1.0.10",
+		FQDN:     "remote.example.com",
+		Port:     443,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Decision == nil || resp.Decision.Policy != "remote-allow" || !resp.Decision.Allowed {
+		t.Fatalf("Simulate() decision = %#v, want allowed remote-allow", resp.Decision)
+	}
+}
+
+func TestRuntimeManagerClosePreventsPendingGenerationActivation(t *testing.T) {
+	restorePolicyDiscoveryRunner := newPolicyDiscoveryRunner
+	t.Cleanup(func() {
+		newPolicyDiscoveryRunner = restorePolicyDiscoveryRunner
+	})
+
+	constructorEntered := make(chan struct{})
+	releaseConstructor := make(chan struct{})
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+		close(constructorEntered)
+		<-releaseConstructor
+		return &fakePolicyDiscoveryRunner{
+			apply:   apply,
+			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
+		}, nil
+	}
+
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()), "", &reloadableProxyHandler{}, nil)
+
+	cfg := testRuntimeConfig()
+	cfg.Discovery = config.DiscoveryConfig{
+		Policies: []config.PolicyDiscoverySourceConfig{{
+			Name:     "remote-a",
+			Provider: "aws",
+			Bucket:   "policies",
+		}},
+	}
+	cfg.Policies = []config.PolicyConfig{
+		testRuntimeCIDRPolicy("static-allow", "10.0.0.0/24", "static.example.com"),
+	}
+
+	loadErrCh := make(chan error, 1)
+	go func() {
+		loadErrCh <- manager.LoadInitial(cfg)
+	}()
+
+	<-constructorEntered
+	manager.Close()
+	close(releaseConstructor)
+
+	if err := <-loadErrCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("LoadInitial() error = %v, want context.Canceled", err)
+	}
+	if manager.current.id != 0 {
+		t.Fatalf("current generation id = %d, want 0", manager.current.id)
+	}
+	if len(manager.current.mergedPolicies) != 0 {
+		t.Fatalf("merged policies = %#v, want empty", manager.current.mergedPolicies)
 	}
 }
 
@@ -2077,7 +2267,17 @@ func (p fakeHandlerProvider) Handler() http.Handler {
 type fakePolicyDiscoveryRunner struct {
 	apply      func(string, policydiscovery.Snapshot) error
 	sources    []config.PolicyDiscoverySourceConfig
+	startFn    func(*fakePolicyDiscoveryRunner) error
+	startCalls int
 	closeCalls int
+}
+
+func (r *fakePolicyDiscoveryRunner) Start() error {
+	r.startCalls++
+	if r.startFn != nil {
+		return r.startFn(r)
+	}
+	return nil
 }
 
 func (r *fakePolicyDiscoveryRunner) Close() error {

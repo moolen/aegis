@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -25,6 +26,7 @@ type reloadableProxyHandler struct {
 }
 
 type policyDiscoveryRunner interface {
+	Start() error
 	Close() error
 }
 
@@ -57,11 +59,14 @@ type runtimeManager struct {
 	limiter     *proxy.ConnectionLimiter
 	enforcement *proxy.EnforcementOverrideController
 
-	mu      sync.RWMutex
-	current runtimeGeneration
+	mu               sync.RWMutex
+	current          runtimeGeneration
+	nextGenerationID uint64
+	closed           bool
 }
 
 type runtimeGeneration struct {
+	id                    uint64
 	cfg                   config.Config
 	cancel                context.CancelFunc
 	mitm                  *proxy.MITMEngine
@@ -74,6 +79,8 @@ type runtimeGeneration struct {
 	remoteSnapshots       map[string]policydiscovery.Snapshot
 	policyDiscoveryRunner policyDiscoveryRunner
 }
+
+var errRuntimeManagerClosed = errors.New("runtime manager closed")
 
 func newRuntimeManager(rootCtx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, configPath string, handler *reloadableProxyHandler, drain *proxy.DrainTracker) *runtimeManager {
 	if drain == nil {
@@ -113,6 +120,12 @@ func (m *runtimeManager) ReloadFromFile() error {
 
 func (m *runtimeManager) Close() {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	m.nextGenerationID++
 	current := m.current
 	m.current = runtimeGeneration{}
 	m.mu.Unlock()
@@ -125,14 +138,20 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		return err
 	}
 
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errRuntimeManagerClosed
+	}
 	if enforceImmutable {
-		m.mu.RLock()
 		if err := validateReloadableConfig(m.current.cfg, cfg); err != nil {
-			m.mu.RUnlock()
+			m.mu.Unlock()
 			return err
 		}
-		m.mu.RUnlock()
 	}
+	m.nextGenerationID++
+	generationID := m.nextGenerationID
+	m.mu.Unlock()
 
 	generationCtx, cancel := context.WithCancel(m.rootCtx)
 	deps, err := buildProxyDependencies(generationCtx, cfg, m.logger, m.metrics, m.drain, m.limiter, m.enforcement)
@@ -152,7 +171,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	policyRuntime := newRuntimePolicyEngine(deps.PolicyEngine)
 	deps.PolicyEngine = policyRuntime
 
-	runner, err := m.buildPolicyDiscoveryRunner(generationCtx, cfg, policyRuntime)
+	runner, err := m.buildPolicyDiscoveryRunner(generationCtx, cfg, generationID, policyRuntime)
 	if err != nil {
 		cancel()
 		if deps.UpstreamHTTPTransport != nil {
@@ -166,6 +185,7 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	nextHandler := newProxyServer(deps).Handler()
 
 	nextGeneration := runtimeGeneration{
+		id:                    generationID,
 		cfg:                   cfg,
 		cancel:                cancel,
 		mitm:                  deps.MITM,
@@ -182,11 +202,28 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	}
 
 	m.mu.Lock()
+	if m.closed || generationID != m.nextGenerationID {
+		m.mu.Unlock()
+		closeRuntimeGeneration(nextGeneration)
+		return context.Canceled
+	}
 	previous := m.current
 	m.handler.Swap(nextHandler)
 	m.recordMITMLifecycle(previous.mitm, deps.MITM, enforceImmutable)
 	m.current = nextGeneration
 	m.mu.Unlock()
+
+	if nextGeneration.policyDiscoveryRunner != nil {
+		if err := nextGeneration.policyDiscoveryRunner.Start(); err != nil {
+			m.mu.Lock()
+			if !m.closed && m.current.id == generationID {
+				m.current.policyDiscoveryRunner = nil
+			}
+			m.mu.Unlock()
+			_ = nextGeneration.policyDiscoveryRunner.Close()
+			return err
+		}
+	}
 
 	closeRuntimeGeneration(previous)
 	m.recordEnforcementStatus()
@@ -194,22 +231,22 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	return nil
 }
 
-func (m *runtimeManager) buildPolicyDiscoveryRunner(ctx context.Context, cfg config.Config, policyRuntime *runtimePolicyEngine) (policyDiscoveryRunner, error) {
+func (m *runtimeManager) buildPolicyDiscoveryRunner(ctx context.Context, cfg config.Config, generationID uint64, policyRuntime *runtimePolicyEngine) (policyDiscoveryRunner, error) {
 	if len(cfg.Discovery.Policies) == 0 {
 		return nil, nil
 	}
 
 	sources := append([]config.PolicyDiscoverySourceConfig(nil), cfg.Discovery.Policies...)
 	return newPolicyDiscoveryRunner(ctx, m.logger, sources, func(sourceName string, snapshot policydiscovery.Snapshot) error {
-		return m.applyRemotePolicySnapshot(policyRuntime, cfg.Policies, sourceName, snapshot)
+		return m.applyRemotePolicySnapshot(generationID, policyRuntime, cfg.Policies, sourceName, snapshot)
 	})
 }
 
-func (m *runtimeManager) applyRemotePolicySnapshot(policyRuntime *runtimePolicyEngine, staticPolicies []config.PolicyConfig, sourceName string, snapshot policydiscovery.Snapshot) error {
+func (m *runtimeManager) applyRemotePolicySnapshot(generationID uint64, policyRuntime *runtimePolicyEngine, staticPolicies []config.PolicyConfig, sourceName string, snapshot policydiscovery.Snapshot) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.current.policyRuntime != policyRuntime {
+	if m.closed || m.current.id != generationID || m.current.policyRuntime != policyRuntime {
 		return context.Canceled
 	}
 
@@ -633,6 +670,10 @@ func closeRuntimeGeneration(generation runtimeGeneration) {
 }
 
 type noopPolicyDiscoveryRunner struct{}
+
+func (noopPolicyDiscoveryRunner) Start() error {
+	return nil
+}
 
 func (noopPolicyDiscoveryRunner) Close() error {
 	return nil
