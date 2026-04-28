@@ -44,6 +44,9 @@ Implemented in this bootstrap:
   force-close accounting when the grace period expires.
 - Readiness semantics backed by discovery-provider freshness, with provider
   status metrics and a separate `/readyz` endpoint.
+- Additive remote policy discovery from cloud-native object storage
+  (`discovery.policies`) for AWS S3, GCS, and Azure Blob, with background
+  polling and deletion-aware snapshot reconciliation.
 - Structured JSON logging with `slog`.
 - Prometheus metrics and `/healthz`, including reload, Proxy Protocol, CONNECT,
   MITM certificate-cache and CA lifecycle counters, request decision counters,
@@ -62,6 +65,11 @@ Current runtime behavior:
 - Kubernetes discovery providers are started at boot in listed order, followed
   by listed EC2 discovery providers. The first provider that resolves a source
   IP wins.
+- Remote policy discovery sources are additive to file-defined `policies`.
+  Aegis polls each configured object-store source, parses Kubernetes-style
+  `ProxyPolicy` YAML documents from objects under the configured prefix, and
+  reconciles the active remote snapshot per source so object and document
+  deletions remove policies cleanly.
 - Provider startup failures are tolerated as long as at least one configured
   provider becomes active; failures are surfaced through structured logs and
   Prometheus metrics.
@@ -140,6 +148,38 @@ discovery providers through
 or more source CIDRs through `subjects.cidrs`. To enable EC2 discovery, add a
 provider entry under `discovery.ec2`, set the
 target AWS `region`, and define the tag filters that scope instance discovery.
+To enable additive remote policy discovery, add one or more entries under
+`discovery.policies` with `provider: aws|gcp|azure`, the bucket/container name,
+and the recursive `prefix` to scan. Authentication defaults to the ambient
+cloud credential chain for the selected provider, so the process should run
+with AWS default credentials, GCP application default credentials, or Azure
+default credentials as appropriate. Each discovered object may contain one or
+more YAML documents separated by `---`; each document must be a `ProxyPolicy`
+resource such as:
+
+```yaml
+apiVersion: aegis.io/v1alpha1
+kind: ProxyPolicy
+metadata:
+  name: remote-allow
+spec:
+  subjects:
+    kubernetes:
+      discoveryNames: ["cluster-a"]
+      namespaces: ["default"]
+      matchLabels:
+        app: payments
+  egress:
+    - fqdn: "api.stripe.com"
+      ports: [443]
+      tls:
+        mode: passthrough
+```
+
+Remote policies are merged additively with file-defined `policies`, and policy
+names must remain unique across both sources. On poll failures, Aegis keeps the
+last successfully applied remote snapshot for that source until a newer valid
+snapshot replaces it.
 To enable TLS MITM for `CONNECT`, provide a proxy CA certificate and key
 through `proxy.ca.certFile` and `proxy.ca.keyFile`. To preserve client IPs
 behind an NLB or similar L4 balancer, enable `proxy.proxyProtocol.enabled`
