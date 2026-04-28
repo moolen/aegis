@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -287,18 +288,22 @@ func removedPolicyDiscoverySources(previous []config.PolicyDiscoverySourceConfig
 	if len(previous) == 0 {
 		return nil
 	}
-	nextByName := make(map[string]struct{}, len(next))
+	nextByIdentity := make(map[string]struct{}, len(next))
 	for _, source := range next {
-		nextByName[source.Name] = struct{}{}
+		nextByIdentity[policyDiscoveryMetricIdentity(source)] = struct{}{}
 	}
 	removed := make([]config.PolicyDiscoverySourceConfig, 0, len(previous))
 	for _, source := range previous {
-		if _, ok := nextByName[source.Name]; ok {
+		if _, ok := nextByIdentity[policyDiscoveryMetricIdentity(source)]; ok {
 			continue
 		}
 		removed = append(removed, source)
 	}
 	return removed
+}
+
+func policyDiscoveryMetricIdentity(source config.PolicyDiscoverySourceConfig) string {
+	return strings.TrimSpace(source.Name) + "\x00" + strings.ToLower(strings.TrimSpace(source.Provider))
 }
 
 func (m *runtimeManager) ShutdownGracePeriod() time.Duration {

@@ -1475,6 +1475,63 @@ func TestRuntimeManagerReloadRemovingPolicySourceRemovesActiveMetrics(t *testing
 	}
 }
 
+func TestRuntimeManagerReloadChangingPolicySourceProviderRemovesOldMetricSeries(t *testing.T) {
+	restorePolicyDiscoveryRunner := newPolicyDiscoveryRunner
+	t.Cleanup(func() {
+		newPolicyDiscoveryRunner = restorePolicyDiscoveryRunner
+	})
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+		return &fakePolicyDiscoveryRunner{
+			apply:   apply,
+			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
+		}, nil
+	}
+
+	reg := prometheus.NewRegistry()
+	metrics := appmetrics.New(reg)
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), metrics, "", &reloadableProxyHandler{}, nil)
+	defer manager.Close()
+
+	cfg := testRuntimeConfig()
+	cfg.Discovery = config.DiscoveryConfig{
+		Policies: []config.PolicyDiscoverySourceConfig{{
+			Name:     "remote-a",
+			Provider: "aws",
+			Bucket:   "policies",
+		}},
+	}
+	cfg.Policies = []config.PolicyConfig{
+		testRuntimeCIDRPolicy("static-allow", "10.0.0.0/24", "static.example.com"),
+	}
+	if err := manager.LoadInitial(cfg); err != nil {
+		t.Fatalf("LoadInitial() error = %v", err)
+	}
+
+	metrics.PolicyDiscoveryObjectsActive.WithLabelValues("remote-a", "aws").Set(1)
+	metrics.PolicyDiscoveryPoliciesActive.WithLabelValues("remote-a", "aws").Set(2)
+	metrics.PolicyDiscoveryLastSuccess.WithLabelValues("remote-a", "aws").Set(1700000000)
+
+	nextCfg := cfg
+	nextCfg.Discovery.Policies = []config.PolicyDiscoverySourceConfig{{
+		Name:     "remote-a",
+		Provider: "gcp",
+		Bucket:   "policies",
+	}}
+	if err := manager.applyConfig(nextCfg, true); err != nil {
+		t.Fatalf("applyConfig() error = %v", err)
+	}
+
+	if metricExists(reg, "aegis_policy_discovery_objects_active", map[string]string{"source": "remote-a", "provider": "aws"}) {
+		t.Fatal("objects active metric should remove the old provider series when provider changes")
+	}
+	if metricExists(reg, "aegis_policy_discovery_policies_active", map[string]string{"source": "remote-a", "provider": "aws"}) {
+		t.Fatal("policies active metric should remove the old provider series when provider changes")
+	}
+	if metricExists(reg, "aegis_policy_discovery_last_success_timestamp_seconds", map[string]string{"source": "remote-a", "provider": "aws"}) {
+		t.Fatal("last success metric should remove the old provider series when provider changes")
+	}
+}
+
 func TestValidateReloadableConfigRejectsProxyProtocolChange(t *testing.T) {
 	current := testRuntimeConfig()
 	next := testRuntimeConfig()
