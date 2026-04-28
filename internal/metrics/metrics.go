@@ -14,6 +14,11 @@ type Metrics struct {
 	DiscoveryProviderStartsTotal           *prometheus.CounterVec
 	DiscoveryProviderFailuresTotal         *prometheus.CounterVec
 	DiscoveryProvidersActive               prometheus.Gauge
+	PolicyDiscoveryPollsTotal              *prometheus.CounterVec
+	PolicyDiscoverySnapshotAppliesTotal    *prometheus.CounterVec
+	PolicyDiscoveryObjectsActive           *prometheus.GaugeVec
+	PolicyDiscoveryPoliciesActive          *prometheus.GaugeVec
+	PolicyDiscoveryLastSuccess             *prometheus.GaugeVec
 	IdentityProviderStatus                 *prometheus.GaugeVec
 	IdentityProviderLastSuccess            *prometheus.GaugeVec
 	IdentityMapEntries                     *prometheus.GaugeVec
@@ -117,6 +122,41 @@ func New(reg prometheus.Registerer) *Metrics {
 				Name: "aegis_discovery_providers_active",
 				Help: "Number of active discovery providers.",
 			},
+		),
+		PolicyDiscoveryPollsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_policy_discovery_polls_total",
+				Help: "Total number of remote policy discovery poll outcomes.",
+			},
+			[]string{"source", "provider", "result"},
+		),
+		PolicyDiscoverySnapshotAppliesTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "aegis_policy_discovery_snapshot_applies_total",
+				Help: "Total number of remote policy snapshot apply outcomes.",
+			},
+			[]string{"source", "provider", "result"},
+		),
+		PolicyDiscoveryObjectsActive: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_policy_discovery_objects_active",
+				Help: "Current number of remote policy objects in the last successfully applied snapshot.",
+			},
+			[]string{"source", "provider"},
+		),
+		PolicyDiscoveryPoliciesActive: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_policy_discovery_policies_active",
+				Help: "Current number of remote policies in the last successfully applied snapshot.",
+			},
+			[]string{"source", "provider"},
+		),
+		PolicyDiscoveryLastSuccess: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "aegis_policy_discovery_last_success_timestamp_seconds",
+				Help: "Unix timestamp of the last successfully applied remote policy snapshot.",
+			},
+			[]string{"source", "provider"},
 		),
 		IdentityProviderStatus: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -283,6 +323,11 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.DiscoveryProviderStartsTotal,
 		m.DiscoveryProviderFailuresTotal,
 		m.DiscoveryProvidersActive,
+		m.PolicyDiscoveryPollsTotal,
+		m.PolicyDiscoverySnapshotAppliesTotal,
+		m.PolicyDiscoveryObjectsActive,
+		m.PolicyDiscoveryPoliciesActive,
+		m.PolicyDiscoveryLastSuccess,
 		m.IdentityProviderStatus,
 		m.IdentityProviderLastSuccess,
 		m.IdentityMapEntries,

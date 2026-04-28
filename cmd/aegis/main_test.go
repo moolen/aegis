@@ -819,7 +819,7 @@ func TestRuntimeManagerAppliesRemotePolicySnapshotUpdate(t *testing.T) {
 	})
 
 	runner := &fakePolicyDiscoveryRunner{}
-	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
 		runner.apply = apply
 		runner.sources = append([]config.PolicyDiscoverySourceConfig(nil), sources...)
 		return runner, nil
@@ -904,7 +904,7 @@ func TestRuntimeManagerKeepsLastGoodRemotePolicySnapshotOnFailure(t *testing.T) 
 	})
 
 	runner := &fakePolicyDiscoveryRunner{}
-	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
 		runner.apply = apply
 		runner.sources = append([]config.PolicyDiscoverySourceConfig(nil), sources...)
 		return runner, nil
@@ -987,7 +987,7 @@ func TestRuntimeManagerReloadReplacesPolicyDiscoveryRunnerLifecycle(t *testing.T
 	})
 
 	var runners []*fakePolicyDiscoveryRunner
-	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
 		runner := &fakePolicyDiscoveryRunner{
 			apply:   apply,
 			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
@@ -1052,7 +1052,7 @@ func TestRuntimeManagerRejectsStaleDiscoveryCallbackAfterReloadAndClose(t *testi
 	})
 
 	var runners []*fakePolicyDiscoveryRunner
-	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
 		runner := &fakePolicyDiscoveryRunner{
 			apply:   apply,
 			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
@@ -1121,7 +1121,7 @@ func TestRuntimeManagerAppliesInitialSnapshotDeliveredDuringRunnerStart(t *testi
 		newPolicyDiscoveryRunner = restorePolicyDiscoveryRunner
 	})
 
-	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
 		return &fakePolicyDiscoveryRunner{
 			apply:   apply,
 			sources: append([]config.PolicyDiscoverySourceConfig(nil), sources...),
@@ -1186,7 +1186,7 @@ func TestRuntimeManagerClosePreventsPendingGenerationActivation(t *testing.T) {
 
 	constructorEntered := make(chan struct{})
 	releaseConstructor := make(chan struct{})
-	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
 		close(constructorEntered)
 		<-releaseConstructor
 		return &fakePolicyDiscoveryRunner{

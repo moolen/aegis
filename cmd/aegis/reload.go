@@ -32,8 +32,8 @@ type policyDiscoveryRunner interface {
 
 type policyDiscoveryApplyFunc func(sourceName string, snapshot policydiscovery.Snapshot) error
 
-var newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
-	return noopPolicyDiscoveryRunner{}, nil
+var newPolicyDiscoveryRunner = func(ctx context.Context, logger *slog.Logger, metrics *appmetrics.Metrics, sources []config.PolicyDiscoverySourceConfig, apply policyDiscoveryApplyFunc) (policyDiscoveryRunner, error) {
+	return policydiscovery.NewRunner(ctx, logger, metrics, sources, policydiscovery.ApplyFunc(apply))
 }
 
 func (h *reloadableProxyHandler) Swap(next http.Handler) {
@@ -237,7 +237,7 @@ func (m *runtimeManager) buildPolicyDiscoveryRunner(ctx context.Context, cfg con
 	}
 
 	sources := append([]config.PolicyDiscoverySourceConfig(nil), cfg.Discovery.Policies...)
-	return newPolicyDiscoveryRunner(ctx, m.logger, sources, func(sourceName string, snapshot policydiscovery.Snapshot) error {
+	return newPolicyDiscoveryRunner(ctx, m.logger, m.metrics, sources, func(sourceName string, snapshot policydiscovery.Snapshot) error {
 		return m.applyRemotePolicySnapshot(generationID, policyRuntime, cfg.Policies, sourceName, snapshot)
 	})
 }
