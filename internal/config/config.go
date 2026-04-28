@@ -477,9 +477,10 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	discoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes)+len(c.Discovery.EC2)+len(c.Discovery.Policies))
+	discoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes)+len(c.Discovery.EC2))
 	kubernetesDiscoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes))
 	ec2DiscoveryNames := make(map[string]struct{}, len(c.Discovery.EC2))
+	policyDiscoveryNames := make(map[string]struct{}, len(c.Discovery.Policies))
 	for i, discovery := range c.Discovery.Kubernetes {
 		discoveryName := normalizeDiscoveryBindingName(discovery.Name)
 		if discoveryName == "" {
@@ -555,10 +556,10 @@ func (c Config) Validate() error {
 		if discoveryName == "" {
 			return fmt.Errorf("discovery.policies[%d].name is required", i)
 		}
-		if _, exists := discoveryNames[discoveryName]; exists {
-			return fmt.Errorf("discovery.policies[%d].name %q must be unique across discovery providers", i, discoveryName)
+		if _, exists := policyDiscoveryNames[discoveryName]; exists {
+			return fmt.Errorf("discovery.policies[%d].name %q must be unique", i, discoveryName)
 		}
-		discoveryNames[discoveryName] = struct{}{}
+		policyDiscoveryNames[discoveryName] = struct{}{}
 		switch normalizePolicyDiscoveryProvider(discovery.Provider) {
 		case "aws", "gcp", "azure":
 		default:
@@ -640,6 +641,8 @@ func (c *Config) normalizeDiscoveryBindings() error {
 	}
 	for i := range c.Discovery.Policies {
 		c.Discovery.Policies[i].Name = normalizeDiscoveryBindingName(c.Discovery.Policies[i].Name)
+		c.Discovery.Policies[i].Provider = normalizePolicyDiscoveryProvider(c.Discovery.Policies[i].Provider)
+		c.Discovery.Policies[i].Auth.Mode = normalizePolicyDiscoveryAuthMode(c.Discovery.Policies[i].Auth.Mode)
 	}
 	for i := range c.Policies {
 		if c.Policies[i].Subjects.Kubernetes != nil {

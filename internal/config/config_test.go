@@ -1169,12 +1169,12 @@ func TestLoadValidPolicyDiscoveryConfig(t *testing.T) {
 discovery:
   policies:
     - name: remote-policy-bundle
-      provider: aws
+      provider: AWS
       bucket: aegis-policies
       prefix: production/
       pollInterval: 30s
       auth:
-        mode: default
+        mode: DEFAULT
 `)))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -1243,6 +1243,24 @@ discovery:
 	}
 }
 
+func TestLoadRejectsPolicyDiscoveryWithoutBucket(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: remote-policy-bundle
+      provider: aws
+      auth:
+        mode: default
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "discovery.policies[0].bucket is required") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
 func TestLoadRejectsNonPositivePolicyDiscoveryPollInterval(t *testing.T) {
 	_, err := Load(bytes.NewReader([]byte(`proxy:
   listen: ":3128"
@@ -1260,6 +1278,93 @@ discovery:
 	}
 	if !strings.Contains(err.Error(), "discovery.policies[0].pollInterval must be greater than zero") {
 		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsUnsupportedPolicyDiscoveryAuthMode(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: remote-policy-bundle
+      provider: aws
+      bucket: aegis-policies
+      auth:
+        mode: static
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "discovery.policies[0].auth.mode must be default") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadDefaultsAndNormalizesPolicyDiscoveryFields(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: remote-policy-bundle
+      provider: " GCP "
+      bucket: aegis-policies
+      auth: {}
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	entry := cfg.Discovery.Policies[0]
+	if entry.Provider != "gcp" {
+		t.Fatalf("entry provider = %q, want %q", entry.Provider, "gcp")
+	}
+	if entry.Auth.Mode != "default" {
+		t.Fatalf("entry auth mode = %q, want %q", entry.Auth.Mode, "default")
+	}
+}
+
+func TestLoadAllowsPolicyDiscoveryNameCollisionWithOtherDiscoveryKinds(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  kubernetes:
+    - name: cluster-a
+      auth:
+        provider: inCluster
+  ec2:
+    - name: production-ec2
+      region: eu-central-1
+  policies:
+    - name: cluster-a
+      provider: aws
+      bucket: aegis-policies
+      auth: {}
+policies:
+  - name: allow-kubernetes
+    subjects:
+      kubernetes:
+        discoveryNames: ["cluster-a"]
+        namespaces: ["default"]
+        matchLabels: {}
+    egress:
+      - fqdn: "example.com"
+        ports: [443]
+        tls:
+          mode: passthrough
+  - name: allow-ec2
+    subjects:
+      ec2:
+        discoveryNames: ["production-ec2"]
+    egress:
+      - fqdn: "example.org"
+        ports: [443]
+        tls:
+          mode: passthrough
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Discovery.Policies[0].Name != "cluster-a" {
+		t.Fatalf("policy discovery name = %q, want %q", cfg.Discovery.Policies[0].Name, "cluster-a")
 	}
 }
 
