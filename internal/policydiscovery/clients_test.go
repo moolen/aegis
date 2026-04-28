@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/moolen/aegis/internal/config"
 )
 
@@ -68,11 +69,21 @@ func TestAzureObjectURIIncludesServiceIdentity(t *testing.T) {
 func TestS3GetObjectInputUsesRevisionAsIfMatch(t *testing.T) {
 	input := newS3GetObjectInput("aegis-policies", ObjectRef{
 		Key:      "tenants/team-a/policy.yaml",
-		Revision: "etag-123",
+		Revision: "\"etag-123\"",
 	})
 
-	if input.IfMatch == nil || *input.IfMatch != "etag-123" {
-		t.Fatalf("IfMatch = %#v, want etag-123", input.IfMatch)
+	if input.IfMatch == nil || *input.IfMatch != "\"etag-123\"" {
+		t.Fatalf("IfMatch = %#v, want quoted ETag", input.IfMatch)
+	}
+}
+
+func TestAWSETagPreservesQuotedWireForm(t *testing.T) {
+	got := awsETag(types.Object{
+		ETag: stringPtr("\"etag-123\""),
+	})
+
+	if got != "\"etag-123\"" {
+		t.Fatalf("awsETag() = %q, want quoted ETag", got)
 	}
 }
 
@@ -134,4 +145,8 @@ type fakeCloser struct {
 func (f *fakeCloser) Close() error {
 	f.closed = true
 	return nil
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

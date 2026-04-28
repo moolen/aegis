@@ -271,7 +271,7 @@ func awsETag(object types.Object) string {
 	if object.ETag == nil {
 		return ""
 	}
-	return strings.Trim(*object.ETag, "\"")
+	return *object.ETag
 }
 
 func newS3GetObjectInput(bucket string, ref ObjectRef) *s3.GetObjectInput {
