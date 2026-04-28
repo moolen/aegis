@@ -41,6 +41,54 @@ func TestCompileMergedEngineCombinesStaticAndRemotePolicies(t *testing.T) {
 	}
 }
 
+func TestMergePoliciesKeepsStaticFirstAndOrdersRemoteDeterministically(t *testing.T) {
+	staticPolicies := []config.PolicyConfig{
+		testPolicyConfig("static-first", "10.0.0.0/24", "static.example.com"),
+	}
+	snapshots := map[string]Snapshot{
+		"source-b": {
+			Source: config.PolicyDiscoverySourceConfig{Name: "source-b"},
+			Policies: []DiscoveredPolicy{
+				{
+					SourceName: "source-b",
+					Object:     ObjectRef{URI: "s3://bucket/z.yaml"},
+					Policy:     testPolicyConfig("remote-z", "10.3.0.0/24", "z.example.com"),
+				},
+			},
+		},
+		"source-a": {
+			Source: config.PolicyDiscoverySourceConfig{Name: "source-a"},
+			Policies: []DiscoveredPolicy{
+				{
+					SourceName: "source-a",
+					Object:     ObjectRef{URI: "s3://bucket/b.yaml"},
+					Policy:     testPolicyConfig("remote-b", "10.2.0.0/24", "b.example.com"),
+				},
+				{
+					SourceName: "source-a",
+					Object:     ObjectRef{URI: "s3://bucket/a.yaml"},
+					Policy:     testPolicyConfig("remote-a", "10.1.0.0/24", "a.example.com"),
+				},
+			},
+		},
+	}
+
+	merged, err := MergePolicies(staticPolicies, snapshots)
+	if err != nil {
+		t.Fatalf("MergePolicies() error = %v", err)
+	}
+
+	want := []config.PolicyConfig{
+		testPolicyConfig("static-first", "10.0.0.0/24", "static.example.com"),
+		testPolicyConfig("remote-a", "10.1.0.0/24", "a.example.com"),
+		testPolicyConfig("remote-b", "10.2.0.0/24", "b.example.com"),
+		testPolicyConfig("remote-z", "10.3.0.0/24", "z.example.com"),
+	}
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("MergePolicies() = %#v, want %#v", merged, want)
+	}
+}
+
 func TestMergePoliciesRejectsDuplicatePolicyNamesAcrossSources(t *testing.T) {
 	staticPolicies := []config.PolicyConfig{
 		testPolicyConfig("shared-name", "10.0.0.0/24", "static.example.com"),
@@ -83,8 +131,8 @@ func TestReplaceSourceSnapshotRemovesDeletedDocumentsFromActiveState(t *testing.
 		},
 	}
 
-	replaced := ReplaceSourceSnapshot(current, Snapshot{
-		Source: config.PolicyDiscoverySourceConfig{Name: "prod-aws"},
+	replaced := ReplaceSourceSnapshot(current, "prod-aws", Snapshot{
+		Source: config.PolicyDiscoverySourceConfig{Name: "different-name"},
 		Policies: []DiscoveredPolicy{
 			{
 				SourceName: "prod-aws",
@@ -103,6 +151,9 @@ func TestReplaceSourceSnapshotRemovesDeletedDocumentsFromActiveState(t *testing.
 	}
 	if !reflect.DeepEqual(merged, want) {
 		t.Fatalf("merged policies = %#v, want %#v", merged, want)
+	}
+	if _, exists := replaced["different-name"]; exists {
+		t.Fatal("replacement should use explicit source key, not snapshot payload name")
 	}
 }
 

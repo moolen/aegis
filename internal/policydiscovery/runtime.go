@@ -20,7 +20,7 @@ func MergePolicies(staticPolicies []config.PolicyConfig, snapshots map[string]Sn
 
 	for _, sourceName := range sortedSnapshotSourceNames(snapshots) {
 		snapshot := snapshots[sourceName]
-		for _, discovered := range snapshot.Policies {
+		for _, discovered := range sortedDiscoveredPolicies(snapshot.Policies) {
 			origin := fmt.Sprintf("remote source %q", snapshotSourceName(snapshot, sourceName))
 			if err := addMergedPolicy(&merged, names, discovered.Policy, origin); err != nil {
 				return nil, err
@@ -31,12 +31,12 @@ func MergePolicies(staticPolicies []config.PolicyConfig, snapshots map[string]Sn
 	return merged, nil
 }
 
-func ReplaceSourceSnapshot(current map[string]Snapshot, snapshot Snapshot) map[string]Snapshot {
+func ReplaceSourceSnapshot(current map[string]Snapshot, sourceName string, snapshot Snapshot) map[string]Snapshot {
 	next := make(map[string]Snapshot, len(current)+1)
 	for sourceName, existing := range current {
 		next[sourceName] = existing
 	}
-	next[snapshotSourceName(snapshot, snapshot.Source.Name)] = snapshot
+	next[sourceName] = snapshot
 	return next
 }
 
@@ -78,6 +78,28 @@ func sortedSnapshotSourceNames(snapshots map[string]Snapshot) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func sortedDiscoveredPolicies(policies []DiscoveredPolicy) []DiscoveredPolicy {
+	if len(policies) == 0 {
+		return nil
+	}
+	sorted := append([]DiscoveredPolicy(nil), policies...)
+	sort.Slice(sorted, func(i, j int) bool {
+		left := sorted[i]
+		right := sorted[j]
+		if left.Object.URI != right.Object.URI {
+			return left.Object.URI < right.Object.URI
+		}
+		if left.Policy.Name != right.Policy.Name {
+			return left.Policy.Name < right.Policy.Name
+		}
+		if left.Object.Key != right.Object.Key {
+			return left.Object.Key < right.Object.Key
+		}
+		return left.Object.Revision < right.Object.Revision
+	})
+	return sorted
 }
 
 func snapshotSourceName(snapshot Snapshot, fallback string) string {
