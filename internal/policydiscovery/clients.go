@@ -9,8 +9,10 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -29,6 +31,7 @@ type ObjectRef struct {
 type ObjectStoreClient interface {
 	List(ctx context.Context, prefix string) ([]ObjectRef, error)
 	Read(ctx context.Context, ref ObjectRef) ([]byte, error)
+	Close() error
 }
 
 var (
@@ -98,10 +101,7 @@ func (c *awsObjectStoreClient) List(ctx context.Context, prefix string) ([]Objec
 }
 
 func (c *awsObjectStoreClient) Read(ctx context.Context, ref ObjectRef) ([]byte, error) {
-	output, err := c.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &c.bucket,
-		Key:    &ref.Key,
-	})
+	output, err := c.client.GetObject(ctx, newS3GetObjectInput(c.bucket, ref))
 	if err != nil {
 		return nil, err
 	}
@@ -110,9 +110,16 @@ func (c *awsObjectStoreClient) Read(ctx context.Context, ref ObjectRef) ([]byte,
 	return io.ReadAll(output.Body)
 }
 
+func (c *awsObjectStoreClient) Close() error {
+	return nil
+}
+
 type gcsObjectStoreClient struct {
 	bucket string
 	client *storage.Client
+	closer interface {
+		Close() error
+	}
 }
 
 func newGCSObjectStoreClient(ctx context.Context, source config.PolicyDiscoverySourceConfig) (ObjectStoreClient, error) {
@@ -123,6 +130,7 @@ func newGCSObjectStoreClient(ctx context.Context, source config.PolicyDiscoveryS
 	return &gcsObjectStoreClient{
 		bucket: source.Bucket,
 		client: client,
+		closer: client,
 	}, nil
 }
 
@@ -150,13 +158,27 @@ func (c *gcsObjectStoreClient) List(ctx context.Context, prefix string) ([]Objec
 }
 
 func (c *gcsObjectStoreClient) Read(ctx context.Context, ref ObjectRef) ([]byte, error) {
-	reader, err := c.client.Bucket(c.bucket).Object(ref.Key).NewReader(ctx)
+	objectHandle := c.client.Bucket(c.bucket).Object(ref.Key)
+	if generation, ok, err := gcsGeneration(ref); err != nil {
+		return nil, err
+	} else if ok {
+		objectHandle = objectHandle.Generation(generation)
+	}
+
+	reader, err := objectHandle.NewReader(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
 
 	return io.ReadAll(reader)
+}
+
+func (c *gcsObjectStoreClient) Close() error {
+	if c.closer == nil {
+		return nil
+	}
+	return c.closer.Close()
 }
 
 type azureBlobObjectStoreClient struct {
@@ -219,13 +241,17 @@ func (c *azureBlobObjectStoreClient) List(ctx context.Context, prefix string) ([
 }
 
 func (c *azureBlobObjectStoreClient) Read(ctx context.Context, ref ObjectRef) ([]byte, error) {
-	response, err := c.client.DownloadStream(ctx, c.container, ref.Key, nil)
+	response, err := c.client.DownloadStream(ctx, c.container, ref.Key, newAzureDownloadStreamOptions(ref))
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
 
 	return io.ReadAll(response.Body)
+}
+
+func (c *azureBlobObjectStoreClient) Close() error {
+	return nil
 }
 
 func normalizeSourceConfig(source config.PolicyDiscoverySourceConfig) config.PolicyDiscoverySourceConfig {
@@ -248,11 +274,49 @@ func awsETag(object types.Object) string {
 	return strings.Trim(*object.ETag, "\"")
 }
 
+func newS3GetObjectInput(bucket string, ref ObjectRef) *s3.GetObjectInput {
+	input := &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &ref.Key,
+	}
+	if strings.TrimSpace(ref.Revision) != "" {
+		input.IfMatch = &ref.Revision
+	}
+	return input
+}
+
+func gcsGeneration(ref ObjectRef) (int64, bool, error) {
+	revision := strings.TrimSpace(ref.Revision)
+	if revision == "" {
+		return 0, false, nil
+	}
+	generation, err := strconv.ParseInt(revision, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse GCS generation %q for object %q: %w", ref.Revision, ref.Key, err)
+	}
+	return generation, true, nil
+}
+
 func azureETag(item *container.BlobItem) string {
 	if item == nil || item.Properties == nil || item.Properties.ETag == nil {
 		return ""
 	}
 	return string(*item.Properties.ETag)
+}
+
+func newAzureDownloadStreamOptions(ref ObjectRef) *azblob.DownloadStreamOptions {
+	revision := strings.TrimSpace(ref.Revision)
+	if revision == "" {
+		return nil
+	}
+	etag := azcore.ETag(revision)
+	return &azblob.DownloadStreamOptions{
+		AccessConditions: &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+				IfMatch: &etag,
+			},
+		},
+	}
 }
 
 func azureObjectURI(serviceURL string, containerName string, blobName string) string {

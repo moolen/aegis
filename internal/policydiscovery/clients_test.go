@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/moolen/aegis/internal/config"
 )
 
@@ -15,6 +16,10 @@ func (fakeConstructedObjectStoreClient) List(context.Context, string) ([]ObjectR
 
 func (fakeConstructedObjectStoreClient) Read(context.Context, ObjectRef) ([]byte, error) {
 	return nil, nil
+}
+
+func (fakeConstructedObjectStoreClient) Close() error {
+	return nil
 }
 
 func TestNewObjectStoreClientBuildsAWSClient(t *testing.T) {
@@ -58,4 +63,75 @@ func TestAzureObjectURIIncludesServiceIdentity(t *testing.T) {
 	if got != want {
 		t.Fatalf("azureObjectURI() = %q, want %q", got, want)
 	}
+}
+
+func TestS3GetObjectInputUsesRevisionAsIfMatch(t *testing.T) {
+	input := newS3GetObjectInput("aegis-policies", ObjectRef{
+		Key:      "tenants/team-a/policy.yaml",
+		Revision: "etag-123",
+	})
+
+	if input.IfMatch == nil || *input.IfMatch != "etag-123" {
+		t.Fatalf("IfMatch = %#v, want etag-123", input.IfMatch)
+	}
+}
+
+func TestAzureDownloadOptionsUseRevisionAsIfMatch(t *testing.T) {
+	options := newAzureDownloadStreamOptions(ObjectRef{
+		Key:      "teams/a/policy.yaml",
+		Revision: "\"etag-456\"",
+	})
+
+	if options == nil || options.AccessConditions == nil || options.AccessConditions.ModifiedAccessConditions == nil || options.AccessConditions.ModifiedAccessConditions.IfMatch == nil {
+		t.Fatal("expected IfMatch access condition")
+	}
+	if got := *options.AccessConditions.ModifiedAccessConditions.IfMatch; got != azcore.ETag("\"etag-456\"") {
+		t.Fatalf("IfMatch = %q, want %q", got, azcore.ETag("\"etag-456\""))
+	}
+}
+
+func TestGCSGenerationParsesRevision(t *testing.T) {
+	generation, ok, err := gcsGeneration(ObjectRef{
+		Key:      "teams/a/policy.yaml",
+		Revision: "12345",
+	})
+	if err != nil {
+		t.Fatalf("gcsGeneration() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected parsed generation")
+	}
+	if generation != 12345 {
+		t.Fatalf("generation = %d, want %d", generation, 12345)
+	}
+}
+
+func TestAWSAndAzureCloseAreNoOp(t *testing.T) {
+	if err := (&awsObjectStoreClient{}).Close(); err != nil {
+		t.Fatalf("aws Close() error = %v", err)
+	}
+	if err := (&azureBlobObjectStoreClient{}).Close(); err != nil {
+		t.Fatalf("azure Close() error = %v", err)
+	}
+}
+
+func TestGCSClientCloseClosesUnderlyingClient(t *testing.T) {
+	closer := &fakeCloser{}
+	client := &gcsObjectStoreClient{closer: closer}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if !closer.closed {
+		t.Fatal("expected Close() to close underlying client")
+	}
+}
+
+type fakeCloser struct {
+	closed bool
+}
+
+func (f *fakeCloser) Close() error {
+	f.closed = true
+	return nil
 }

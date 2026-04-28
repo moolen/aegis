@@ -87,8 +87,8 @@ spec:
 	}
 
 	wantReads := []string{
-		"tenants/team-a/policy.yaml",
-		"tenants/team-b/policies.yaml",
+		"tenants/team-a/policy.yaml@rev-a",
+		"tenants/team-b/policies.yaml@rev-b",
 	}
 	if !reflect.DeepEqual(client.readKeys, wantReads) {
 		t.Fatalf("Read() keys = %#v, want %#v", client.readKeys, wantReads)
@@ -202,6 +202,7 @@ type fakeObjectStoreClient struct {
 	contents   map[string][]byte
 	listPrefix string
 	readKeys   []string
+	closed     bool
 }
 
 func (f *fakeObjectStoreClient) List(ctx context.Context, prefix string) ([]ObjectRef, error) {
@@ -210,10 +211,15 @@ func (f *fakeObjectStoreClient) List(ctx context.Context, prefix string) ([]Obje
 }
 
 func (f *fakeObjectStoreClient) Read(ctx context.Context, ref ObjectRef) ([]byte, error) {
-	f.readKeys = append(f.readKeys, ref.Key)
+	f.readKeys = append(f.readKeys, ref.Key+"@"+ref.Revision)
 	content, ok := f.contents[ref.Key]
 	if !ok {
 		return nil, errors.New("missing content")
 	}
 	return bytes.Clone(content), nil
+}
+
+func (f *fakeObjectStoreClient) Close() error {
+	f.closed = true
+	return nil
 }
