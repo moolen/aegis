@@ -1232,7 +1232,7 @@ func TestRuntimeManagerReloadPreservesRemoteSnapshotUntilReplacementRunnerApplie
 		t.Fatalf("LoadInitial() error = %v", err)
 	}
 	if err := runners[0].apply("remote-a", policydiscovery.Snapshot{
-		Source: config.PolicyDiscoverySourceConfig{Name: "remote-a"},
+		Source: cfg.Discovery.Policies[0],
 		Policies: []policydiscovery.DiscoveredPolicy{{
 			SourceName: "remote-a",
 			Object: policydiscovery.ObjectRef{
@@ -1320,7 +1320,7 @@ func TestRuntimeManagerReloadFailsWhenCarriedRemoteSnapshotDuplicatesStaticPolic
 		t.Fatalf("LoadInitial() error = %v", err)
 	}
 	if err := runner.apply("remote-a", policydiscovery.Snapshot{
-		Source: config.PolicyDiscoverySourceConfig{Name: "remote-a"},
+		Source: cfg.Discovery.Policies[0],
 		Policies: []policydiscovery.DiscoveredPolicy{{
 			SourceName: "remote-a",
 			Object: policydiscovery.ObjectRef{
@@ -1506,6 +1506,19 @@ func TestRuntimeManagerReloadChangingPolicySourceProviderRemovesOldMetricSeries(
 	if err := manager.LoadInitial(cfg); err != nil {
 		t.Fatalf("LoadInitial() error = %v", err)
 	}
+	if err := manager.applyRemotePolicySnapshot(manager.current.id, manager.current.policyRuntime, cfg.Policies, "remote-a", policydiscovery.Snapshot{
+		Source: cfg.Discovery.Policies[0],
+		Policies: []policydiscovery.DiscoveredPolicy{{
+			SourceName: "remote-a",
+			Object: policydiscovery.ObjectRef{
+				Key: "env/prod/remote.yaml",
+				URI: "s3://policies/env/prod/remote.yaml",
+			},
+			Policy: testRuntimeCIDRPolicy("remote-allow", "10.1.0.0/24", "remote.example.com"),
+		}},
+	}); err != nil {
+		t.Fatalf("applyRemotePolicySnapshot() error = %v", err)
+	}
 
 	metrics.PolicyDiscoveryObjectsActive.WithLabelValues("remote-a", "aws").Set(1)
 	metrics.PolicyDiscoveryPoliciesActive.WithLabelValues("remote-a", "aws").Set(2)
@@ -1529,6 +1542,48 @@ func TestRuntimeManagerReloadChangingPolicySourceProviderRemovesOldMetricSeries(
 	}
 	if metricExists(reg, "aegis_policy_discovery_last_success_timestamp_seconds", map[string]string{"source": "remote-a", "provider": "aws"}) {
 		t.Fatal("last success metric should remove the old provider series when provider changes")
+	}
+
+	resp, err := manager.Simulate(appmetrics.SimulationRequest{
+		Protocol: "connect",
+		SourceIP: "10.1.0.10",
+		FQDN:     "remote.example.com",
+		Port:     443,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if resp.Decision == nil || resp.Decision.Policy != "" || resp.Decision.Allowed {
+		t.Fatalf("Simulate() decision after provider change = %#v, want deny without carried remote snapshot", resp.Decision)
+	}
+}
+
+func TestRuntimeManagerFreezeRemotePolicyStateRejectsOldCallbacks(t *testing.T) {
+	manager := newRuntimeManager(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), appmetrics.New(prometheus.NewRegistry()), "", &reloadableProxyHandler{}, nil)
+	manager.current = runtimeGeneration{
+		id:              1,
+		cfg:             testRuntimeConfig(),
+		policyRuntime:   newRuntimePolicyEngine(nil),
+		remoteSnapshots: map[string]policydiscovery.Snapshot{},
+	}
+	manager.current.cfg.Discovery.Policies = []config.PolicyDiscoverySourceConfig{{
+		Name:     "remote-a",
+		Provider: "aws",
+		Bucket:   "policies",
+	}}
+	manager.nextGenerationID = 2
+
+	frozenGenerationID, _, err := manager.freezeRemotePolicyStateForReload(2, manager.current.cfg.Discovery.Policies)
+	if err != nil {
+		t.Fatalf("freezeRemotePolicyStateForReload() error = %v", err)
+	}
+	defer manager.unfreezeRemotePolicyState(frozenGenerationID)
+
+	err = manager.applyRemotePolicySnapshot(1, manager.current.policyRuntime, manager.current.cfg.Policies, "remote-a", policydiscovery.Snapshot{
+		Source: manager.current.cfg.Discovery.Policies[0],
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("applyRemotePolicySnapshot() error = %v, want context.Canceled", err)
 	}
 }
 
