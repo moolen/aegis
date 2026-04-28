@@ -1163,6 +1163,106 @@ discovery:
 	}
 }
 
+func TestLoadValidPolicyDiscoveryConfig(t *testing.T) {
+	cfg, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: remote-policy-bundle
+      provider: aws
+      bucket: aegis-policies
+      prefix: production/
+      pollInterval: 30s
+      auth:
+        mode: default
+`)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Discovery.Policies) != 1 {
+		t.Fatalf("policy discovery entries = %d, want 1", len(cfg.Discovery.Policies))
+	}
+	entry := cfg.Discovery.Policies[0]
+	if entry.Name != "remote-policy-bundle" {
+		t.Fatalf("entry name = %q, want %q", entry.Name, "remote-policy-bundle")
+	}
+	if entry.Provider != "aws" {
+		t.Fatalf("entry provider = %q, want %q", entry.Provider, "aws")
+	}
+	if entry.Bucket != "aegis-policies" {
+		t.Fatalf("entry bucket = %q, want %q", entry.Bucket, "aegis-policies")
+	}
+	if entry.Prefix != "production/" {
+		t.Fatalf("entry prefix = %q, want %q", entry.Prefix, "production/")
+	}
+	if entry.PollInterval == nil {
+		t.Fatal("entry pollInterval is nil, want 30s")
+	}
+	if *entry.PollInterval != 30*time.Second {
+		t.Fatalf("entry pollInterval = %s, want %s", *entry.PollInterval, 30*time.Second)
+	}
+	if entry.Auth.Mode != "default" {
+		t.Fatalf("entry auth mode = %q, want %q", entry.Auth.Mode, "default")
+	}
+}
+
+func TestLoadRejectsPolicyDiscoveryWithoutName(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - provider: aws
+      bucket: aegis-policies
+      auth:
+        mode: default
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "discovery.policies[0].name is required") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsUnsupportedPolicyDiscoveryProvider(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: remote-policy-bundle
+      provider: s3
+      bucket: aegis-policies
+      auth:
+        mode: default
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "discovery.policies[0].provider must be aws, gcp, or azure") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
+func TestLoadRejectsNonPositivePolicyDiscoveryPollInterval(t *testing.T) {
+	_, err := Load(bytes.NewReader([]byte(`proxy:
+  listen: ":3128"
+discovery:
+  policies:
+    - name: remote-policy-bundle
+      provider: aws
+      bucket: aegis-policies
+      pollInterval: 0s
+      auth:
+        mode: default
+`)))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "discovery.policies[0].pollInterval must be greater than zero") {
+		t.Fatalf("unexpected error = %v", err)
+	}
+}
+
 func TestLoadAcceptsKubernetesDiscoveryAuthProviders(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1854,6 +1954,9 @@ func TestExampleConfigIncludesDiscoverySection(t *testing.T) {
 	if !bytes.Contains(data, []byte("ec2:")) {
 		t.Fatal("example config does not include discovery.ec2 section")
 	}
+	if !bytes.Contains(data, []byte("  policies: []")) {
+		t.Fatal("example config does not include discovery.policies section")
+	}
 	cfg, err := Load(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -1863,6 +1966,9 @@ func TestExampleConfigIncludesDiscoverySection(t *testing.T) {
 	}
 	if len(cfg.Discovery.EC2) != 0 {
 		t.Fatalf("example config should keep ec2 discovery disabled for local runs, got %d providers", len(cfg.Discovery.EC2))
+	}
+	if len(cfg.Discovery.Policies) != 0 {
+		t.Fatalf("example config should keep policy discovery disabled for local runs, got %d providers", len(cfg.Discovery.Policies))
 	}
 }
 

@@ -64,6 +64,15 @@ discovery:
   #       - key: "aegis-managed"
   #         values: ["true"]
   #     pollInterval: 30s
+  policies: []
+  # policies:
+  #   - name: remote-policy-bundle
+  #     provider: aws   # aws | gcp | azure
+  #     bucket: aegis-policies
+  #     prefix: production/
+  #     pollInterval: 30s
+  #     auth:
+  #       mode: default
 policies: []
 # - name: allow-example
 #   # enforcement: audit   # policy-level audit | enforce

@@ -104,8 +104,9 @@ type RebindingProtectionConfig struct {
 }
 
 type DiscoveryConfig struct {
-	Kubernetes []KubernetesDiscoveryConfig `yaml:"kubernetes"`
-	EC2        []EC2DiscoveryConfig        `yaml:"ec2"`
+	Kubernetes []KubernetesDiscoveryConfig   `yaml:"kubernetes"`
+	EC2        []EC2DiscoveryConfig          `yaml:"ec2"`
+	Policies   []PolicyDiscoverySourceConfig `yaml:"policies"`
 }
 
 type KubernetesAuthConfig struct {
@@ -134,6 +135,19 @@ type EC2DiscoveryConfig struct {
 	Region       string               `yaml:"region"`
 	TagFilters   []EC2TagFilterConfig `yaml:"tagFilters"`
 	PollInterval *time.Duration       `yaml:"pollInterval"`
+}
+
+type PolicyDiscoverySourceConfig struct {
+	Name         string                    `yaml:"name"`
+	Provider     string                    `yaml:"provider"`
+	Bucket       string                    `yaml:"bucket"`
+	Prefix       string                    `yaml:"prefix"`
+	PollInterval *time.Duration            `yaml:"pollInterval"`
+	Auth         PolicyDiscoveryAuthConfig `yaml:"auth"`
+}
+
+type PolicyDiscoveryAuthConfig struct {
+	Mode string `yaml:"mode"`
 }
 
 type EC2TagFilterConfig struct {
@@ -463,7 +477,7 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	discoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes)+len(c.Discovery.EC2))
+	discoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes)+len(c.Discovery.EC2)+len(c.Discovery.Policies))
 	kubernetesDiscoveryNames := make(map[string]struct{}, len(c.Discovery.Kubernetes))
 	ec2DiscoveryNames := make(map[string]struct{}, len(c.Discovery.EC2))
 	for i, discovery := range c.Discovery.Kubernetes {
@@ -536,6 +550,32 @@ func (c Config) Validate() error {
 			return fmt.Errorf("discovery.ec2[%d].pollInterval must be greater than zero", i)
 		}
 	}
+	for i, discovery := range c.Discovery.Policies {
+		discoveryName := normalizeDiscoveryBindingName(discovery.Name)
+		if discoveryName == "" {
+			return fmt.Errorf("discovery.policies[%d].name is required", i)
+		}
+		if _, exists := discoveryNames[discoveryName]; exists {
+			return fmt.Errorf("discovery.policies[%d].name %q must be unique across discovery providers", i, discoveryName)
+		}
+		discoveryNames[discoveryName] = struct{}{}
+		switch normalizePolicyDiscoveryProvider(discovery.Provider) {
+		case "aws", "gcp", "azure":
+		default:
+			return fmt.Errorf("discovery.policies[%d].provider must be aws, gcp, or azure", i)
+		}
+		if strings.TrimSpace(discovery.Bucket) == "" {
+			return fmt.Errorf("discovery.policies[%d].bucket is required", i)
+		}
+		if discovery.PollInterval != nil && *discovery.PollInterval <= 0 {
+			return fmt.Errorf("discovery.policies[%d].pollInterval must be greater than zero", i)
+		}
+		switch normalizePolicyDiscoveryAuthMode(discovery.Auth.Mode) {
+		case "default":
+		default:
+			return fmt.Errorf("discovery.policies[%d].auth.mode must be default", i)
+		}
+	}
 	for i, policy := range c.Policies {
 		if policy.Subjects.Kubernetes != nil {
 			for j, discoveryName := range policy.Subjects.Kubernetes.DiscoveryNames {
@@ -576,6 +616,17 @@ func normalizeKubernetesAuthProvider(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))
 }
 
+func normalizePolicyDiscoveryProvider(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func normalizePolicyDiscoveryAuthMode(mode string) string {
+	if strings.TrimSpace(mode) == "" {
+		return "default"
+	}
+	return strings.ToLower(strings.TrimSpace(mode))
+}
+
 func normalizeDiscoveryBindingName(name string) string {
 	return strings.TrimSpace(name)
 }
@@ -586,6 +637,9 @@ func (c *Config) normalizeDiscoveryBindings() error {
 	}
 	for i := range c.Discovery.EC2 {
 		c.Discovery.EC2[i].Name = normalizeDiscoveryBindingName(c.Discovery.EC2[i].Name)
+	}
+	for i := range c.Discovery.Policies {
+		c.Discovery.Policies[i].Name = normalizeDiscoveryBindingName(c.Discovery.Policies[i].Name)
 	}
 	for i := range c.Policies {
 		if c.Policies[i].Subjects.Kubernetes != nil {
