@@ -7,7 +7,7 @@ import (
 	"github.com/moolen/aegis/internal/config"
 )
 
-func TestProxyPolicyNormalizeSetsNameAndHydratesCompatibilityFields(t *testing.T) {
+func TestProxyPolicyNormalizeSetsNameWithoutHydratingCompatibilityFields(t *testing.T) {
 	resource := ProxyPolicy{
 		APIVersion: apiVersion,
 		Kind:       kindProxyPolicy,
@@ -55,11 +55,6 @@ func TestProxyPolicyNormalizeSetsNameAndHydratesCompatibilityFields(t *testing.T
 				},
 			},
 			CIDRs: []string{"10.20.0.0/16"},
-		},
-		IdentitySelector: config.IdentitySelectorConfig{
-			MatchLabels: map[string]string{
-				"app": "web",
-			},
 		},
 		Egress: []config.EgressRuleConfig{
 			{

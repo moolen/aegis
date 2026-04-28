@@ -81,9 +81,6 @@ func (p ProxyPolicy) Normalize() (config.PolicyConfig, error) {
 		for i := range policy.Subjects.Kubernetes.DiscoveryNames {
 			policy.Subjects.Kubernetes.DiscoveryNames[i] = strings.TrimSpace(policy.Subjects.Kubernetes.DiscoveryNames[i])
 		}
-		if len(policy.IdentitySelector.MatchLabels) == 0 {
-			policy.IdentitySelector.MatchLabels = cloneStringMap(policy.Subjects.Kubernetes.MatchLabels)
-		}
 	}
 	if policy.Subjects.EC2 != nil {
 		for i := range policy.Subjects.EC2.DiscoveryNames {

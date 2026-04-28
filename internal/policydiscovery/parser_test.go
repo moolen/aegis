@@ -45,11 +45,6 @@ spec:
 					},
 				},
 			},
-			IdentitySelector: config.IdentitySelectorConfig{
-				MatchLabels: map[string]string{
-					"app": "web",
-				},
-			},
 			Egress: []config.EgressRuleConfig{
 				{
 					FQDN:  "example.com",
@@ -142,18 +137,16 @@ spec:
 
 func TestParseRejectsNonProxyPolicyDocument(t *testing.T) {
 	_, err := Parse(strings.NewReader(`
-apiVersion: v1
+apiVersion: aegis.io/v1alpha1
 kind: ConfigMap
 metadata:
   name: not-a-policy
-data:
-  key: value
 `))
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "ProxyPolicy") {
-		t.Fatalf("error = %v, want ProxyPolicy validation failure", err)
+	if !strings.Contains(err.Error(), "kind must be") || !strings.Contains(err.Error(), "ProxyPolicy") {
+		t.Fatalf("error = %v, want non-ProxyPolicy resource rejection", err)
 	}
 }
 
@@ -176,7 +169,7 @@ spec:
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "field name not found") || !strings.Contains(err.Error(), "ProxyPolicySpec") || !strings.Contains(err.Error(), "name") {
+	if !strings.Contains(err.Error(), "unmarshal errors") || !strings.Contains(err.Error(), "field name not found") || !strings.Contains(err.Error(), "name") {
 		t.Fatalf("error = %v, want strict spec.name rejection", err)
 	}
 }
