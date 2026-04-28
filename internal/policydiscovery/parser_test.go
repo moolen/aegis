@@ -156,3 +156,27 @@ data:
 		t.Fatalf("error = %v, want ProxyPolicy validation failure", err)
 	}
 }
+
+func TestParseRejectsSpecNameField(t *testing.T) {
+	_, err := Parse(strings.NewReader(`
+apiVersion: aegis.io/v1alpha1
+kind: ProxyPolicy
+metadata:
+  name: allow-web
+spec:
+  name: should-not-be-accepted
+  subjects:
+    cidrs: ["10.20.0.0/16"]
+  egress:
+    - fqdn: example.com
+      ports: [443]
+      tls:
+        mode: passthrough
+`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "field name not found") || !strings.Contains(err.Error(), "ProxyPolicySpec") || !strings.Contains(err.Error(), "name") {
+		t.Fatalf("error = %v, want strict spec.name rejection", err)
+	}
+}

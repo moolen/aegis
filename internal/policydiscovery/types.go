@@ -18,10 +18,49 @@ type Metadata struct {
 }
 
 type ProxyPolicy struct {
-	APIVersion string              `yaml:"apiVersion"`
-	Kind       string              `yaml:"kind"`
-	Metadata   Metadata            `yaml:"metadata"`
-	Spec       config.PolicyConfig `yaml:"spec"`
+	APIVersion string          `yaml:"apiVersion"`
+	Kind       string          `yaml:"kind"`
+	Metadata   Metadata        `yaml:"metadata"`
+	Spec       ProxyPolicySpec `yaml:"spec"`
+}
+
+type ProxyPolicySpec struct {
+	Enforcement string                  `yaml:"enforcement"`
+	Bypass      bool                    `yaml:"bypass"`
+	Subjects    ProxyPolicySubjectsSpec `yaml:"subjects"`
+	Egress      []ProxyPolicyEgressRule `yaml:"egress"`
+}
+
+type ProxyPolicySubjectsSpec struct {
+	Kubernetes *ProxyPolicyKubernetesSubjects `yaml:"kubernetes,omitempty"`
+	EC2        *ProxyPolicyEC2Subjects        `yaml:"ec2,omitempty"`
+	CIDRs      []string                       `yaml:"cidrs,omitempty"`
+}
+
+type ProxyPolicyKubernetesSubjects struct {
+	DiscoveryNames []string          `yaml:"discoveryNames"`
+	Namespaces     []string          `yaml:"namespaces"`
+	MatchLabels    map[string]string `yaml:"matchLabels"`
+}
+
+type ProxyPolicyEC2Subjects struct {
+	DiscoveryNames []string `yaml:"discoveryNames"`
+}
+
+type ProxyPolicyEgressRule struct {
+	FQDN  string               `yaml:"fqdn"`
+	Ports []int                `yaml:"ports"`
+	TLS   ProxyPolicyTLSRule   `yaml:"tls"`
+	HTTP  *ProxyPolicyHTTPRule `yaml:"http,omitempty"`
+}
+
+type ProxyPolicyTLSRule struct {
+	Mode string `yaml:"mode"`
+}
+
+type ProxyPolicyHTTPRule struct {
+	AllowedMethods []string `yaml:"allowedMethods"`
+	AllowedPaths   []string `yaml:"allowedPaths"`
 }
 
 func (p ProxyPolicy) Normalize() (config.PolicyConfig, error) {
@@ -30,9 +69,13 @@ func (p ProxyPolicy) Normalize() (config.PolicyConfig, error) {
 		return config.PolicyConfig{}, fmt.Errorf("metadata.name is required")
 	}
 
-	policy := clonePolicyConfig(p.Spec)
-	policy.Name = name
-	policy.Enforcement = config.NormalizeEnforcementMode(policy.Enforcement)
+	policy := config.PolicyConfig{
+		Name:        name,
+		Enforcement: config.NormalizeEnforcementMode(p.Spec.Enforcement),
+		Bypass:      p.Spec.Bypass,
+		Subjects:    normalizePolicySubjects(p.Spec.Subjects),
+		Egress:      normalizeEgressRules(p.Spec.Egress),
+	}
 
 	if policy.Subjects.Kubernetes != nil {
 		for i := range policy.Subjects.Kubernetes.DiscoveryNames {
@@ -70,55 +113,6 @@ func normalizeCIDR(value string) (string, error) {
 	return prefix.Masked().String(), nil
 }
 
-func clonePolicyConfig(src config.PolicyConfig) config.PolicyConfig {
-	dst := src
-	dst.Subjects = clonePolicySubjectsConfig(src.Subjects)
-	dst.IdentitySelector.MatchLabels = cloneStringMap(src.IdentitySelector.MatchLabels)
-	dst.Egress = cloneEgressRules(src.Egress)
-	if src.LegacyIdentitySelector != nil {
-		legacy := *src.LegacyIdentitySelector
-		legacy.MatchLabels = cloneStringMap(src.LegacyIdentitySelector.MatchLabels)
-		dst.LegacyIdentitySelector = &legacy
-	}
-	return dst
-}
-
-func clonePolicySubjectsConfig(src config.PolicySubjectsConfig) config.PolicySubjectsConfig {
-	dst := src
-	if src.Kubernetes != nil {
-		kubernetes := *src.Kubernetes
-		kubernetes.DiscoveryNames = append([]string(nil), src.Kubernetes.DiscoveryNames...)
-		kubernetes.Namespaces = append([]string(nil), src.Kubernetes.Namespaces...)
-		kubernetes.MatchLabels = cloneStringMap(src.Kubernetes.MatchLabels)
-		dst.Kubernetes = &kubernetes
-	}
-	if src.EC2 != nil {
-		ec2 := *src.EC2
-		ec2.DiscoveryNames = append([]string(nil), src.EC2.DiscoveryNames...)
-		dst.EC2 = &ec2
-	}
-	dst.CIDRs = append([]string(nil), src.CIDRs...)
-	return dst
-}
-
-func cloneEgressRules(src []config.EgressRuleConfig) []config.EgressRuleConfig {
-	if src == nil {
-		return nil
-	}
-	dst := make([]config.EgressRuleConfig, len(src))
-	for i := range src {
-		dst[i] = src[i]
-		dst[i].Ports = append([]int(nil), src[i].Ports...)
-		if src[i].HTTP != nil {
-			httpRule := *src[i].HTTP
-			httpRule.AllowedMethods = append([]string(nil), src[i].HTTP.AllowedMethods...)
-			httpRule.AllowedPaths = append([]string(nil), src[i].HTTP.AllowedPaths...)
-			dst[i].HTTP = &httpRule
-		}
-	}
-	return dst
-}
-
 func cloneStringMap(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil
@@ -126,6 +120,48 @@ func cloneStringMap(src map[string]string) map[string]string {
 	dst := make(map[string]string, len(src))
 	for k, v := range src {
 		dst[k] = v
+	}
+	return dst
+}
+
+func normalizePolicySubjects(src ProxyPolicySubjectsSpec) config.PolicySubjectsConfig {
+	dst := config.PolicySubjectsConfig{
+		CIDRs: append([]string(nil), src.CIDRs...),
+	}
+	if src.Kubernetes != nil {
+		dst.Kubernetes = &config.KubernetesSubjectConfig{
+			DiscoveryNames: append([]string(nil), src.Kubernetes.DiscoveryNames...),
+			Namespaces:     append([]string(nil), src.Kubernetes.Namespaces...),
+			MatchLabels:    cloneStringMap(src.Kubernetes.MatchLabels),
+		}
+	}
+	if src.EC2 != nil {
+		dst.EC2 = &config.EC2SubjectConfig{
+			DiscoveryNames: append([]string(nil), src.EC2.DiscoveryNames...),
+		}
+	}
+	return dst
+}
+
+func normalizeEgressRules(src []ProxyPolicyEgressRule) []config.EgressRuleConfig {
+	if src == nil {
+		return nil
+	}
+	dst := make([]config.EgressRuleConfig, len(src))
+	for i := range src {
+		dst[i] = config.EgressRuleConfig{
+			FQDN:  src[i].FQDN,
+			Ports: append([]int(nil), src[i].Ports...),
+			TLS: config.TLSRuleConfig{
+				Mode: src[i].TLS.Mode,
+			},
+		}
+		if src[i].HTTP != nil {
+			dst[i].HTTP = &config.HTTPRuleConfig{
+				AllowedMethods: append([]string(nil), src[i].HTTP.AllowedMethods...),
+				AllowedPaths:   append([]string(nil), src[i].HTTP.AllowedPaths...),
+			}
+		}
 	}
 	return dst
 }

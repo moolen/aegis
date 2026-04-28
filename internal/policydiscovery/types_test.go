@@ -14,10 +14,10 @@ func TestProxyPolicyNormalizeSetsNameAndHydratesCompatibilityFields(t *testing.T
 		Metadata: Metadata{
 			Name: "allow-web",
 		},
-		Spec: config.PolicyConfig{
+		Spec: ProxyPolicySpec{
 			Enforcement: "audit",
-			Subjects: config.PolicySubjectsConfig{
-				Kubernetes: &config.KubernetesSubjectConfig{
+			Subjects: ProxyPolicySubjectsSpec{
+				Kubernetes: &ProxyPolicyKubernetesSubjects{
 					DiscoveryNames: []string{" cluster-a "},
 					Namespaces:     []string{"default"},
 					MatchLabels: map[string]string{
@@ -26,11 +26,11 @@ func TestProxyPolicyNormalizeSetsNameAndHydratesCompatibilityFields(t *testing.T
 				},
 				CIDRs: []string{" 10.20.0.1/16 "},
 			},
-			Egress: []config.EgressRuleConfig{
+			Egress: []ProxyPolicyEgressRule{
 				{
 					FQDN:  "example.com",
 					Ports: []int{443},
-					TLS: config.TLSRuleConfig{
+					TLS: ProxyPolicyTLSRule{
 						Mode: "passthrough",
 					},
 				},
