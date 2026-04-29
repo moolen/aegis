@@ -454,17 +454,6 @@ func ensureKindImageBuilt(t *testing.T, repoRoot string) {
 	}
 }
 
-func kubectlApplyYAML(t *testing.T, repoRoot string, kubeContext string, namespace string, manifest string) {
-	t.Helper()
-
-	manifestPath := filepath.Join(t.TempDir(), "manifest.yaml")
-	if err := os.WriteFile(manifestPath, []byte(manifest), 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	runCommand(t, repoRoot, kindDefaultTimeout, "kubectl", "--context", kubeContext, "-n", namespace, "apply", "-f", manifestPath)
-}
-
 func waitForKindControlPlaneReady(t *testing.T, repoRoot string, kubeContext string) {
 	t.Helper()
 
