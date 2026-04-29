@@ -38,6 +38,23 @@ shipped Helm deployment path rather than a single catch-all smoke test:
 
 It requires Docker, `kind`, `kubectl`, and `helm`.
 
+The Azure cloud-integration suite runs against a preprovisioned Azure
+environment with:
+
+```bash
+eval "$(make azure-export-env)"
+eval "$AKS_GET_CREDENTIALS_COMMAND"
+make azure-deploy-workload
+make test-azure-cloud-e2e
+```
+
+That suite validates the real Azure control loops:
+
+- Azure Blob policy create, update, and delete propagation
+- AKS pod scale/restart identity propagation
+- namespace-scoped authorization propagation
+- policy plus Kubernetes label convergence through the private Aegis path
+
 CI now runs the subprocess `e2e` suite in the fast `ci` job and the heavier
 `kind_e2e` deployment matrix in a dedicated `kind-e2e` job on every push and
 pull request.

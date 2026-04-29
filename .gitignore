@@ -2,6 +2,10 @@
 .cache/
 .gocache/
 .gomodcache/
+.tools/
+.terraform/
+*.tfstate
+*.tfstate.*
 bin/
 dist/
 coverage.out

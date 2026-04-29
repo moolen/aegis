@@ -1,0 +1,19 @@
+apiVersion: aegis.io/v1alpha1
+kind: ProxyPolicy
+metadata:
+  name: azure-allow-nginx-https
+spec:
+  subjects:
+    kubernetes:
+      discoveryNames: ["aks-cloud"]
+      namespaces: ["aegis-cloud"]
+      matchLabels:
+        app: sample-client
+  egress:
+    - fqdn: "nginx.aegis.internal"
+      ports: [443]
+      tls:
+        mode: mitm
+      http:
+        allowedMethods: ["GET"]
+        allowedPaths: ["/static/allowed"]

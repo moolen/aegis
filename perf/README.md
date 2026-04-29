@@ -4,6 +4,7 @@ The `perf/` package runs reproducible `k6` baselines against Aegis in two enviro
 
 - local subprocess runs driven by `perf/scripts/run-local-*.sh`
 - Kind + Helm runs driven by `perf/scripts/run-kind-*.sh`
+- Azure private-network runs driven by `perf/scripts/run-azure-http.sh` and `perf/scripts/run-azure-connect-mitm.sh`
 
 ## Required Tools
 
@@ -51,6 +52,16 @@ Use Kind targets when you need Helm-rendered deployment behavior, Kubernetes net
 - `make perf-kind-http`
 - `make perf-kind-connect`
 - `make perf-kind-mitm`
+
+Use the Azure target when Terraform has already provisioned the private AKS + ACI + NGINX environment and you want the benchmark to stay entirely inside the Azure private data path:
+
+- `eval "$(make azure-export-env)"`
+- `eval "$AKS_GET_CREDENTIALS_COMMAND"`
+- `make azure-deploy-workload`
+- `make perf-azure-http`
+- `make perf-azure-mitm`
+
+The Azure runner creates a short-lived `k6` pod inside AKS, labels it `app=sample-client` so the Blob-discovered policies match, waits for remote policy discovery to converge on both Aegis ACI instances, and then writes the normal `perf/results/...` artifacts locally after pulling them back from the cluster. This avoids the broken assumption that the operator host can reach private-only ACI and VM endpoints directly.
 
 Local runs build `bin/aegis` and the fixture helper on demand, then start fixture processes directly. Kind runs build/load an image, deploy the chart, and hit the proxy and metrics service through fixed Kind `NodePort` mappings instead of `kubectl port-forward`, so the benchmark path matches the deployed data path more closely under concurrency.
 
@@ -125,3 +136,5 @@ CI should validate that the harness runs successfully and emits the expected art
 - `make perf-kind-http`
 - `make perf-kind-connect`
 - `make perf-kind-mitm`
+- `make perf-azure-http`
+- `make perf-azure-mitm`

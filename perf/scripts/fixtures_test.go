@@ -97,10 +97,44 @@ func TestMakefileIncludesPerfTargets(t *testing.T) {
 		"perf-kind-http:",
 		"perf-kind-connect:",
 		"perf-kind-mitm:",
+		"perf-azure-http:",
+		"perf-azure-mitm:",
 	} {
 		if !strings.Contains(string(content), target) {
 			t.Fatalf("Makefile missing target %q", target)
 		}
+	}
+}
+
+func TestMakefileIncludesAzureCloudE2ETarget(t *testing.T) {
+	content, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatalf("os.ReadFile(../../Makefile) error = %v", err)
+	}
+	if !strings.Contains(string(content), "test-azure-cloud-e2e:") {
+		t.Fatal("Makefile missing test-azure-cloud-e2e target")
+	}
+}
+
+func TestAzurePerfScriptsExist(t *testing.T) {
+	paths := []string{
+		"run-azure-http.sh",
+		"run-azure-connect-mitm.sh",
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("os.Stat(%q) error = %v", path, err)
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Fatalf("%q mode = %v, want executable bit set", path, info.Mode())
+			}
+		})
 	}
 }
 

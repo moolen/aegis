@@ -95,29 +95,6 @@ type podList struct {
 	} `json:"items"`
 }
 
-type deploymentStatus struct {
-	Metadata struct {
-		Generation int64 `json:"generation"`
-	} `json:"metadata"`
-	Spec struct {
-		Replicas *int32 `json:"replicas"`
-	} `json:"spec"`
-	Status struct {
-		ObservedGeneration  int64             `json:"observedGeneration"`
-		Replicas            int32             `json:"replicas"`
-		UpdatedReplicas     int32             `json:"updatedReplicas"`
-		ReadyReplicas       int32             `json:"readyReplicas"`
-		AvailableReplicas   int32             `json:"availableReplicas"`
-		UnavailableReplicas int32             `json:"unavailableReplicas"`
-		Conditions          []statusCondition `json:"conditions"`
-	} `json:"status"`
-}
-
-type statusCondition struct {
-	Type   string `json:"type"`
-	Status string `json:"status"`
-}
-
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if kindSharedEnv != nil {
@@ -202,56 +179,6 @@ func newKindRunNames(testName string, seq uint64) kindRunNames {
 		namespace:   buildDNSLabel(kindNamespacePrefix, slug, suffix, 63),
 		releaseName: buildDNSLabel(kindReleasePrefix, slug, suffix, 53),
 	}
-}
-
-func sanitizeDNSLabel(value string) string {
-	value = strings.ToLower(value)
-
-	var b strings.Builder
-	b.Grow(len(value))
-	lastHyphen := false
-	for _, r := range value {
-		isAlphaNum := r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
-		if isAlphaNum {
-			b.WriteRune(r)
-			lastHyphen = false
-			continue
-		}
-		if !lastHyphen && b.Len() > 0 {
-			b.WriteByte('-')
-			lastHyphen = true
-		}
-	}
-
-	return strings.Trim(b.String(), "-")
-}
-
-func buildDNSLabel(prefix string, slug string, suffix string, maxLen int) string {
-	parts := []string{prefix}
-	if slug != "" {
-		parts = append(parts, slug)
-	}
-	if suffix != "" {
-		parts = append(parts, suffix)
-	}
-
-	label := strings.Join(parts, "-")
-	if len(label) <= maxLen {
-		return label
-	}
-
-	trimmedSlugLen := maxLen - len(prefix) - len(suffix) - 2
-	if trimmedSlugLen < 1 {
-		trimmedSlugLen = 1
-	}
-	if len(slug) > trimmedSlugLen {
-		slug = strings.Trim(slug[:trimmedSlugLen], "-")
-		if slug == "" {
-			slug = "x"
-		}
-	}
-
-	return strings.Join([]string{prefix, slug, suffix}, "-")
 }
 
 func (h *kindHarness) echoHost() string {
@@ -460,17 +387,6 @@ func (h *kindHarness) dumpFailureDiagnostics() {
 	}
 }
 
-func mustRepoRoot(t *testing.T) string {
-	t.Helper()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-
-	return filepath.Dir(wd)
-}
-
 func requireCommand(t *testing.T, name string) {
 	t.Helper()
 
@@ -578,47 +494,6 @@ func waitForKindControlPlaneReady(t *testing.T, repoRoot string, kubeContext str
 	})
 }
 
-func waitForDeploymentAvailable(t *testing.T, repoRoot string, kubeContext string, namespace string, name string, timeout time.Duration) {
-	t.Helper()
-
-	waitFor(t, timeout, func() bool {
-		output, err := runCommandOutput(repoRoot, 15*time.Second, "kubectl", "--context", kubeContext, "-n", namespace, "get", "deployment", name, "-o", "json")
-		if err != nil {
-			return false
-		}
-
-		var status deploymentStatus
-		if err := json.Unmarshal([]byte(output), &status); err != nil {
-			return false
-		}
-
-		replicas := int32(1)
-		if status.Spec.Replicas != nil {
-			replicas = *status.Spec.Replicas
-		}
-
-		return status.Status.ObservedGeneration >= status.Metadata.Generation &&
-			status.Status.UpdatedReplicas == replicas &&
-			status.Status.ReadyReplicas == replicas &&
-			status.Status.AvailableReplicas == replicas &&
-			status.Status.UnavailableReplicas == 0 &&
-			conditionTrue(status.Status.Conditions, "Available")
-	})
-}
-
-func podReady(conditions []statusCondition) bool {
-	return conditionTrue(conditions, "Ready")
-}
-
-func conditionTrue(conditions []statusCondition, wantType string) bool {
-	for _, condition := range conditions {
-		if condition.Type == wantType && condition.Status == "True" {
-			return true
-		}
-	}
-	return false
-}
-
 func kubectlExecPodEventually(t *testing.T, repoRoot string, timeout time.Duration, kubeContext string, namespace string, podName string, args ...string) string {
 	t.Helper()
 
@@ -682,21 +557,6 @@ func writeKindValuesFile(t *testing.T, contents string) string {
 	return path
 }
 
-func runCommand(t *testing.T, dir string, timeout time.Duration, name string, args ...string) string {
-	t.Helper()
-
-	output, err := runCommandOutput(dir, timeout, name, args...)
-	if err != nil {
-		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, output)
-	}
-
-	return output
-}
-
-func runBestEffort(dir string, timeout time.Duration, name string, args ...string) {
-	_, _ = runCommandOutput(dir, timeout, name, args...)
-}
-
 func waitForNamespaceDeleted(repoRoot string, kubeContext string, namespace string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -707,23 +567,6 @@ func waitForNamespaceDeleted(repoRoot string, kubeContext string, namespace stri
 		time.Sleep(time.Second)
 	}
 	return false
-}
-
-func runCommandOutput(dir string, timeout time.Duration, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return string(output), fmt.Errorf("command timed out after %s", timeout)
-	}
-	if err != nil {
-		return string(output), err
-	}
-
-	return string(output), nil
 }
 
 func createCurlPod(t *testing.T, repoRoot string, kubeContext string, namespace string, podName string, labels string) {

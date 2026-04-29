@@ -275,7 +275,18 @@ go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=15
 ## Performance Baselines
 
 The repository includes a `perf/` package for reproducible `k6`-based
-performance baselines against both local/subprocess and Kind/Helm deployments.
+performance baselines against local/subprocess, Kind/Helm, and Azure private
+deployments. The Azure flow reads Terraform outputs from
+`deploy/azure/terraform`, deploys the sample workload into AKS, and runs `k6`
+inside the cluster so the measured path stays on the private ACI and VM
+network. The standard sequence is:
+
+- `eval "$(make azure-export-env)"`
+- `eval "$AKS_GET_CREDENTIALS_COMMAND"`
+- `make azure-deploy-workload`
+- `make perf-azure-http`
+- `make perf-azure-mitm`
+
 See [perf/README.md](perf/README.md) for setup, scenario descriptions, and run
 commands.
 
@@ -330,7 +341,10 @@ GOCACHE=$(pwd)/.cache/go-build GOMODCACHE=$(pwd)/.cache/mod go test ./...
 `deploy/helm` contains a minimal chart that renders the current bootstrap
 service. `deploy/fargate` contains starter ECS/NLB files aligned with the
 current runtime shape: proxy on port `3128`, metrics on `9090`, and config
-mounted at `/etc/aegis/aegis.yaml`.
+mounted at `/etc/aegis/aegis.yaml`. `deploy/azure` contains Terraform-backed
+cloud perf scaffolding plus repo-side helper scripts for exporting environment
+variables, deploying a proxied AKS sample workload, and running the Azure HTTP
+perf baseline.
 
 These deployment files are scaffolding only. They reflect the current runtime:
 plain HTTP requests are policy-enforced, while `CONNECT` now enforces policy

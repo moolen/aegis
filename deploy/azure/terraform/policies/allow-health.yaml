@@ -1,0 +1,19 @@
+apiVersion: aegis.io/v1alpha1
+kind: ProxyPolicy
+metadata:
+  name: azure-allow-nginx-health
+spec:
+  subjects:
+    kubernetes:
+      discoveryNames: ["aks-cloud"]
+      namespaces: ["aegis-cloud"]
+      matchLabels:
+        app: sample-client
+  egress:
+    - fqdn: "nginx.aegis.internal"
+      ports: [80, 443]
+      tls:
+        mode: mitm
+      http:
+        allowedMethods: ["GET"]
+        allowedPaths: ["/", "/healthz", "/static/allowed"]

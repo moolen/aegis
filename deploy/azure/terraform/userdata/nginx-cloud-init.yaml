@@ -1,0 +1,63 @@
+#cloud-config
+bootcmd:
+  - mkdir -p /var/www/html/static
+  - mkdir -p /etc/nginx/tls
+package_update: true
+packages:
+  - nginx
+write_files:
+  - path: /var/www/html/static/allowed
+    permissions: "0644"
+    content: |
+      aegis azure perf fixture
+  - path: /var/www/html/healthz
+    permissions: "0644"
+    content: |
+      ok
+  - path: /var/www/html/index.html
+    permissions: "0644"
+    content: |
+      root
+  - path: /etc/nginx/tls/nginx.crt
+    permissions: "0644"
+    content: |
+${nginx_tls_cert_pem}
+  - path: /etc/nginx/tls/nginx.key
+    permissions: "0600"
+    content: |
+${nginx_tls_key_pem}
+runcmd:
+  - rm -f /etc/nginx/sites-enabled/default
+  - rm -f /etc/nginx/sites-available/default
+  - |
+    cat >/etc/nginx/conf.d/aegis-perf.conf <<'EOF'
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name _;
+        root /var/www/html;
+        keepalive_requests 100000;
+
+        location / {
+            try_files $uri $uri/ =404;
+        }
+    }
+
+    server {
+        listen 443 ssl http2;
+        listen [::]:443 ssl http2;
+        server_name nginx.aegis.internal;
+        root /var/www/html;
+        keepalive_requests 100000;
+
+        ssl_certificate /etc/nginx/tls/nginx.crt;
+        ssl_certificate_key /etc/nginx/tls/nginx.key;
+
+        location / {
+            try_files $uri $uri/ =404;
+        }
+    }
+    EOF
+  - nginx -t
+  - systemctl enable nginx
+  - systemctl restart nginx

@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-client
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sample-client
+  template:
+    metadata:
+      labels:
+        app: sample-client
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:8.8.0
+          command: ["sleep", "infinity"]
+          env:
+            - name: HTTP_PROXY
+              value: "__HTTP_PROXY__"
+            - name: HTTPS_PROXY
+              value: "__HTTPS_PROXY__"
+            - name: NO_PROXY
+              value: "__NO_PROXY__"
