@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -8,11 +8,15 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"os/signal"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/moolen/aegis/internal/config"
 	"github.com/moolen/aegis/internal/identity"
@@ -21,6 +25,129 @@ import (
 	"github.com/moolen/aegis/internal/policydiscovery"
 	"github.com/moolen/aegis/internal/proxy"
 )
+
+type Options struct {
+	ConfigPath string
+	Logger     *slog.Logger
+}
+
+func Run(ctx context.Context, opts Options) error {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	cfg, err := loadRuntimeConfig(opts.ConfigPath)
+	if err != nil {
+		logger.Error("load config failed", "path", opts.ConfigPath, "error", err)
+		return err
+	}
+
+	registry := prometheus.NewRegistry()
+	metrics := appmetrics.New(registry)
+	drainTracker := proxy.NewDrainTracker(logger, metrics)
+	reloadableHandler := &reloadableProxyHandler{}
+	manager := newRuntimeManager(ctx, logger, metrics, opts.ConfigPath, reloadableHandler, drainTracker)
+	defer manager.Close()
+	if err := manager.LoadInitial(cfg); err != nil {
+		logger.Error("build runtime failed", "error", err)
+		return err
+	}
+
+	metricsHandler := appmetrics.NewServer(cfg.Metrics.Listen, registry, manager, nil).Handler()
+	var adminHandler http.Handler
+	if cfg.Admin.Enabled {
+		adminHandler = appmetrics.NewAdminServer(cfg.Admin.Listen, manager).Handler()
+	}
+	var pprofHandler http.Handler
+	if cfg.Pprof.Enabled {
+		pprofHandler = appmetrics.NewPprofServer(cfg.Pprof.Listen).Handler()
+	}
+
+	proxySrv, metricsSrv, adminSrv, pprofSrv := newHTTPServers(cfg, reloadableHandler, metricsHandler, adminHandler, pprofHandler)
+	proxyListener, metricsListener, adminListener, pprofListener, err := buildListeners(cfg, logger, metrics)
+	if err != nil {
+		logger.Error("build listeners failed", "error", err)
+		return err
+	}
+	defer proxyListener.Close()
+	defer metricsListener.Close()
+	if adminListener != nil {
+		defer adminListener.Close()
+	}
+	if pprofListener != nil {
+		defer pprofListener.Close()
+	}
+
+	errCh := make(chan error, 4)
+	reloadCh := make(chan os.Signal, 1)
+	signal.Notify(reloadCh, syscall.SIGHUP)
+	defer signal.Stop(reloadCh)
+
+	go serve(logger, "proxy", proxySrv, proxyListener, errCh)
+	go serve(logger, "metrics", metricsSrv, metricsListener, errCh)
+	if adminSrv != nil && adminListener != nil {
+		go serve(logger, "admin", adminSrv, adminListener, errCh)
+	}
+	if pprofSrv != nil && pprofListener != nil {
+		go serve(logger, "pprof", pprofSrv, pprofListener, errCh)
+	}
+
+	startAttrs := []any{"proxy_listen", cfg.Proxy.Listen, "metrics_listen", cfg.Metrics.Listen}
+	if cfg.Admin.Enabled {
+		startAttrs = append(startAttrs, "admin_listen", cfg.Admin.Listen)
+	}
+	if cfg.Pprof.Enabled {
+		startAttrs = append(startAttrs, "pprof_listen", cfg.Pprof.Listen)
+	}
+	logger.Info("aegis started", startAttrs...)
+
+	for {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				logger.Error("server exited with error", "error", err)
+				return err
+			}
+			return nil
+		case <-reloadCh:
+			if err := manager.ReloadFromFile(); err != nil {
+				logger.Error("reload config failed", "path", opts.ConfigPath, "error", err)
+				continue
+			}
+			logger.Info("config reloaded", "path", opts.ConfigPath)
+		case <-ctx.Done():
+			logger.Info("shutdown signal received")
+			goto shutdown
+		}
+	}
+
+shutdown:
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), manager.ShutdownGracePeriod())
+	defer cancel()
+
+	if err := shutdownHTTPServer(logger, "proxy", proxySrv, shutdownCtx); err != nil {
+		return err
+	}
+	if err := shutdownHTTPServer(logger, "metrics", metricsSrv, shutdownCtx); err != nil {
+		return err
+	}
+	if adminSrv != nil {
+		if err := shutdownHTTPServer(logger, "admin", adminSrv, shutdownCtx); err != nil {
+			return err
+		}
+	}
+	if pprofSrv != nil {
+		if err := shutdownHTTPServer(logger, "pprof", pprofSrv, shutdownCtx); err != nil {
+			return err
+		}
+	}
+
+	drainResult := drainTracker.Shutdown(shutdownCtx)
+	logger.Info("aegis shutdown complete", "result", drainResult, "grace_period", manager.ShutdownGracePeriod())
+	logger.Info("aegis stopped")
+	return nil
+}
 
 type reloadableProxyHandler struct {
 	current atomic.Value
@@ -67,19 +194,16 @@ type runtimeManager struct {
 }
 
 type runtimeGeneration struct {
-	id                    uint64
-	cfg                   config.Config
-	cancel                context.CancelFunc
-	mitm                  *proxy.MITMEngine
-	upstreamHTTP          *http.Transport
-	readyChecker          appmetrics.ReadyChecker
-	identityResolver      proxy.IdentityResolver
-	policyEngine          proxy.PolicyEngine
-	policyRuntime         *runtimePolicyEngine
-	mergedPolicies        []config.PolicyConfig
-	remoteSnapshots       map[string]policydiscovery.Snapshot
-	policyDiscoveryFrozen bool
-	policyDiscoveryRunner policyDiscoveryRunner
+	id               uint64
+	cfg              config.Config
+	cancel           context.CancelFunc
+	mitm             *proxy.MITMEngine
+	upstreamHTTP     *http.Transport
+	readyChecker     appmetrics.ReadyChecker
+	identityResolver proxy.IdentityResolver
+	policyEngine     proxy.PolicyEngine
+	policyRuntime    *runtimePolicyEngine
+	policyDiscovery  *runtimePolicyDiscovery
 }
 
 var errRuntimeManagerClosed = errors.New("runtime manager closed")
@@ -132,7 +256,7 @@ func (m *runtimeManager) Close() {
 	m.current = runtimeGeneration{}
 	m.mu.Unlock()
 
-	closeRuntimeGeneration(current)
+	logRuntimeGenerationCloseError(m.logger, "close active generation", closeRuntimeGeneration(current))
 	policydiscovery.DeleteSourceMetrics(m.metrics, current.cfg.Discovery.Policies)
 }
 
@@ -177,52 +301,36 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 		}
 	}()
 
-	mergedEngine, mergedPolicies, err := policydiscovery.CompileMergedEngine(cfg.Policies, carriedSnapshots)
-	if err != nil {
-		cancel()
-		if deps.UpstreamHTTPTransport != nil {
-			deps.UpstreamHTTPTransport.CloseIdleConnections()
-		}
-		return err
-	}
-
-	policyRuntime := newRuntimePolicyEngine(mergedEngine)
-	deps.PolicyEngine = policyRuntime
-
-	runner, err := m.buildPolicyDiscoveryRunner(generationCtx, cfg, generationID, policyRuntime)
-	if err != nil {
-		cancel()
-		if deps.UpstreamHTTPTransport != nil {
-			deps.UpstreamHTTPTransport.CloseIdleConnections()
-		}
-		return err
-	}
-
 	m.limiter.UpdateLimit(cfg.Proxy.ConnectionLimits.MaxConcurrentPerIdentity)
 
-	nextHandler := newProxyServer(deps).Handler()
-
 	nextGeneration := runtimeGeneration{
-		id:                    generationID,
-		cfg:                   cfg,
-		cancel:                cancel,
-		mitm:                  deps.MITM,
-		upstreamHTTP:          deps.UpstreamHTTPTransport,
-		identityResolver:      deps.IdentityResolver,
-		policyEngine:          policyRuntime,
-		policyRuntime:         policyRuntime,
-		mergedPolicies:        mergedPolicies,
-		remoteSnapshots:       carriedSnapshots,
-		policyDiscoveryRunner: runner,
+		id:               generationID,
+		cfg:              cfg,
+		cancel:           cancel,
+		mitm:             deps.MITM,
+		upstreamHTTP:     deps.UpstreamHTTPTransport,
+		identityResolver: deps.IdentityResolver,
 	}
+	if err := prepareRuntimePolicyDiscovery(generationCtx, m.logger, m.metrics, &nextGeneration, carriedSnapshots); err != nil {
+		logRuntimeGenerationCloseError(m.logger, "close failed next generation", closeRuntimeGeneration(nextGeneration))
+		return err
+	}
+	deps.PolicyEngine = nextGeneration.policyRuntime
+
+	nextHandler := newProxyServer(deps).Handler()
 	if checker, ok := deps.IdentityResolver.(appmetrics.ReadyChecker); ok {
 		nextGeneration.readyChecker = checker
+	}
+
+	if err := startRuntimePolicyDiscovery(nextGeneration.policyDiscovery); err != nil {
+		logRuntimeGenerationCloseError(m.logger, "close failed next generation after discovery start error", closeRuntimeGeneration(nextGeneration))
+		return err
 	}
 
 	m.mu.Lock()
 	if m.closed || generationID != m.nextGenerationID {
 		m.mu.Unlock()
-		closeRuntimeGeneration(nextGeneration)
+		logRuntimeGenerationCloseError(m.logger, "close canceled next generation", closeRuntimeGeneration(nextGeneration))
 		return context.Canceled
 	}
 	previous := m.current
@@ -232,59 +340,10 @@ func (m *runtimeManager) applyConfig(cfg config.Config, enforceImmutable bool) e
 	m.mu.Unlock()
 	releaseFrozen = false
 
-	if nextGeneration.policyDiscoveryRunner != nil {
-		if err := nextGeneration.policyDiscoveryRunner.Start(); err != nil {
-			m.mu.Lock()
-			if !m.closed && m.current.id == generationID {
-				m.current.policyDiscoveryRunner = nil
-			}
-			m.mu.Unlock()
-			_ = nextGeneration.policyDiscoveryRunner.Close()
-			closeRuntimeGeneration(previous)
-			policydiscovery.DeleteSourceMetrics(m.metrics, removedPolicyDiscoverySources(previous.cfg.Discovery.Policies, nextGeneration.cfg.Discovery.Policies))
-			return err
-		}
-	}
-
-	closeRuntimeGeneration(previous)
-	policydiscovery.DeleteSourceMetrics(m.metrics, removedPolicyDiscoverySources(previous.cfg.Discovery.Policies, nextGeneration.cfg.Discovery.Policies))
+	logRuntimeGenerationCloseError(m.logger, "retire previous generation", closeRuntimeGeneration(previous))
+	cleanupRemovedPolicyDiscoverySourceMetrics(m.metrics, previous.policyDiscovery, nextGeneration.policyDiscovery)
 	m.recordEnforcementStatus()
 
-	return nil
-}
-
-func (m *runtimeManager) buildPolicyDiscoveryRunner(ctx context.Context, cfg config.Config, generationID uint64, policyRuntime *runtimePolicyEngine) (policyDiscoveryRunner, error) {
-	if len(cfg.Discovery.Policies) == 0 {
-		return nil, nil
-	}
-
-	sources := append([]config.PolicyDiscoverySourceConfig(nil), cfg.Discovery.Policies...)
-	return newPolicyDiscoveryRunner(ctx, m.logger, m.metrics, sources, func(sourceName string, snapshot policydiscovery.Snapshot) error {
-		return m.applyRemotePolicySnapshot(generationID, policyRuntime, cfg.Policies, sourceName, snapshot)
-	})
-}
-
-func (m *runtimeManager) applyRemotePolicySnapshot(generationID uint64, policyRuntime *runtimePolicyEngine, staticPolicies []config.PolicyConfig, sourceName string, snapshot policydiscovery.Snapshot) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed || m.current.id != generationID || m.current.policyRuntime != policyRuntime {
-		return context.Canceled
-	}
-	if m.current.policyDiscoveryFrozen {
-		return context.Canceled
-	}
-
-	nextSnapshots := policydiscovery.ReplaceSourceSnapshot(m.current.remoteSnapshots, sourceName, snapshot)
-	engine, mergedPolicies, err := policydiscovery.CompileMergedEngine(staticPolicies, nextSnapshots)
-	if err != nil {
-		return err
-	}
-
-	policyRuntime.Update(engine)
-	m.current.policyEngine = policyRuntime
-	m.current.remoteSnapshots = nextSnapshots
-	m.current.mergedPolicies = mergedPolicies
 	return nil
 }
 
@@ -300,8 +359,12 @@ func (m *runtimeManager) freezeRemotePolicyStateForReload(generationID uint64, n
 		return 0, make(map[string]policydiscovery.Snapshot), nil
 	}
 
-	m.current.policyDiscoveryFrozen = true
-	return m.current.id, carryForwardSnapshots(m.current.remoteSnapshots, m.current.cfg.Discovery.Policies, nextSources), nil
+	if m.current.policyDiscovery == nil {
+		return m.current.id, make(map[string]policydiscovery.Snapshot), nil
+	}
+
+	freezeRuntimePolicyDiscovery(m.current.policyDiscovery)
+	return m.current.id, carryForwardRuntimePolicySnapshots(m.current.policyDiscovery, nextSources), nil
 }
 
 func (m *runtimeManager) unfreezeRemotePolicyState(generationID uint64) {
@@ -315,58 +378,11 @@ func (m *runtimeManager) unfreezeRemotePolicyState(generationID uint64) {
 	if m.closed || m.current.id != generationID {
 		return
 	}
-	m.current.policyDiscoveryFrozen = false
-}
 
-func carryForwardSnapshots(current map[string]policydiscovery.Snapshot, previousSources []config.PolicyDiscoverySourceConfig, nextSources []config.PolicyDiscoverySourceConfig) map[string]policydiscovery.Snapshot {
-	if len(current) == 0 || len(nextSources) == 0 {
-		return make(map[string]policydiscovery.Snapshot)
+	if m.current.policyDiscovery == nil {
+		return
 	}
-	allowed := make(map[string]struct{}, len(nextSources))
-	for _, source := range nextSources {
-		allowed[policyDiscoverySourceIdentity(source)] = struct{}{}
-	}
-	previousByName := make(map[string]config.PolicyDiscoverySourceConfig, len(previousSources))
-	for _, source := range previousSources {
-		previousByName[strings.TrimSpace(source.Name)] = source
-	}
-	carried := make(map[string]policydiscovery.Snapshot, len(current))
-	for sourceName, snapshot := range current {
-		sourceCfg, ok := previousByName[strings.TrimSpace(sourceName)]
-		if !ok {
-			sourceCfg = snapshot.Source
-		}
-		if _, ok := allowed[policyDiscoverySourceIdentity(sourceCfg)]; ok {
-			carried[sourceName] = snapshot
-		}
-	}
-	return carried
-}
-
-func removedPolicyDiscoverySources(previous []config.PolicyDiscoverySourceConfig, next []config.PolicyDiscoverySourceConfig) []config.PolicyDiscoverySourceConfig {
-	if len(previous) == 0 {
-		return nil
-	}
-	nextByIdentity := make(map[string]struct{}, len(next))
-	for _, source := range next {
-		nextByIdentity[policyDiscoverySourceIdentity(source)] = struct{}{}
-	}
-	removed := make([]config.PolicyDiscoverySourceConfig, 0, len(previous))
-	for _, source := range previous {
-		if _, ok := nextByIdentity[policyDiscoverySourceIdentity(source)]; ok {
-			continue
-		}
-		removed = append(removed, source)
-	}
-	return removed
-}
-
-func policyDiscoverySourceIdentity(source config.PolicyDiscoverySourceConfig) string {
-	return strings.TrimSpace(source.Name) + "\x00" +
-		strings.ToLower(strings.TrimSpace(source.Provider)) + "\x00" +
-		strings.TrimSpace(source.Bucket) + "\x00" +
-		strings.TrimSpace(source.Prefix) + "\x00" +
-		strings.ToLower(strings.TrimSpace(source.Auth.Mode))
+	unfreezeRuntimePolicyDiscovery(m.current.policyDiscovery)
 }
 
 func (m *runtimeManager) ShutdownGracePeriod() time.Duration {
@@ -514,68 +530,41 @@ func (m *runtimeManager) Simulate(req appmetrics.SimulationRequest) (appmetrics.
 	resp.Identity = identityRecordFromIdentity(id, id.Provider, id.Source)
 	resp.UnknownIdentity = isUnknownIdentity(id)
 
-	var decision *policy.Decision
+	var outcome policy.Outcome
+	policyInput := policy.EvaluateInput{
+		Identity:              id,
+		SourceIP:              sourceAddr,
+		FQDN:                  req.FQDN,
+		Port:                  req.Port,
+		Method:                req.Method,
+		Path:                  req.Path,
+		EnforcementMode:       status.Effective,
+		UnknownIdentityPolicy: resp.UnknownIdentityPolicy,
+	}
 	switch req.Protocol {
 	case "connect":
-		if generation.policyEngine != nil {
-			decision = generation.policyEngine.EvaluateConnect(id, sourceAddr, req.FQDN, req.Port)
-		}
+		outcome = policy.EvaluateConnectOutcome(generation.policyEngine, policyInput)
 	case "http", "":
-		if generation.policyEngine != nil {
-			decision = generation.policyEngine.Evaluate(id, sourceAddr, req.FQDN, req.Port, req.Method, req.Path)
-		}
+		outcome = policy.EvaluateHTTPOutcome(generation.policyEngine, policyInput)
 	default:
 		return appmetrics.SimulationResponse{}, fmt.Errorf("protocol must be http or connect")
 	}
-	if decision != nil {
+	if outcome.Policy != "" || outcome.Rule != "" || outcome.RequestedTLSMode != "" || outcome.PolicyBypass || outcome.PolicyEnforcement != "" || outcome.Reason != "" {
 		resp.Decision = &appmetrics.SimulationDecision{
-			Allowed:           decision.Allowed,
-			Policy:            decision.Policy,
-			Rule:              decision.Rule,
-			TLSMode:           decision.TLSMode,
-			Bypass:            decision.Bypass,
-			PolicyEnforcement: decision.PolicyEnforcement,
+			Allowed:           outcome.Allowed,
+			Policy:            outcome.Policy,
+			Rule:              outcome.Rule,
+			TLSMode:           outcome.RequestedTLSMode,
+			Bypass:            outcome.PolicyBypass,
+			PolicyEnforcement: outcome.PolicyEnforcement,
 		}
 	}
 
-	if resp.UnknownIdentity && resp.UnknownIdentityPolicy == config.UnknownIdentityDeny && decision == nil {
-		if status.Effective == config.EnforcementAudit {
-			resp.Action = "allow"
-			resp.Reason = "audit_unknown_identity"
-			resp.WouldAction = "would_deny"
-			resp.WouldReason = "unknown_identity"
-			resp.WouldBlock = true
-			return resp, nil
-		}
-		resp.Action = "deny"
-		resp.Reason = "unknown_identity"
-		return resp, nil
-	}
-
-	shadow := status.Effective == config.EnforcementAudit || (decision != nil && (decision.Bypass || decision.PolicyEnforcement == config.EnforcementAudit))
-	if shadow {
-		resp.Action = "allow"
-		if decision == nil || !decision.Allowed {
-			resp.Reason = "audit_policy_denied"
-			resp.WouldAction = "would_deny"
-			resp.WouldReason = "policy_denied"
-			resp.WouldBlock = true
-		} else {
-			resp.Reason = "audit_policy_allowed"
-			resp.WouldAction = "would_allow"
-			resp.WouldReason = "policy_allowed"
-		}
-		return resp, nil
-	}
-
-	if decision == nil || !decision.Allowed {
-		resp.Action = "deny"
-		resp.Reason = "policy_denied"
-		return resp, nil
-	}
-
-	resp.Action = "allow"
-	resp.Reason = "policy_allowed"
+	resp.Action = outcome.Action
+	resp.Reason = outcome.Reason
+	resp.WouldAction = outcome.Audit.WouldAction
+	resp.WouldReason = outcome.Audit.WouldReason
+	resp.WouldBlock = outcome.Audit.WouldBlock
 	return resp, nil
 }
 
@@ -763,16 +752,23 @@ func (e *runtimePolicyEngine) EvaluateConnect(id *identity.Identity, sourceIP ne
 	return current.EvaluateConnect(id, sourceIP, fqdn, port)
 }
 
-func closeRuntimeGeneration(generation runtimeGeneration) {
+func closeRuntimeGeneration(generation runtimeGeneration) error {
+	var err error
 	if generation.cancel != nil {
 		generation.cancel()
 	}
-	if generation.policyDiscoveryRunner != nil {
-		_ = generation.policyDiscoveryRunner.Close()
-	}
+	err = errors.Join(err, closeRuntimePolicyDiscovery(generation.policyDiscovery))
 	if generation.upstreamHTTP != nil {
 		generation.upstreamHTTP.CloseIdleConnections()
 	}
+	return err
+}
+
+func logRuntimeGenerationCloseError(logger *slog.Logger, stage string, err error) {
+	if err == nil || logger == nil {
+		return
+	}
+	logger.Error("runtime generation cleanup failed", "stage", stage, "error", err)
 }
 
 type noopPolicyDiscoveryRunner struct{}

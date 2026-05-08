@@ -212,6 +212,336 @@ func TestAuditLogLevelUsesWarnForAuditBlock(t *testing.T) {
 	}
 }
 
+func TestEvaluateRequestFlowDeniesUnknownIdentityWhenConfigured(t *testing.T) {
+	server := NewServer(Dependencies{
+		UnknownIdentityPolicy: "deny",
+		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/allowed", nil)
+
+	flow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "http",
+		Request:  req,
+	})
+	if err != nil {
+		t.Fatalf("evaluateRequestFlow() error = %v", err)
+	}
+
+	if flow.action != "deny" {
+		t.Fatalf("action = %q, want %q", flow.action, "deny")
+	}
+	if flow.reason != "unknown_identity" {
+		t.Fatalf("reason = %q, want %q", flow.reason, "unknown_identity")
+	}
+	if flow.host != "example.com" {
+		t.Fatalf("host = %q, want %q", flow.host, "example.com")
+	}
+	if flow.port != 80 {
+		t.Fatalf("port = %d, want %d", flow.port, 80)
+	}
+	if flow.identity == nil || !isUnknownIdentity(flow.identity) {
+		t.Fatalf("identity = %#v, want unknown identity", flow.identity)
+	}
+}
+
+func TestEvaluateRequestFlowReturnsAuditWouldDenyForHTTP(t *testing.T) {
+	server := NewServer(Dependencies{
+		EnforcementMode: "audit",
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		},
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				return &policy.Decision{Policy: "allow-web"}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/blocked", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+
+	flow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "http",
+		Request:  req,
+	})
+	if err != nil {
+		t.Fatalf("evaluateRequestFlow() error = %v", err)
+	}
+	defer flow.release()
+
+	if flow.action != "allow" {
+		t.Fatalf("action = %q, want %q", flow.action, "allow")
+	}
+	if flow.reason != "audit_policy_denied" {
+		t.Fatalf("reason = %q, want %q", flow.reason, "audit_policy_denied")
+	}
+	if !flow.audit.Enabled {
+		t.Fatal("audit.Enabled = false, want true")
+	}
+	if !flow.audit.WouldBlock {
+		t.Fatal("audit.WouldBlock = false, want true")
+	}
+	if flow.audit.WouldReason != "policy_denied" {
+		t.Fatalf("audit.WouldReason = %q, want %q", flow.audit.WouldReason, "policy_denied")
+	}
+}
+
+func TestEvaluateRequestFlowResolvesConnectModeForMITM(t *testing.T) {
+	server := NewServer(Dependencies{
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: &policyEngineStub{
+			evaluateConnect: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int) *policy.Decision {
+				return &policy.Decision{Allowed: true, Policy: "allow-connect", TLSMode: "mitm"}
+			},
+		},
+		MITM:   &MITMEngine{},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid", nil)
+	req.Host = "tunnel.internal:443"
+	req.RemoteAddr = "127.0.0.1:1234"
+
+	flow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "connect",
+		Request:  req,
+	})
+	if err != nil {
+		t.Fatalf("evaluateRequestFlow() error = %v", err)
+	}
+	defer flow.release()
+
+	if flow.action != "allow" {
+		t.Fatalf("action = %q, want %q", flow.action, "allow")
+	}
+	if flow.mode != "mitm" {
+		t.Fatalf("mode = %q, want %q", flow.mode, "mitm")
+	}
+	if flow.reason != "policy_allowed" {
+		t.Fatalf("reason = %q, want %q", flow.reason, "policy_allowed")
+	}
+}
+
+func TestEvaluateRequestFlowRejectsConnectionLimit(t *testing.T) {
+	connectionLimiter := NewConnectionLimiter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	connectionLimiter.UpdateLimit(1)
+
+	server := NewServer(Dependencies{
+		ConnectionLimiter: connectionLimiter,
+		IdentityResolver: staticIdentityResolver{
+			identity: &identity.Identity{Name: "default/web", Labels: map[string]string{"app": "web"}},
+		},
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				return &policy.Decision{Allowed: true, Policy: "allow-web", TLSMode: "mitm"}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/allowed", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+
+	firstFlow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "http",
+		Request:  req,
+	})
+	if err != nil {
+		t.Fatalf("first evaluateRequestFlow() error = %v", err)
+	}
+	defer firstFlow.release()
+
+	secondFlow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "http",
+		Request:  req.Clone(req.Context()),
+	})
+	if err != nil {
+		t.Fatalf("second evaluateRequestFlow() error = %v", err)
+	}
+
+	if secondFlow.action != "deny" {
+		t.Fatalf("action = %q, want %q", secondFlow.action, "deny")
+	}
+	if secondFlow.reason != "connection_limit_exceeded" {
+		t.Fatalf("reason = %q, want %q", secondFlow.reason, "connection_limit_exceeded")
+	}
+	if secondFlow.limitErr == nil {
+		t.Fatal("limitErr = nil, want connection limit error")
+	}
+}
+
+func TestEvaluateRequestFlowReturnsAuditWouldDenyForMITMHTTP(t *testing.T) {
+	server := NewServer(Dependencies{
+		EnforcementMode: "audit",
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				return &policy.Decision{Policy: "allow-web"}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://proxy.invalid/blocked", nil)
+	flow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "mitm_http",
+		Request:  req,
+		Target:   &requestFlowTarget{Host: "tunnel.internal", Port: 443},
+		Identity: &identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		SourceIP: netip.MustParseAddr("127.0.0.1"),
+	})
+	if err != nil {
+		t.Fatalf("evaluateRequestFlow() error = %v", err)
+	}
+	defer flow.release()
+
+	if flow.action != "allow" {
+		t.Fatalf("action = %q, want %q", flow.action, "allow")
+	}
+	if flow.reason != "audit_policy_denied" {
+		t.Fatalf("reason = %q, want %q", flow.reason, "audit_policy_denied")
+	}
+	if !flow.audit.Enabled {
+		t.Fatal("audit.Enabled = false, want true")
+	}
+	if !flow.audit.WouldBlock {
+		t.Fatal("audit.WouldBlock = false, want true")
+	}
+	if flow.audit.WouldReason != "policy_denied" {
+		t.Fatalf("audit.WouldReason = %q, want %q", flow.audit.WouldReason, "policy_denied")
+	}
+}
+
+func TestEvaluateRequestFlowReturnsBypassWouldDenyForMITMHTTP(t *testing.T) {
+	server := NewServer(Dependencies{
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				return &policy.Decision{Policy: "allow-web", Bypass: true}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://proxy.invalid/blocked", nil)
+	flow, err := server.evaluateRequestFlow(requestFlowInput{
+		Protocol: "mitm_http",
+		Request:  req,
+		Target:   &requestFlowTarget{Host: "tunnel.internal", Port: 443},
+		Identity: &identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		SourceIP: netip.MustParseAddr("127.0.0.1"),
+	})
+	if err != nil {
+		t.Fatalf("evaluateRequestFlow() error = %v", err)
+	}
+	defer flow.release()
+
+	if flow.action != "allow" {
+		t.Fatalf("action = %q, want %q", flow.action, "allow")
+	}
+	if flow.reason != "audit_policy_denied" {
+		t.Fatalf("reason = %q, want %q", flow.reason, "audit_policy_denied")
+	}
+	if !flow.audit.Enabled {
+		t.Fatal("audit.Enabled = false, want true")
+	}
+	if !flow.audit.WouldBlock {
+		t.Fatal("audit.WouldBlock = false, want true")
+	}
+	if !flow.audit.PolicyBypass {
+		t.Fatal("audit.PolicyBypass = false, want true")
+	}
+}
+
+func TestHandleMITMHTTPRequestRecordsDeniedDecision(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	server := NewServer(Dependencies{
+		Metrics: metrics.New(reg),
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				return &policy.Decision{Policy: "deny-web"}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://proxy.invalid/blocked", nil)
+	resp := httptest.NewRecorder()
+
+	server.handleMITMHTTPRequest(
+		resp,
+		req,
+		&identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		netip.MustParseAddr("127.0.0.1"),
+		"tunnel.internal",
+		443,
+	)
+
+	result := resp.Result()
+	defer result.Body.Close()
+
+	if result.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusForbidden)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "mitm_http",
+		"action":   "deny",
+		"policy":   "deny-web",
+		"reason":   "policy_denied",
+	}); got != 1 {
+		t.Fatalf("mitm_http deny decision metric = %v, want 1", got)
+	}
+}
+
+func TestHandleMITMHTTPRequestRecordsAllowedDecisionBeforeForwarding(t *testing.T) {
+	closedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	closedPort := mustPort(t, closedListener.Addr().String())
+	closedListener.Close()
+
+	reg := prometheus.NewRegistry()
+	server := NewServer(Dependencies{
+		Metrics: metrics.New(reg),
+		PolicyEngine: &policyEngineStub{
+			evaluate: func(id *identity.Identity, sourceIP netip.Addr, fqdn string, port int, method string, reqPath string) *policy.Decision {
+				return &policy.Decision{Allowed: true, Policy: "allow-web"}
+			},
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://proxy.invalid/allowed", nil)
+	resp := httptest.NewRecorder()
+
+	server.handleMITMHTTPRequest(
+		resp,
+		req,
+		&identity.Identity{Name: "default/jobs", Labels: map[string]string{"app": "jobs"}},
+		netip.MustParseAddr("127.0.0.1"),
+		"127.0.0.1",
+		closedPort,
+	)
+
+	result := resp.Result()
+	defer result.Body.Close()
+
+	if result.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusBadGateway)
+	}
+	if got := counterValue(t, reg, "aegis_request_decisions_total", map[string]string{
+		"protocol": "mitm_http",
+		"action":   "allow",
+		"policy":   "allow-web",
+		"reason":   "policy_allowed",
+	}); got != 1 {
+		t.Fatalf("mitm_http allow decision metric = %v, want 1", got)
+	}
+}
+
 func TestNewUpstreamHTTPTransportSupportsHTTP2(t *testing.T) {
 	transport := NewUpstreamHTTPTransport()
 	if transport == nil {
@@ -439,6 +769,42 @@ func TestProxySanitizesHTTPDNSErrors(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if got := string(body); !strings.Contains(got, "upstream name resolution failed") {
+		t.Fatalf("body = %q, want sanitized dns error", got)
+	} else if strings.Contains(got, "10.0.0.53") {
+		t.Fatalf("body = %q, must not leak resolver details", got)
+	}
+}
+
+func TestHTTPFlowTranslatesDNSFailure(t *testing.T) {
+	server := NewServer(Dependencies{
+		Resolver: errorResolver{
+			err: fmt.Errorf("lookup example.com on 10.0.0.53:53: no such host"),
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	resp := httptest.NewRecorder()
+
+	server.forwardHTTP(resp, req, &requestFlow{
+		protocol: "http",
+		host:     "example.com",
+		port:     80,
+		action:   "allow",
+		release:  func() {},
+	})
+
+	result := resp.Result()
+	defer result.Body.Close()
+
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if result.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusBadGateway)
 	}
 	if got := string(body); !strings.Contains(got, "upstream name resolution failed") {
 		t.Fatalf("body = %q, want sanitized dns error", got)
@@ -2168,7 +2534,7 @@ func TestProxyConnectAuditModeBypassesMissingSNI(t *testing.T) {
 	<-done
 }
 
-func TestProxyConnectBlocksSNIMismatch(t *testing.T) {
+func TestConnectFlowBlocksSNIMismatch(t *testing.T) {
 	clientHello := mustClientHello(t, "other.internal")
 
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")

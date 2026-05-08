@@ -117,6 +117,64 @@ func TestProxyConnectMITMAllowsHTTPRequest(t *testing.T) {
 	}
 }
 
+func TestMITMFlowForwardsAllowedRequest(t *testing.T) {
+	ca := newMITMTestCA(t)
+
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %q, want %q", r.Method, http.MethodGet)
+		}
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/allowed")
+		}
+		if r.Host != "tunnel.internal" {
+			t.Fatalf("host = %q, want %q", r.Host, "tunnel.internal")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{ca.issueServerCertificate(t, "tunnel.internal")},
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	server := NewServer(Dependencies{
+		Resolver: staticResolver{
+			lookup: map[string][]net.IP{"tunnel.internal": {net.ParseIP("127.0.0.1")}},
+		},
+		UpstreamTLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    ca.roots,
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://proxy.invalid/allowed", nil)
+	req.Host = "tunnel.internal"
+	resp := httptest.NewRecorder()
+
+	server.forwardMITMRequest(resp, req, &requestFlow{
+		protocol: "mitm_http",
+		host:     "tunnel.internal",
+		port:     mustPort(t, upstream.Listener.Addr().String()),
+		action:   "allow",
+		release:  func() {},
+	})
+
+	result := resp.Result()
+	defer result.Body.Close()
+
+	if result.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusNoContent)
+	}
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("upstreamHits = %d, want 1", upstreamHits.Load())
+	}
+}
+
 func TestProxyConnectMITMReusesUpstreamConnectionAcrossClientTunnels(t *testing.T) {
 	ca := newMITMTestCA(t)
 	mitmEngine, err := NewMITMEngine(ca.certificate, slog.New(slog.NewTextHandler(io.Discard, nil)))
